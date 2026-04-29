@@ -329,6 +329,29 @@ describe("woo core", () => {
     expect(world.getProp("delay_1", "feedback")).toBe(0.35);
     expect(world.replay("the_dubspace", 1, 10)).toEqual([]);
   });
+
+  it("allows wizard force-direct repair and records the bypass", () => {
+    const { world, actor } = authedWorld();
+    const nonWizard = world.directCall("force-denied", actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.44], { forceDirect: true });
+    expect(nonWizard.op).toBe("error");
+    if (nonWizard.op === "error") expect(nonWizard.error.code).toBe("E_PERM");
+
+    const wizard = world.directCall("force-wizard", "$wiz", "the_dubspace", "set_control", ["delay_1", "feedback", 0.44], {
+      forceDirect: true,
+      forceReason: "test repair"
+    });
+    expect(wizard.op).toBe("result");
+    if (wizard.op === "result") {
+      expect(wizard.observations[0]).toMatchObject({ type: "wizard_action", action: "force_direct", actor: "$wiz", target: "the_dubspace", verb: "set_control" });
+      expect(wizard.observations[1]).toMatchObject({ type: "control_changed", target: "delay_1", name: "feedback", value: 0.44 });
+    }
+    expect(world.getProp("delay_1", "feedback")).toBe(0.44);
+    expect(world.replay("the_dubspace", 1, 10)).toEqual([]);
+    const audit = world.getProp("$system", "wizard_actions");
+    expect(audit).toEqual([
+      expect.objectContaining({ actor: "$wiz", action: "force_direct", target: "the_dubspace", verb: "set_control", reason: "test repair" })
+    ]);
+  });
 });
 
 describe("taskspace", () => {
@@ -362,7 +385,7 @@ describe("taskspace", () => {
     }
   });
 
-  it("rejects claimed-task status updates except by assignee or wizard", () => {
+  it("lets anyone close claimed tasks while keeping other claimed status updates gated", () => {
     const world = createWorld();
     const assignee = world.auth("guest:assignee");
     const other = world.auth("guest:other");
@@ -378,11 +401,14 @@ describe("taskspace", () => {
     const create = world.call("create", assignee.id, "the_taskspace", message(assignee.actor, "the_taskspace", "create_task", ["Wizard check", ""]));
     const task = create.op === "applied" ? (create.observations[0].task as string) : "";
     world.call("claim", assignee.id, "the_taskspace", message(assignee.actor, task, "claim", []));
-    const rejected = world.call("other-status", other.id, "the_taskspace", message(other.actor, task, "set_status", ["done"]));
+    const rejected = world.call("other-status", other.id, "the_taskspace", message(other.actor, task, "set_status", ["blocked"]));
     expect(world.getProp(task, "status")).toBe("claimed");
     if (rejected.op === "applied") expect(rejected.observations[0].code).toBe("E_PERM");
-    const wizard = world.call("wiz-status", "wiz-session", "the_taskspace", message("$wiz", task, "set_status", ["done"]));
+    const closed = world.call("other-done", other.id, "the_taskspace", message(other.actor, task, "set_status", ["done"]));
     expect(world.getProp(task, "status")).toBe("done");
+    if (closed.op === "applied") expect(closed.observations[0].type).toBe("status_changed");
+    const wizard = world.call("wiz-status", "wiz-session", "the_taskspace", message("$wiz", task, "set_status", ["blocked"]));
+    expect(world.getProp(task, "status")).toBe("blocked");
     if (wizard.op === "applied") expect(wizard.observations[0].type).toBe("status_changed");
   });
 });

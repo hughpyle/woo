@@ -68,6 +68,11 @@ export type ParkedTaskRun = {
   error?: ErrorValue;
 };
 
+export type DirectCallOptions = {
+  forceDirect?: boolean;
+  forceReason?: string;
+};
+
 const MAX_CALL_DEPTH = 128;
 
 export class WooWorld {
@@ -390,19 +395,24 @@ export class WooWorld {
     return frame;
   }
 
-  directCall(frameId: string | undefined, actor: ObjRef, target: ObjRef, verbName: string, args: WooValue[]): DirectResultFrame | ErrorFrame {
+  directCall(frameId: string | undefined, actor: ObjRef, target: ObjRef, verbName: string, args: WooValue[], options: DirectCallOptions = {}): DirectResultFrame | ErrorFrame {
     try {
       assertObj(actor);
       assertObj(target);
       assertString(verbName);
       if (!Array.isArray(args)) throw wooError("E_INVARG", "args must be a list");
       const { verb } = this.resolveVerb(target, verbName);
-      if (verb.direct_callable !== true) {
+      const forceDirect = options.forceDirect === true && verb.direct_callable !== true;
+      const wizard = this.isWizard(actor);
+      if (verb.direct_callable !== true && !forceDirect) {
         throw wooError("E_DIRECT_DENIED", `direct call denied for ${target}:${verbName}`, { target, verb: verbName });
       }
+      if (forceDirect && !wizard) throw wooError("E_PERM", "only wizards may force direct calls", { actor, target, verb: verbName });
+      if (forceDirect) this.recordWizardAction(actor, "force_direct", { target, verb: verbName, reason: options.forceReason ?? null });
       const audience = this.directAudience(target);
-      if (audience && verb.skip_presence_check !== true) this.authorizePresence(actor, audience);
+      if (audience && verb.skip_presence_check !== true && !forceDirect) this.authorizePresence(actor, audience);
       const observations: Observation[] = [];
+      if (forceDirect) observations.push({ type: "wizard_action", action: "force_direct", actor, target, verb: verbName, source: target });
       const message: Message = { actor, target, verb: verbName, args };
       let result: WooValue = null;
       let mutated = false;
@@ -520,7 +530,7 @@ export class WooWorld {
         }
       }
 
-      const frame = { op: "applied" as const, id, space: spaceRef, seq, message, observations };
+      const frame = { op: "applied" as const, id, space: spaceRef, seq, ts: logEntry.ts, message, observations };
       this.persist(true);
       return frame;
     });
@@ -1049,6 +1059,12 @@ export class WooWorld {
     return Boolean(this.object(actor).flags.wizard);
   }
 
+  private recordWizardAction(actor: ObjRef, action: string, details: Record<string, WooValue>): void {
+    const raw = this.propOrNull("$system", "wizard_actions");
+    const actions = Array.isArray(raw) ? raw : [];
+    this.setProp("$system", "wizard_actions", [...actions, { ts: Date.now(), actor, action, ...details }]);
+  }
+
   private bumpFeaturesVersion(objRef: ObjRef): void {
     const current = Number(this.getProp(objRef, "features_version") ?? 0);
     this.setProp(objRef, "features_version", Number.isFinite(current) ? current + 1 : 1);
@@ -1346,7 +1362,7 @@ export class WooWorld {
         }
       }
 
-      const frame = { op: "applied" as const, space: space.id, seq, message, observations };
+      const frame = { op: "applied" as const, space: space.id, seq, ts: logEntry.ts, message, observations };
       this.persist(true);
       return frame;
     });
@@ -1623,7 +1639,7 @@ export class WooWorld {
       const allowed = new Set(["open", "claimed", "in_progress", "blocked", "done"]);
       if (!allowed.has(status)) throw wooError("E_INVARG", "invalid task status", status);
       const assignee = this.getProp(ctx.thisObj, "assignee");
-      if (assignee !== null && assignee !== ctx.actor && !this.object(ctx.actor).flags.wizard) {
+      if (status !== "done" && assignee !== null && assignee !== ctx.actor && !this.object(ctx.actor).flags.wizard) {
         throw wooError("E_PERM", "only assignee or wizard can set status");
       }
       const from = assertString(this.getProp(ctx.thisObj, "status"));

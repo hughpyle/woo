@@ -5,7 +5,19 @@ import { WebSocket, WebSocketServer } from "ws";
 import { compileVerb, definePropertyVersioned, installVerb } from "../core/authoring";
 import { createWorld } from "../core/bootstrap";
 import { normalizeError, type ParkedTaskRun } from "../core/world";
-import { wooError, type AppliedFrame, type DirectResultFrame, type LiveEventFrame, type Message, type ObjRef } from "../core/types";
+import {
+  wooError,
+  type AppliedFrame,
+  type DirectResultFrame,
+  type ErrorValue,
+  type LiveEventFrame,
+  type Message,
+  type ObjRef,
+  type Observation,
+  type Session,
+  type SpaceLogEntry,
+  type WooValue
+} from "../core/types";
 import { SQLiteWorldRepository } from "./sqlite-repository";
 
 // Local dev server only: HTTP authoring endpoints are intentionally
@@ -14,7 +26,10 @@ const repository = new SQLiteWorldRepository(process.env.WOO_DB ?? ".woo/dev.sql
 const world = createWorld({ repository });
 type AttachedSocket = { sessionId: string; actor: string; socketId: string };
 const sockets = new Map<WebSocket, AttachedSocket>();
+type RestStream = { id: string; res: http.ServerResponse; actor: ObjRef; target: ObjRef; scope: "space" | "actor" };
+const restStreams = new Set<RestStream>();
 let socketCounter = 1;
+let streamCounter = 1;
 
 const vite = await createViteServer({
   server: { middlewareMode: true },
@@ -24,6 +39,7 @@ const vite = await createViteServer({
 const server = http.createServer(async (req, res) => {
   const url = parse(req.url ?? "", true);
   try {
+    if (await handleRestApi(req, res, url.pathname ?? "")) return;
     if (req.method === "GET" && url.pathname === "/api/state") {
       return json(res, world.state());
     }
@@ -206,6 +222,7 @@ function broadcastApplied(frame: AppliedFrame, originator?: WebSocket): void {
     const visibleFrame = ws === originator ? frame : { ...frame, id: undefined };
     ws.send(JSON.stringify(visibleFrame));
   }
+  broadcastAppliedSse(frame);
 }
 
 function broadcastTaskResult(result: ParkedTaskRun): void {
@@ -239,12 +256,278 @@ function broadcastLiveEvent(frame: LiveEventFrame, audience: ObjRef): void {
     }
     ws.send(data);
   }
+  broadcastLiveEventSse(frame, audience);
+}
+
+function broadcastAppliedSse(frame: AppliedFrame): void {
+  for (const stream of Array.from(restStreams)) {
+    if (stream.scope === "space") {
+      if (stream.target !== frame.space || !world.hasPresence(stream.actor, frame.space)) continue;
+    } else if (!world.hasPresence(stream.actor, frame.space)) {
+      continue;
+    }
+    writeSse(stream, "applied", frame, `${frame.space}:${frame.seq}`);
+  }
+}
+
+function broadcastLiveEventSse(frame: LiveEventFrame, audience: ObjRef): void {
+  const directedTo = typeof frame.observation.to === "string" ? frame.observation.to : null;
+  const directedFrom = typeof frame.observation.from === "string" ? frame.observation.from : null;
+  for (const stream of Array.from(restStreams)) {
+    if (directedTo || directedFrom) {
+      if (stream.actor !== directedTo && stream.actor !== directedFrom) continue;
+    } else if (stream.scope === "space") {
+      if (stream.target !== audience || !world.hasPresence(stream.actor, audience)) continue;
+    } else if (!world.hasPresence(stream.actor, audience)) {
+      continue;
+    }
+    writeSse(stream, "event", frame);
+  }
 }
 
 function taskResultSpace(result: ParkedTaskRun): ObjRef {
   const serialized = result.task.serialized;
   if (serialized && typeof serialized === "object" && !Array.isArray(serialized) && typeof serialized.space === "string") return serialized.space;
   return result.task.parked_on;
+}
+
+async function handleRestApi(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<boolean> {
+  if (req.method === "POST" && pathname === "/api/auth") {
+    try {
+      const body = await readJson(req);
+      const token = String(body.token ?? "");
+      if (!token.startsWith("guest:") && !token.startsWith("session:")) {
+        throw wooError("E_INVARG", "v1-core REST accepts guest: and session: tokens");
+      }
+      const session = world.auth(token);
+      json(res, { actor: session.actor, session: session.id });
+      return true;
+    } catch (err) {
+      return restError(res, err);
+    }
+  }
+
+  const route = objectRoute(pathname);
+  if (!route) return false;
+
+  try {
+    const session = requireRestSession(req);
+    const target = resolveRestObject(route.id, session);
+
+    if (req.method === "GET" && route.rest.length === 0) {
+      json(res, world.describe(target));
+      return true;
+    }
+
+    if (req.method === "GET" && route.rest.length === 2 && route.rest[0] === "properties") {
+      const name = route.rest[1];
+      const value = world.getProp(target, name);
+      const info = restPropertyInfo(target, name);
+      const ownVersion = world.object(target).propertyVersions.get(name);
+      json(res, { ...info, value, version: ownVersion ?? info.version });
+      return true;
+    }
+
+    if (req.method === "POST" && route.rest.length === 2 && route.rest[0] === "calls") {
+      const body = await readJson(req);
+      const verb = route.rest[1];
+      const args = Array.isArray(body.args) ? (body.args as WooValue[]) : [];
+      const actor = resolveRestActor(req, body.actor, session);
+      const frameId = typeof body.id === "string" ? body.id : undefined;
+
+      if (Object.prototype.hasOwnProperty.call(body, "space") && body.space !== null) {
+        const space = resolveRestObject(String(body.space), session);
+        const message: Message = {
+          actor,
+          target,
+          verb,
+          args,
+          body: body.body && typeof body.body === "object" && !Array.isArray(body.body) ? body.body : undefined
+        };
+        const result = world.call(frameId, session.id, space, message);
+        if (result.op === "error") return restError(res, result.error, statusForError(result.error));
+        broadcastApplied(result);
+        json(res, result);
+        return true;
+      }
+
+      const forceDirect = req.headers["x-woo-force-direct"] === "1";
+      const result = world.directCall(frameId, actor, target, verb, args, { forceDirect, forceReason: "REST X-Woo-Force-Direct" });
+      if (result.op === "error") return restError(res, result.error, statusForError(result.error));
+      broadcastLiveEvents(result);
+      json(res, { result: result.result, observations: result.observations });
+      return true;
+    }
+
+    if (req.method === "GET" && route.rest.length === 1 && route.rest[0] === "log") {
+      if (!isSpaceLike(target)) throw wooError("E_NOTAPPLICABLE", `${target} does not have a sequenced log`, target);
+      if (!world.hasPresence(session.actor, target)) throw wooError("E_PERM", `${session.actor} is not present in ${target}`);
+      const url = parse(req.url ?? "", true);
+      const from = Math.max(1, Number(url.query.from ?? 1));
+      const limit = Math.min(Math.max(1, Number(url.query.limit ?? 100)), 1000);
+      const entries = world.replay(target, from, limit + 1);
+      const messages = entries.slice(0, limit);
+      const lastSeq = messages.length > 0 ? messages[messages.length - 1].seq : from - 1;
+      json(res, { messages, next_seq: lastSeq + 1, has_more: entries.length > limit });
+      return true;
+    }
+
+    if (req.method === "GET" && route.rest.length === 1 && route.rest[0] === "stream") {
+      return openRestStream(req, res, route.id, target, session);
+    }
+  } catch (err) {
+    return restError(res, err);
+  }
+
+  return false;
+}
+
+function objectRoute(pathname: string): { id: string; rest: string[] } | null {
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts[0] !== "api" || parts[1] !== "objects" || !parts[2]) return null;
+  return {
+    id: decodeURIComponent(parts[2]),
+    rest: parts.slice(3).map((part) => decodeURIComponent(part))
+  };
+}
+
+function requireRestSession(req: http.IncomingMessage): Session {
+  const header = req.headers.authorization ?? "";
+  const match = Array.isArray(header) ? null : /^Session\s+(.+)$/i.exec(header.trim());
+  if (!match) throw wooError("E_NOSESSION", "Authorization: Session <id> required");
+  return world.auth(`session:${match[1]}`);
+}
+
+function resolveRestObject(id: string, session: Session): ObjRef {
+  if (id === "$me") return session.actor;
+  world.object(id);
+  return id;
+}
+
+function resolveRestActor(req: http.IncomingMessage, actorValue: unknown, session: Session): ObjRef {
+  const impersonated = req.headers["x-woo-impersonate-actor"];
+  const requested = typeof impersonated === "string" ? impersonated : actorValue === undefined || actorValue === null || actorValue === "$me" ? session.actor : String(actorValue);
+  if (requested === session.actor) return requested;
+  if (world.object(session.actor).flags.wizard) {
+    world.object(requested);
+    return requested;
+  }
+  throw wooError("E_PERM", "actor does not match session actor", { actor: requested, session_actor: session.actor });
+}
+
+function isSpaceLike(obj: ObjRef): boolean {
+  try {
+    world.getProp(obj, "next_seq");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function restPropertyInfo(obj: ObjRef, name: string): Record<string, WooValue> {
+  try {
+    return world.propertyInfo(obj, name);
+  } catch (err) {
+    const error = normalizeError(err);
+    const target = world.object(obj);
+    if (error.code !== "E_PROPNF" || !target.properties.has(name)) throw err;
+    return {
+      name,
+      owner: target.owner,
+      perms: "rw",
+      defined_on: obj,
+      type_hint: null,
+      version: target.propertyVersions.get(name) ?? 1,
+      has_value: true
+    };
+  }
+}
+
+function openRestStream(req: http.IncomingMessage, res: http.ServerResponse, rawTarget: string, target: ObjRef, session: Session): boolean {
+  const scope: RestStream["scope"] = rawTarget === "$me" || !isSpaceLike(target) ? "actor" : "space";
+  if (scope === "space" && !world.hasPresence(session.actor, target)) throw wooError("E_PERM", `${session.actor} is not present in ${target}`);
+
+  res.statusCode = 200;
+  res.setHeader("content-type", "text/event-stream; charset=utf-8");
+  res.setHeader("cache-control", "no-cache, no-transform");
+  res.setHeader("connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const stream: RestStream = { id: `sse-${streamCounter++}`, res, actor: session.actor, target, scope };
+  restStreams.add(stream);
+  res.write("retry: 1000\n\n");
+
+  const lastEventId = req.headers["last-event-id"];
+  if (scope === "space" && typeof lastEventId === "string") {
+    const lastSeq = parseLastEventSeq(lastEventId, target);
+    if (lastSeq !== null) {
+      for (const entry of world.replay(target, lastSeq + 1, 1000)) {
+        writeSse(stream, "applied", appliedFromLogEntry(entry), `${entry.space}:${entry.seq}`);
+      }
+    }
+  }
+
+  req.on("close", () => {
+    restStreams.delete(stream);
+  });
+  return true;
+}
+
+function parseLastEventSeq(value: string, space: ObjRef): number | null {
+  const prefix = `${space}:`;
+  if (!value.startsWith(prefix)) return null;
+  const seq = Number(value.slice(prefix.length));
+  return Number.isFinite(seq) && seq >= 0 ? seq : null;
+}
+
+function appliedFromLogEntry(entry: SpaceLogEntry): AppliedFrame & { ts: number } {
+  const observations: Observation[] = entry.applied_ok
+    ? []
+    : [{ type: "$error", code: entry.error?.code ?? "E_INTERNAL", message: entry.error?.message ?? entry.error?.code ?? "error", value: entry.error?.value ?? null }];
+  return { op: "applied", space: entry.space, seq: entry.seq, message: entry.message, observations, ts: entry.ts };
+}
+
+function writeSse(stream: RestStream, event: "applied" | "event", data: unknown, id?: string): void {
+  if (stream.res.writableEnded) {
+    restStreams.delete(stream);
+    return;
+  }
+  if (id) stream.res.write(`id: ${id}\n`);
+  stream.res.write(`event: ${event}\n`);
+  stream.res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function restError(res: http.ServerResponse, err: unknown, status?: number): boolean {
+  const error = normalizeError(err);
+  json(res, { error }, status ?? statusForError(error));
+  return true;
+}
+
+function statusForError(error: ErrorValue): number {
+  switch (error.code) {
+    case "E_INVARG":
+      return 400;
+    case "E_NOSESSION":
+      return 401;
+    case "E_PERM":
+    case "E_DIRECT_DENIED":
+      return 403;
+    case "E_OBJNF":
+    case "E_VERBNF":
+    case "E_PROPNF":
+    case "E_NOTAPPLICABLE":
+      return 404;
+    case "E_CONFLICT":
+      return 409;
+    case "E_TRANSITION":
+    case "E_TRANSITION_ROLE_UNSET":
+    case "E_TRANSITION_REQUIRES":
+      return 422;
+    case "E_RATE":
+      return 429;
+    default:
+      return 500;
+  }
 }
 
 async function readJson(req: http.IncomingMessage): Promise<Record<string, any>> {

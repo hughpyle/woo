@@ -32,6 +32,7 @@ export type AppliedFrame = {
   id?: string;
   space: ObjRef;
   seq: number;
+  ts: number;
   message: Message;
   observations: Observation[];
 };

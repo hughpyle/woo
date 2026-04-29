@@ -45,6 +45,64 @@ test("switches between tabs", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Chat" })).toHaveClass(/active/);
 });
 
+test("dubspace cue keeps loop controls local", async ({ page, request }) => {
+  const sentFrames: string[] = [];
+  page.on("websocket", (socket) => {
+    socket.on("framesent", (frame) => sentFrames.push(String(frame.payload)));
+  });
+
+  await page.goto("/");
+  await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+  await page.getByRole("button", { name: "Dubspace" }).click();
+  await expect(page.locator("[data-audio]")).toHaveText("Audio Off");
+  await page.locator("[data-audio]").click();
+  await expect(page.locator("[data-audio]")).toHaveText("Audio On");
+  await page.locator("[data-audio]").click();
+  await expect(page.locator("[data-audio]")).toHaveText("Audio Off");
+  await expect(page.locator(".loop-strip")).toHaveCount(4);
+  await expect(page.locator(".vertical-fader")).toHaveCount(5);
+  await expect(page.locator('[aria-label="Filter cutoff"]')).toBeVisible();
+
+  const before = await request.get("/api/state").then((response) => response.json());
+  const beforeSlot = before.dubspace.slot_1.props;
+  const localFreq = Number(beforeSlot.freq ?? 110) === 432.5 ? 433.5 : 432.5;
+  const localGain = Number(beforeSlot.gain ?? 0.75) === 0.11 ? 0.22 : 0.11;
+
+  await page.locator('[data-cue-slot="slot_1"]').click();
+  await expect(page.locator('[data-cue-slot="slot_1"]')).toHaveAttribute("aria-pressed", "true");
+  sentFrames.length = 0;
+
+  await expect(page.locator('[data-loop="slot_1"]')).toHaveText("Stop");
+  await page.locator('[data-loop="slot_1"]').click();
+  await expect(page.locator('[data-loop="slot_1"]')).toHaveText("Start");
+  expect(sentFrames.some((frame) => frame.includes("start_loop") || frame.includes("stop_loop"))).toBe(false);
+
+  await page.locator('[data-control="slot_1:freq"]').fill(String(localFreq));
+  await page.locator('[data-control="slot_1:gain"]').evaluate((element, value) => {
+    const input = element as HTMLInputElement;
+    input.value = String(value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }, localGain);
+  await page.waitForTimeout(100);
+
+  expect(sentFrames.some((frame) => frame.includes("preview_control") || frame.includes("set_control"))).toBe(false);
+  const after = await request.get("/api/state").then((response) => response.json());
+  expect(after.dubspace.slot_1.props.freq ?? 110).toBe(beforeSlot.freq ?? 110);
+  expect(after.dubspace.slot_1.props.gain).toBe(beforeSlot.gain);
+
+  sentFrames.length = 0;
+  await page.locator('[data-cue-slot="slot_1"]').click();
+  await expect(page.locator('[data-cue-slot="slot_1"]')).toHaveAttribute("aria-pressed", "false");
+  expect(sentFrames.some((frame) => frame.includes("set_control"))).toBe(true);
+  await expect
+    .poll(async () => {
+      const current = await request.get("/api/state").then((response) => response.json());
+      return current.dubspace.slot_1.props;
+    })
+    .toMatchObject({ freq: localFreq, gain: localGain });
+});
+
 test("narrow layout keeps nav tabs on one row", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 760 });
   await page.goto("/");
@@ -105,3 +163,182 @@ test("chat controls follow room membership", async ({ page }) => {
   await expect(page.locator(".chat-form")).toBeHidden();
   await expect(page.getByRole("button", { name: "Who" })).toBeHidden();
 });
+
+test("taskspace supports hierarchical task workflow", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+  const actor = (await page.locator(".actor").textContent())?.trim() ?? "";
+  const suffix = Date.now();
+  const rootTitle = `E2E root ${suffix}`;
+  const subTitle = `E2E sub ${suffix}`;
+  const requirement = `E2E requirement ${suffix}`;
+  const message = `E2E message ${suffix}`;
+  const artifact = `https://example.com/e2e-${suffix}`;
+
+  await page.getByRole("button", { name: "Taskspace" }).click();
+  await expect(page.locator('[data-task-status="open"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator('[data-task-status="done"]')).toHaveAttribute("aria-pressed", "false");
+  await page.getByPlaceholder("Root task title").fill(rootTitle);
+  await page.locator(".task-create").getByPlaceholder("Description").fill("Root task from browser smoke");
+  await page.locator(".task-create").getByRole("button", { name: "Create" }).click();
+  await expect(page.locator(".inspector h2")).toHaveText(rootTitle, { timeout: 5_000 });
+
+  const inspector = page.locator(".inspector");
+  await inspector.getByRole("button", { name: "Claim" }).click();
+  await expect(inspector).toContainText(actor);
+  await inspector.getByRole("button", { name: "In Progress" }).click();
+  await expect(inspector.locator(".status-pill").first()).toContainText("in progress");
+
+  await inspector.getByPlaceholder("Subtask title").fill(subTitle);
+  await inspector.getByPlaceholder("Description").fill("Subtask from browser smoke");
+  await inspector.getByRole("button", { name: "Add" }).first().click();
+  await expect(page.locator(".tree")).toContainText(subTitle);
+  await expect(page.locator(".inspector h2")).toHaveText(subTitle);
+
+  await inspector.getByPlaceholder("Requirement").fill(requirement);
+  await page.locator("[data-add-requirement]").click();
+  await expect(inspector.locator(".checklist")).toContainText(requirement);
+  await inspector.getByLabel(requirement).check();
+  await expect(inspector.getByLabel(requirement)).toBeChecked();
+  await expect(inspector).toContainText("1/1");
+
+  await inspector.getByPlaceholder("Message").fill(message);
+  await page.locator("[data-add-message]").click();
+  await expect(inspector.locator(".activity-list")).toContainText(message);
+
+  await inspector.getByPlaceholder("https://example.com/artifact").fill(artifact);
+  await page.locator("[data-add-artifact]").click();
+  await expect(inspector.locator(".artifact-list")).toContainText(artifact);
+
+  await inspector.getByRole("button", { name: "Done" }).click();
+  await expect(page.locator(".tree")).not.toContainText(subTitle);
+  await page.locator('[data-task-status="done"]').click();
+  await expect(page.locator(".tree")).toContainText(subTitle);
+});
+
+test("REST runtime API supports auth, calls, properties, and logs", async ({ request }) => {
+  const suffix = Date.now();
+  const auth = await request.post("/api/auth", { data: { token: `guest:rest-${suffix}` } });
+  expect(auth.ok()).toBe(true);
+  const session = await auth.json();
+  expect(session.actor).toMatch(/^guest_/);
+  expect(session.session).toMatch(/^session-/);
+  const headers = { Authorization: `Session ${session.session}` };
+
+  const describe = await request.get("/api/objects/the_taskspace", { headers });
+  expect(describe.ok()).toBe(true);
+  const described = await describe.json();
+  expect(described.id).toBe("the_taskspace");
+  expect(described.verbs).toContain("create_task");
+
+  const roots = await request.get("/api/objects/the_taskspace/properties/root_tasks", { headers });
+  expect(roots.ok()).toBe(true);
+  const rootProperty = await roots.json();
+  expect(rootProperty.name).toBe("root_tasks");
+  expect(Array.isArray(rootProperty.value)).toBe(true);
+
+  const denied = await request.post("/api/objects/the_taskspace/calls/create_task", {
+    headers,
+    data: { args: [`REST denied ${suffix}`, "missing space"] }
+  });
+  expect(denied.status()).toBe(403);
+  expect((await denied.json()).error.code).toBe("E_DIRECT_DENIED");
+
+  const forceDenied = await request.post("/api/objects/the_taskspace/calls/create_task", {
+    headers: { ...headers, "X-Woo-Force-Direct": "1" },
+    data: { args: [`REST force denied ${suffix}`, "non-wizard force"] }
+  });
+  expect(forceDenied.status()).toBe(403);
+  expect((await forceDenied.json()).error.code).toBe("E_PERM");
+
+  const create = await request.post("/api/objects/the_taskspace/calls/create_task", {
+    headers,
+    data: {
+      id: `rest-create-${suffix}`,
+      space: "the_taskspace",
+      args: [`REST root ${suffix}`, "created through REST"]
+    }
+  });
+  expect(create.ok()).toBe(true);
+  const frame = await create.json();
+  expect(frame.op).toBe("applied");
+  expect(frame.space).toBe("the_taskspace");
+  expect(frame.message.actor).toBe(session.actor);
+  expect(frame.message.verb).toBe("create_task");
+  expect(frame.observations[0].type).toBe("task_created");
+
+  const retry = await request.post("/api/objects/the_taskspace/calls/create_task", {
+    headers,
+    data: {
+      id: `rest-create-${suffix}`,
+      space: "the_taskspace",
+      args: [`REST root ${suffix}`, "created through REST"]
+    }
+  });
+  expect(await retry.json()).toEqual(frame);
+
+  const log = await request.get(`/api/objects/the_taskspace/log?from=${frame.seq}&limit=1`, { headers });
+  expect(log.ok()).toBe(true);
+  const logged = await log.json();
+  expect(logged.messages).toHaveLength(1);
+  expect(logged.messages[0].seq).toBe(frame.seq);
+  expect(logged.messages[0].message.verb).toBe("create_task");
+
+  const enter = await request.post("/api/objects/the_chatroom/calls/enter", { headers, data: { args: [] } });
+  expect(enter.ok()).toBe(true);
+  const direct = await enter.json();
+  expect(direct.observations[0].type).toBe("entered");
+
+  const me = await request.get("/api/objects/%24me", { headers });
+  expect(me.ok()).toBe(true);
+  expect((await me.json()).id).toBe(session.actor);
+});
+
+test("REST SSE stream receives sequenced applied frames", async ({ request }) => {
+  const suffix = Date.now();
+  const auth = await request.post("/api/auth", { data: { token: `guest:sse-${suffix}` } });
+  expect(auth.ok()).toBe(true);
+  const session = await auth.json();
+  const headers = { Authorization: `Session ${session.session}` };
+  const baseUrl = `http://localhost:${process.env.PORT ?? 5173}`;
+
+  const stream = await fetch(`${baseUrl}/api/objects/the_taskspace/stream`, { headers });
+  expect(stream.status).toBe(200);
+  expect(stream.body).not.toBeNull();
+  const reader = stream.body!.getReader();
+  const streamText = readSseUntil(reader, "event: applied", 5_000);
+
+  const create = await request.post("/api/objects/the_taskspace/calls/create_task", {
+    headers,
+    data: {
+      id: `rest-sse-${suffix}`,
+      space: "the_taskspace",
+      args: [`REST SSE ${suffix}`, "created while streaming"]
+    }
+  });
+  expect(create.ok()).toBe(true);
+  const frame = await create.json();
+  const text = await streamText;
+  await reader.cancel();
+
+  expect(text).toContain(`id: the_taskspace:${frame.seq}`);
+  expect(text).toContain("event: applied");
+  expect(text).toContain(`REST SSE ${suffix}`);
+});
+
+async function readSseUntil(reader: ReadableStreamDefaultReader<Uint8Array>, pattern: string, timeoutMs: number): Promise<string> {
+  const decoder = new TextDecoder();
+  const deadline = Date.now() + timeoutMs;
+  let text = "";
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    const result = await Promise.race([
+      reader.read(),
+      new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => setTimeout(() => reject(new Error("SSE read timed out")), remaining))
+    ]);
+    if (result.done) break;
+    text += decoder.decode(result.value, { stream: true });
+    if (text.includes(pattern)) return text;
+  }
+  throw new Error(`Timed out waiting for SSE pattern ${pattern}. Received: ${text}`);
+}

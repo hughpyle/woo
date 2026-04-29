@@ -51,6 +51,7 @@ function seedUniversal(world: WooWorld): void {
   describeSeed(world, "$guest", "Reusable temporary player class. Guest instances bind to short-lived sessions, reset through on_disfunc when the session is reaped, and then return to the free guest pool.");
   describeSeed(world, "$space", "Coordination base class. A space owns a local message sequence, accepts calls, applies them one at a time, stores replayable history, and pushes observations to present subscribers.");
   describeSeed(world, "$thing", "Simple non-actor base class for persistent objects that primarily hold state. Use it when an object should be addressable and programmable but should not itself originate calls.");
+  seedProp(world, "$system", "wizard_actions", []);
   define(world, "$actor", "presence_in", [], "list<obj>");
   define(world, "$actor", "features", [], "list<obj>");
   define(world, "$actor", "features_version", 0, "int");
@@ -130,6 +131,7 @@ function seedDubspace(world: WooWorld): void {
     seedProp(world, id, "loop_id", `loop-${i}`);
     seedProp(world, id, "playing", false);
     seedProp(world, id, "gain", 0.75);
+    seedProp(world, id, "freq", [110, 146.83, 196, 261.63][i - 1]);
   }
   world.createObject({ id: "channel_1", name: "Channel", parent: "$channel", owner: "$wiz", anchor: "the_dubspace", location: "the_dubspace" });
   describeSeed(world, "channel_1", "Mixer channel for the demo dubspace. It is anchored to the_dubspace and contributes shared gain state to the current mix.");

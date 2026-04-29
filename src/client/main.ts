@@ -6,14 +6,20 @@ type AppState = {
   session?: string;
   tab: "dubspace" | "taskspace" | "chat" | "ide";
   world?: any;
+  audioOn: boolean;
   clockOffset: number;
   liveControls: Record<string, { value: any; actor: string; at: number }>;
+  cueSlots: Record<string, boolean>;
+  cuePlaying: Record<string, boolean>;
+  cueControls: Record<string, any>;
   chatFeed: ChatLine[];
   chatPresent: string[];
   chatDraft: string;
   observations: any[];
   selectedObject: string;
   selectedTask?: string;
+  taskExpanded: Record<string, boolean>;
+  taskStatusFilter: Record<string, boolean>;
   compileResult?: any;
 };
 
@@ -28,13 +34,19 @@ type ChatLine = {
 
 const state: AppState = {
   tab: "chat",
+  audioOn: false,
   clockOffset: 0,
   liveControls: {},
+  cueSlots: {},
+  cuePlaying: {},
+  cueControls: {},
   chatFeed: [],
   chatPresent: [],
   chatDraft: "",
   observations: [],
-  selectedObject: "delay_1"
+  selectedObject: "delay_1",
+  taskExpanded: {},
+  taskStatusFilter: { open: true, claimed: true, in_progress: true, blocked: true, done: false }
 };
 
 let audio: DubAudio | undefined;
@@ -46,6 +58,7 @@ const drumVoices = [
   { id: "hat", label: "Hat" },
   { id: "tone", label: "Tone" }
 ] as const;
+const taskStatuses = ["open", "claimed", "in_progress", "blocked", "done"] as const;
 const directThrottle = new Map<string, number>();
 const pendingDirect = new Map<string, (result: any) => void>();
 
@@ -69,6 +82,7 @@ function connect() {
     }
     if (frame.op === "applied") {
       forgetLiveControls(frame.observations ?? []);
+      rememberTaskObservations(frame.observations ?? []);
       state.observations.unshift({ seq: frame.seq, space: frame.space, observations: frame.observations, message: frame.message });
       state.observations = state.observations.slice(0, 30);
       rememberSeq(frame.space, frame.seq);
@@ -161,6 +175,7 @@ async function refresh() {
   state.world = await response.json();
   state.clockOffset = Number(state.world.server_time ?? Date.now()) - Date.now();
   state.chatPresent = Array.isArray(state.world?.chat?.present) ? state.world.chat.present : state.chatPresent;
+  syncTaskSelection();
   audio?.sync(effectiveDubspace(), state.clockOffset);
   render();
 }
@@ -201,6 +216,13 @@ function effectiveDubspace() {
     const [target, name] = key.split(":");
     if (copy[target]) copy[target].props[name] = item.value;
   }
+  for (const [slot, cue] of Object.entries(state.cueSlots)) {
+    if (cue && copy[slot]) copy[slot].props.playing = state.cuePlaying[slot] === true;
+  }
+  for (const [key, value] of Object.entries(state.cueControls)) {
+    const [target, name] = key.split(":");
+    if (state.cueSlots[target] && copy[target]) copy[target].props[name] = value;
+  }
   return copy;
 }
 
@@ -212,6 +234,39 @@ function sendPreviewControl(target: string, name: string, value: any) {
   if (Date.now() - last < 35) return;
   directThrottle.set(key, Date.now());
   direct("the_dubspace", "preview_control", [target, name, value]);
+}
+
+function setCueControl(target: string, name: string, value: any) {
+  state.cueControls[liveKey(target, name)] = value;
+  audio?.sync(effectiveDubspace(), state.clockOffset);
+}
+
+function clearCueControls(target: string) {
+  for (const key of Object.keys(state.cueControls)) {
+    if (key.startsWith(`${target}:`)) delete state.cueControls[key];
+  }
+}
+
+function clearCueState(target: string) {
+  clearCueControls(target);
+  delete state.cuePlaying[target];
+}
+
+function commitCueControls(target: string) {
+  const values = new Map<string, number>();
+  document.querySelectorAll<HTMLInputElement>("[data-control]").forEach((input) => {
+    const [obj, name] = input.dataset.control!.split(":");
+    if (obj !== target) return;
+    const value = Number(input.value);
+    if (Number.isFinite(value)) values.set(name, value);
+  });
+  for (const [key, value] of Object.entries(state.cueControls)) {
+    const [obj, name] = key.split(":");
+    if (obj !== target || values.has(name)) continue;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) values.set(name, numeric);
+  }
+  for (const [name, value] of values) call("the_dubspace", "the_dubspace", "set_control", [target, name, value]);
 }
 
 function receiveLiveEvent(observation: any) {
@@ -240,6 +295,27 @@ function forgetLiveControls(observations: any[]) {
   for (const obs of observations) {
     if (obs.type === "control_changed" && obs.target && obs.name) delete state.liveControls[liveKey(String(obs.target), String(obs.name))];
   }
+}
+
+function rememberTaskObservations(observations: any[]) {
+  for (const obs of observations) {
+    if (obs?.type === "task_created" && typeof obs.task === "string") {
+      state.selectedTask = obs.task;
+      state.taskExpanded[obs.task] = true;
+      if (typeof obs.parent === "string") state.taskExpanded[obs.parent] = true;
+    }
+    if (obs?.type === "subtask_added" && typeof obs.parent === "string") state.taskExpanded[obs.parent] = true;
+    if (obs?.type === "task_moved" && typeof obs.to_parent === "string") state.taskExpanded[obs.to_parent] = true;
+  }
+}
+
+function syncTaskSelection() {
+  const taskspace = state.world?.taskspace;
+  const tasks = taskspace?.tasks ?? {};
+  const roots = Array.isArray(taskspace?.root_tasks) ? taskspace.root_tasks : [];
+  const active = activeTaskStatuses();
+  if (state.selectedTask && tasks[state.selectedTask] && taskMatchesStatus(tasks[state.selectedTask], active)) return;
+  state.selectedTask = firstMatchingTask(roots, tasks, active);
 }
 
 function pruneLiveControls() {
@@ -308,25 +384,14 @@ function renderDubspace() {
   return `
     <section class="toolbar">
       <h1>Dubspace</h1>
-      <button data-audio>Audio</button>
+      <button class="${state.audioOn ? "active" : ""}" data-audio aria-pressed="${state.audioOn}">Audio ${state.audioOn ? "On" : "Off"}</button>
       <button data-save-scene>Save Scene</button>
       <button data-recall-scene>Recall Scene</button>
     </section>
     <section class="grid">
-      ${slots
-        .map((id) => {
-          const slot = dub[id]?.props ?? {};
-          return `
-          <article class="panel slot ${slot.playing ? "playing" : ""}">
-            <h2>${escapeHtml(String(dub[id]?.name ?? id))}</h2>
-            <button data-loop="${escapeHtml(id)}" data-playing="${slot.playing ? "true" : "false"}">${slot.playing ? "Stop" : "Start"}</button>
-            <label>Gain <input data-control="${escapeHtml(`${id}:gain`)}" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(slot.gain ?? 0.75))}"></label>
-          </article>`;
-        })
-        .join("")}
-      <article class="panel">
-        <h2>Filter</h2>
-        <label>Cutoff <input data-control="filter_1:cutoff" type="range" min="80" max="5000" step="1" value="${escapeHtml(String(filter.cutoff ?? 1000))}"></label>
+      <article class="panel loop-console-panel">
+        <div class="panel-head"><h2>Loops</h2></div>
+        <div class="loop-console">${slots.map((id, index) => renderLoopStrip(id, index + 1, dub)).join("")}${renderFilterStrip(filter)}</div>
       </article>
       <article class="panel">
         <h2>Delay</h2>
@@ -349,6 +414,43 @@ function renderDubspace() {
   `;
 }
 
+function renderFilterStrip(filter: any) {
+  const cutoff = filter.cutoff ?? 1000;
+  return `
+    <div class="filter-strip">
+      <div class="loop-strip-head">
+        <strong>F</strong>
+        <span>Filter</span>
+      </div>
+      <input class="vertical-fader" aria-label="Filter cutoff" data-control="filter_1:cutoff" type="range" min="80" max="5000" step="1" value="${escapeHtml(String(cutoff))}">
+      <span class="fader-readout">${escapeHtml(String(Math.round(Number(cutoff))))} Hz</span>
+    </div>
+  `;
+}
+
+function renderLoopStrip(id: string, index: number, dub: any) {
+  const slot = dub[id]?.props ?? {};
+  const cue = state.cueSlots[id] === true;
+  const serverPlaying = state.world?.dubspace?.[id]?.props?.playing === true;
+  const buttonPlaying = cue ? state.cuePlaying[id] === true : serverPlaying;
+  const freq = slot.freq ?? defaultLoopFreq(id);
+  return `
+    <div class="loop-strip ${slot.playing ? "playing" : ""} ${cue ? "cue-active" : ""}">
+      <div class="loop-strip-head">
+        <strong>${index}</strong>
+        <span>${escapeHtml(String(dub[id]?.name ?? id))}</span>
+      </div>
+      <button data-loop="${escapeHtml(id)}" data-playing="${buttonPlaying ? "true" : "false"}">${buttonPlaying ? "Stop" : "Start"}</button>
+      <input class="vertical-fader" aria-label="Loop ${index} gain" data-control="${escapeHtml(`${id}:gain`)}" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(slot.gain ?? 0.75))}">
+      <label class="freq-field">
+        <span>Freq</span>
+        <input aria-label="Loop ${index} frequency" data-control="${escapeHtml(`${id}:freq`)}" type="number" min="40" max="1200" step="0.01" value="${escapeHtml(String(freq))}">
+      </label>
+      <button class="cue-button ${cue ? "active" : ""}" data-cue-slot="${escapeHtml(id)}" aria-pressed="${cue}">CUE</button>
+    </div>
+  `;
+}
+
 function slider(obj: string, prop: string, value: number) {
   return `<label>${escapeHtml(prop)} <input data-control="${escapeHtml(`${obj}:${prop}`)}" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(value))}"></label>`;
 }
@@ -356,23 +458,61 @@ function slider(obj: string, prop: string, value: number) {
 function bindDubspace() {
   document.querySelector<HTMLButtonElement>("[data-audio]")?.addEventListener("click", async () => {
     audio ??= new DubAudio();
+    if (state.audioOn) {
+      await audio.stop();
+      state.audioOn = false;
+      render();
+      return;
+    }
     await audio.start();
+    state.audioOn = true;
     audio.sync(effectiveDubspace(), state.clockOffset);
+    render();
   });
   document.querySelectorAll<HTMLButtonElement>("[data-loop]").forEach((button) => {
     button.addEventListener("click", () => {
       const slot = button.dataset.loop!;
       const playing = button.dataset.playing === "true";
+      if (state.cueSlots[slot]) {
+        state.cuePlaying[slot] = !playing;
+        audio?.sync(effectiveDubspace(), state.clockOffset);
+        render();
+        return;
+      }
       call("the_dubspace", "the_dubspace", playing ? "stop_loop" : "start_loop", [slot]);
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-cue-slot]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const slot = button.dataset.cueSlot!;
+      const wasCue = state.cueSlots[slot] === true;
+      if (wasCue) {
+        commitCueControls(slot);
+        state.cueSlots[slot] = false;
+        clearCueState(slot);
+      } else {
+        state.cueSlots[slot] = true;
+        state.cuePlaying[slot] = true;
+      }
+      audio?.sync(effectiveDubspace(), state.clockOffset);
+      render();
     });
   });
   document.querySelectorAll<HTMLInputElement>("[data-control]").forEach((input) => {
     input.addEventListener("input", () => {
       const [target, name] = input.dataset.control!.split(":");
+      if (state.cueSlots[target]) {
+        setCueControl(target, name, Number(input.value));
+        return;
+      }
       sendPreviewControl(target, name, Number(input.value));
     });
     input.addEventListener("change", () => {
       const [target, name] = input.dataset.control!.split(":");
+      if (state.cueSlots[target]) {
+        setCueControl(target, name, Number(input.value));
+        return;
+      }
       call("the_dubspace", "the_dubspace", "set_control", [target, name, Number(input.value)]);
     });
   });
@@ -614,65 +754,238 @@ function actorLabel(id: string | undefined) {
 function renderTaskspace() {
   const taskspace = state.world?.taskspace;
   const tasks = taskspace?.tasks ?? {};
-  const roots = taskspace?.root_tasks ?? [];
+  const roots = Array.isArray(taskspace?.root_tasks) ? taskspace.root_tasks : [];
   const selected = state.selectedTask ? tasks[state.selectedTask] : undefined;
+  const allTasks = Object.values(tasks);
+  const statusCounts = countTasksByStatus(allTasks);
+  const active = activeTaskStatuses();
+  const visibleCount = allTasks.filter((task) => taskMatchesStatus(task, active)).length;
+  const renderedRoots = roots.map((id: string) => renderTaskNode(id, tasks, 0, active)).join("");
   return `
-    <section class="toolbar">
+    <section class="toolbar task-toolbar">
       <h1>Taskspace</h1>
-      <input data-new-title placeholder="New task title" />
-      <button data-create-task>Create</button>
+      <div class="task-summary">
+        <span>${visibleCount}/${allTasks.length} tasks</span>
+        ${taskStatuses.map((status) => renderStatusFilter(status, statusCounts[status] ?? 0)).join("")}
+      </div>
     </section>
-    <section class="split">
-      <div class="panel tree">${roots.map((id: string) => renderTaskNode(id, tasks)).join("") || "<p>No tasks yet.</p>"}</div>
-      <div class="panel inspector">${selected ? renderTaskInspector(selected) : "<p>Select a task.</p>"}</div>
+    <section class="taskspace-layout">
+      <div class="panel tree">
+        <div class="task-create">
+          <input data-new-title placeholder="Root task title" />
+          <input data-new-description placeholder="Description" />
+          <button data-create-task>Create</button>
+        </div>
+        <div class="task-tree-list">
+          ${renderedRoots || `<div class="empty-state">${allTasks.length > 0 ? "No tasks match the selected statuses." : "No tasks yet."}</div>`}
+        </div>
+      </div>
+      <div class="panel inspector">${selected ? renderTaskInspector(selected, tasks) : `<div class="empty-state">Select a task.</div>`}</div>
     </section>
   `;
 }
 
-function renderTaskNode(id: string, tasks: any): string {
+function renderStatusFilter(status: string, count: number): string {
+  const active = state.taskStatusFilter[status] !== false;
+  return `
+    <button class="status-pill status-filter ${statusClass(status)} ${active ? "active" : ""}" data-task-status="${escapeHtml(status)}" aria-pressed="${active}">
+      ${escapeHtml(statusLabel(status))}: ${count}
+    </button>
+  `;
+}
+
+function renderTaskNode(id: string, tasks: any, depth: number, active: Set<string>): string {
   const task = tasks[id];
   if (!task) return "";
   const props = task.props;
+  const subtasks = Array.isArray(props.subtasks) ? props.subtasks : [];
+  const renderedChildren = subtasks.map((child: string) => renderTaskNode(child, tasks, depth + 1, active)).join("");
+  const matches = taskMatchesStatus(task, active);
+  if (!matches && !renderedChildren) return "";
+  const expanded = state.taskExpanded[id] !== false;
+  const reqStats = requirementStats(props.requirements);
+  const selected = state.selectedTask === id;
   return `
-    <div class="task-node">
-      <button data-select-task="${escapeHtml(id)}" class="${state.selectedTask === id ? "selected" : ""}">${escapeHtml(String(props.title ?? id))} <span>${escapeHtml(String(props.status ?? ""))}</span></button>
-      <div class="children">${(props.subtasks ?? []).map((child: string) => renderTaskNode(child, tasks)).join("")}</div>
+    <div class="task-node" style="--depth:${depth}">
+      <div class="task-row ${selected ? "selected" : ""} ${matches ? "" : "filtered-context"}">
+        <button class="task-toggle" data-toggle-task="${escapeHtml(id)}" aria-label="Toggle ${escapeHtml(String(props.title ?? id))}" ${subtasks.length === 0 ? "disabled" : ""}>${subtasks.length === 0 ? "" : expanded ? "-" : "+"}</button>
+        <button class="task-select" data-select-task="${escapeHtml(id)}">
+          <span class="task-title">${escapeHtml(String(props.title ?? id))}</span>
+          <span class="task-meta">
+            <span class="status-pill ${statusClass(String(props.status ?? ""))}">${escapeHtml(statusLabel(String(props.status ?? "")))}</span>
+            <span>${escapeHtml(String(props.assignee ? actorLabel(String(props.assignee)) : "unassigned"))}</span>
+            <span>${reqStats.checked}/${reqStats.total} req</span>
+          </span>
+        </button>
+      </div>
+      ${expanded && renderedChildren ? `<div class="children">${renderedChildren}</div>` : ""}
     </div>
   `;
 }
 
-function renderTaskInspector(task: any) {
+function renderTaskInspector(task: any, tasks: any) {
   const props = task.props;
+  const requirements = Array.isArray(props.requirements) ? props.requirements : [];
+  const messages = Array.isArray(props.messages) ? props.messages : [];
+  const artifacts = Array.isArray(props.artifacts) ? props.artifacts : [];
+  const subtasks = Array.isArray(props.subtasks) ? props.subtasks : [];
+  const reqStats = requirementStats(requirements);
   return `
-    <h2>${escapeHtml(String(props.title ?? task.id ?? ""))}</h2>
-    <p>${escapeHtml(String(props.description ?? ""))}</p>
-    <div class="row"><strong>Status</strong><span>${escapeHtml(String(props.status ?? ""))}</span></div>
-    <div class="row"><strong>Assignee</strong><span>${escapeHtml(String(props.assignee ?? "none"))}</span></div>
-    <div class="button-row">
+    <div class="task-inspector-head">
+      <div>
+        <h2>${escapeHtml(String(props.title ?? task.id ?? ""))}</h2>
+        <p>${escapeHtml(String(props.description ?? "No description."))}</p>
+      </div>
+      <span class="status-pill ${statusClass(String(props.status ?? ""))}">${escapeHtml(statusLabel(String(props.status ?? "")))}</span>
+    </div>
+    <div class="task-facts">
+      <div><strong>ID</strong><span>${escapeHtml(task.id)}</span></div>
+      <div><strong>Assignee</strong><span>${escapeHtml(String(props.assignee ? actorLabel(String(props.assignee)) : "none"))}</span></div>
+      <div><strong>Requirements</strong><span>${reqStats.checked}/${reqStats.total}</span></div>
+      <div><strong>Subtasks</strong><span>${subtasks.length}</span></div>
+    </div>
+    <div class="button-row task-actions">
       <button data-task-action="claim">Claim</button>
       <button data-task-action="release">Release</button>
-      <button data-task-action="status:in_progress">In Progress</button>
-      <button data-task-action="status:blocked">Blocked</button>
-      <button data-task-action="status:done">Done</button>
+      ${["open", "in_progress", "blocked", "done"].map((status) => `<button class="${String(props.status) === status ? "active" : ""}" data-task-action="status:${status}">${escapeHtml(statusLabel(status))}</button>`).join("")}
     </div>
-    <div class="inline-form"><input data-subtask-title placeholder="Subtask title"><button data-add-subtask>Add Subtask</button></div>
-    <div class="inline-form"><input data-requirement placeholder="Requirement"><button data-add-requirement>Add Requirement</button></div>
-    <ul class="checklist">${(props.requirements ?? [])
-      .map((item: any, index: number) => `<li><label><input data-check-req="${index}" type="checkbox" ${item.checked ? "checked" : ""}> ${escapeHtml(String(item.text ?? ""))}</label></li>`)
-      .join("")}</ul>
-    <div class="inline-form"><input data-message placeholder="Message"><button data-add-message>Add Message</button></div>
-    <div class="inline-form"><input data-artifact placeholder="https://example.com/artifact"><button data-add-artifact>Add Artifact</button></div>
+    <section class="task-section">
+      <h3>Subtasks</h3>
+      <div class="inline-form"><input data-subtask-title placeholder="Subtask title"><input data-subtask-description placeholder="Description"><button data-add-subtask>Add</button></div>
+      <div class="related-list">${subtasks.map((id: string) => renderRelatedTask(id, tasks)).join("") || `<div class="empty-state">No subtasks.</div>`}</div>
+    </section>
+    <section class="task-section">
+      <h3>Requirements</h3>
+      <div class="inline-form"><input data-requirement placeholder="Requirement"><button data-add-requirement>Add</button></div>
+      <ul class="checklist">${requirements
+        .map((item: any, index: number) => `<li><label><input data-check-req="${index}" type="checkbox" ${item.checked ? "checked" : ""}> <span>${escapeHtml(String(item.text ?? ""))}</span></label></li>`)
+        .join("") || `<li class="empty-state">No requirements.</li>`}</ul>
+    </section>
+    <section class="task-section">
+      <h3>Messages</h3>
+      <div class="inline-form"><input data-message placeholder="Message"><button data-add-message>Add</button></div>
+      <div class="activity-list">${messages.map(renderTaskMessage).join("") || `<div class="empty-state">No messages.</div>`}</div>
+    </section>
+    <section class="task-section">
+      <h3>Artifacts</h3>
+      <div class="inline-form"><input data-artifact placeholder="https://example.com/artifact"><button data-add-artifact>Add</button></div>
+      <div class="artifact-list">${artifacts.map(renderArtifact).join("") || `<div class="empty-state">No artifacts.</div>`}</div>
+    </section>
   `;
+}
+
+function renderRelatedTask(id: string, tasks: any) {
+  const task = tasks[id];
+  if (!task) return "";
+  const props = task.props ?? {};
+  return `
+    <button class="related-task" data-select-task="${escapeHtml(id)}">
+      <span>${escapeHtml(String(props.title ?? id))}</span>
+      <span class="status-pill ${statusClass(String(props.status ?? ""))}">${escapeHtml(statusLabel(String(props.status ?? "")))}</span>
+    </button>
+  `;
+}
+
+function renderTaskMessage(item: any) {
+  const actor = typeof item?.actor === "string" ? actorLabel(item.actor) : "unknown";
+  const ts = typeof item?.ts === "number" ? new Date(item.ts).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+  return `
+    <div class="activity-item">
+      <div><strong>${escapeHtml(actor)}</strong><span>${escapeHtml(ts)}</span></div>
+      <p>${escapeHtml(String(item?.body ?? ""))}</p>
+    </div>
+  `;
+}
+
+function renderArtifact(item: any) {
+  const ref = String(item?.ref ?? "");
+  const kind = String(item?.kind ?? "external");
+  const label = ref || "artifact";
+  const body = ref.startsWith("http")
+    ? `<a href="${escapeHtml(ref)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`
+    : `<span>${escapeHtml(label)}</span>`;
+  return `<div class="artifact-item"><span>${escapeHtml(kind)}</span>${body}</div>`;
+}
+
+function requirementStats(requirements: any) {
+  const items = Array.isArray(requirements) ? requirements : [];
+  return {
+    total: items.length,
+    checked: items.filter((item) => item?.checked === true).length
+  };
+}
+
+function countTasksByStatus(tasks: any[]) {
+  const counts: Record<string, number> = {};
+  for (const task of tasks) {
+    const status = String((task as any)?.props?.status ?? "open");
+    counts[status] = (counts[status] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function statusClass(status: string) {
+  return `status-${status.replace(/[^a-z0-9_-]/gi, "_") || "unknown"}`;
+}
+
+function statusLabel(status: string) {
+  if (status === "in_progress") return "in progress";
+  return status || "unknown";
+}
+
+function activeTaskStatuses() {
+  return new Set(taskStatuses.filter((status) => state.taskStatusFilter[status] !== false));
+}
+
+function taskStatus(task: any) {
+  return String(task?.props?.status ?? "open");
+}
+
+function taskMatchesStatus(task: any, active: Set<string>) {
+  return active.has(taskStatus(task));
+}
+
+function firstMatchingTask(ids: string[], tasks: any, active: Set<string>): string | undefined {
+  for (const id of ids) {
+    const task = tasks[id];
+    if (!task) continue;
+    if (taskMatchesStatus(task, active)) return id;
+    const subtasks = Array.isArray(task.props?.subtasks) ? task.props.subtasks : [];
+    const child = firstMatchingTask(subtasks, tasks, active);
+    if (child) return child;
+  }
+  return undefined;
 }
 
 function bindTaskspace() {
+  document.querySelectorAll<HTMLButtonElement>("[data-task-status]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const status = button.dataset.taskStatus!;
+      state.taskStatusFilter[status] = state.taskStatusFilter[status] === false;
+      syncTaskSelection();
+      render();
+    });
+  });
   document.querySelector<HTMLButtonElement>("[data-create-task]")?.addEventListener("click", () => {
-    const title = document.querySelector<HTMLInputElement>("[data-new-title]")?.value.trim() || "Untitled";
-    call("the_taskspace", "the_taskspace", "create_task", [title, ""]);
+    const titleInput = document.querySelector<HTMLInputElement>("[data-new-title]");
+    const descriptionInput = document.querySelector<HTMLInputElement>("[data-new-description]");
+    const title = titleInput?.value.trim() || "Untitled";
+    const description = descriptionInput?.value.trim() || "";
+    call("the_taskspace", "the_taskspace", "create_task", [title, description]);
+    if (titleInput) titleInput.value = "";
+    if (descriptionInput) descriptionInput.value = "";
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-toggle-task]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.toggleTask!;
+      state.taskExpanded[id] = state.taskExpanded[id] === false;
+      render();
+    });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-select-task]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedTask = button.dataset.selectTask!;
+      state.taskExpanded[state.selectedTask] = state.taskExpanded[state.selectedTask] ?? true;
       render();
     });
   });
@@ -686,23 +999,35 @@ function bindTaskspace() {
     });
   });
   document.querySelector<HTMLButtonElement>("[data-add-subtask]")?.addEventListener("click", () => {
-    const title = document.querySelector<HTMLInputElement>("[data-subtask-title]")?.value.trim() || "Subtask";
-    call("the_taskspace", id, "add_subtask", [title, ""]);
+    const titleInput = document.querySelector<HTMLInputElement>("[data-subtask-title]");
+    const descriptionInput = document.querySelector<HTMLInputElement>("[data-subtask-description]");
+    const title = titleInput?.value.trim() || "Subtask";
+    const description = descriptionInput?.value.trim() || "";
+    state.taskExpanded[id] = true;
+    call("the_taskspace", id, "add_subtask", [title, description]);
+    if (titleInput) titleInput.value = "";
+    if (descriptionInput) descriptionInput.value = "";
   });
   document.querySelector<HTMLButtonElement>("[data-add-requirement]")?.addEventListener("click", () => {
-    const text = document.querySelector<HTMLInputElement>("[data-requirement]")?.value.trim() || "Requirement";
+    const input = document.querySelector<HTMLInputElement>("[data-requirement]");
+    const text = input?.value.trim() || "Requirement";
     call("the_taskspace", id, "add_requirement", [text]);
+    if (input) input.value = "";
   });
   document.querySelectorAll<HTMLInputElement>("[data-check-req]").forEach((input) => {
     input.addEventListener("change", () => call("the_taskspace", id, "check_requirement", [Number(input.dataset.checkReq), input.checked]));
   });
   document.querySelector<HTMLButtonElement>("[data-add-message]")?.addEventListener("click", () => {
-    const body = document.querySelector<HTMLInputElement>("[data-message]")?.value.trim() || "Update";
+    const input = document.querySelector<HTMLInputElement>("[data-message]");
+    const body = input?.value.trim() || "Update";
     call("the_taskspace", id, "add_message", [body]);
+    if (input) input.value = "";
   });
   document.querySelector<HTMLButtonElement>("[data-add-artifact]")?.addEventListener("click", () => {
-    const ref = document.querySelector<HTMLInputElement>("[data-artifact]")?.value.trim() || "https://example.com";
+    const input = document.querySelector<HTMLInputElement>("[data-artifact]");
+    const ref = input?.value.trim() || "https://example.com";
     call("the_taskspace", id, "add_artifact", [{ kind: ref.startsWith("http") ? "url" : "external", ref }]);
+    if (input) input.value = "";
   });
 }
 
@@ -782,6 +1107,11 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function defaultLoopFreq(id: string) {
+  const freqs: Record<string, number> = { slot_1: 110, slot_2: 146.83, slot_3: 196, slot_4: 261.63 };
+  return freqs[id] ?? 220;
+}
+
 class DubAudio {
   private context = new AudioContext();
   private gains = new Map<string, GainNode>();
@@ -819,14 +1149,21 @@ class DubAudio {
     this.ensureSequencer();
   }
 
+  async stop() {
+    for (const osc of this.oscillators.values()) osc.stop();
+    this.oscillators.clear();
+    this.gains.clear();
+    await this.context.suspend();
+  }
+
   sync(dubspace: any, clockOffset = 0) {
     if (!dubspace) return;
     this.dubspace = dubspace;
     this.clockOffset = clockOffset;
     this.syncEffects(dubspace);
-    const freqs: Record<string, number> = { slot_1: 110, slot_2: 146.83, slot_3: 196, slot_4: 261.63 };
-    for (const [id, freq] of Object.entries(freqs)) {
+    for (const id of ["slot_1", "slot_2", "slot_3", "slot_4"]) {
       const props = dubspace[id]?.props ?? {};
+      const freq = clamp(Number(props.freq ?? defaultLoopFreq(id)), 40, 1200);
       if (props.playing && !this.oscillators.has(id)) {
         const osc = this.context.createOscillator();
         const gain = this.context.createGain();
@@ -843,6 +1180,7 @@ class DubAudio {
         this.oscillators.delete(id);
         this.gains.delete(id);
       }
+      this.oscillators.get(id)?.frequency.setTargetAtTime(freq, this.context.currentTime, 0.02);
       this.gains.get(id)?.gain.setTargetAtTime((props.gain ?? 0.5) * 0.08, this.context.currentTime, 0.02);
     }
     this.ensureSequencer();
