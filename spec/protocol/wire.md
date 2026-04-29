@@ -1,6 +1,6 @@
 # Wire protocol
 
-> Part of the [woo specification](../../SPEC.md). Layer: **protocol**.
+> Part of the [woo specification](../../SPEC.md). Layer: **protocol**. Profile: **v1-core**.
 
 The JSON message format on the WebSocket between client and player host. First-light scope: just enough frames to drive a sequenced message dispatch loop and surface its observations.
 

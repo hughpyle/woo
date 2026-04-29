@@ -25,6 +25,7 @@ for fast reload. No world-level clock is required for ordering.
 - Four loop slots.
 - One filter.
 - One delay.
+- One eight-step percussion loop.
 - One saved scene.
 
 ## Persistent State
@@ -34,7 +35,17 @@ for fast reload. No world-level clock is required for ordering.
 - Channel gain.
 - Filter cutoff.
 - Delay send, time, feedback, and wet level.
+- Percussion transport (`playing`, `started_at`), tempo, and eight-step pattern.
 - Scene name and saved control values.
+
+## Ephemeral Slider Properties
+
+Slider motion has two layers:
+
+- **Preview**: while a player drags a slider, the client sends an ephemeral property frame `{target, name, value}`. The server broadcasts it only to actors present in the dubspace. It is not sequenced, not logged, not replayed, and not durable.
+- **Commit**: when the drag ends, the client sends the ordinary sequenced `:set_control(target, name, value)` call. This value becomes materialized persistent state and is replayable.
+
+The preview layer exists so continuous gestures feel live without filling the `$space` log with every pointer sample. It is an optimization over the same control surface, not a second source of truth.
 
 ## Observation Schemas
 
@@ -49,7 +60,11 @@ Each observation the dubspace emits has a defined payload shape. UI and agents c
 | `control_changed` | `{target: obj, name: str, value: any}` | `:set_control` applied. |
 | `scene_saved` | `{scene: obj, name: str}` | `:save_scene` applied. |
 | `scene_recalled` | `{scene: obj}` | `:recall_scene` applied. |
-| `gesture_progress` | `{actor: obj, target: obj, value: any}` | **Ephemeral**: in-flight knob drag. |
+| `drum_step_changed` | `{target: obj, voice: str, step: int, enabled: bool}` | `:set_drum_step` applied. |
+| `tempo_changed` | `{target: obj, bpm: int}` | `:set_tempo` applied. |
+| `transport_started` | `{target: obj, started_at: int, bpm: int}` | `:start_transport` applied. |
+| `transport_stopped` | `{target: obj}` | `:stop_transport` applied. |
+| `gesture_progress` | `{actor: obj, target: obj, name: str, value: any}` | **Ephemeral**: in-flight slider drag preview. |
 | `cursor` | `{actor: obj, x: float, y: float}` | **Ephemeral**: pointer position. |
 
 All observations include `type` (the table key) and `source` (the dubspace itself, unless noted otherwise). Persistent observations are sequenced; ephemeral observations follow [events.md §12.6](semantics/events.md#126-persistent-vs-ephemeral-events) and don't sequence.
@@ -59,17 +74,19 @@ All observations include `type` (the table key) and `source` (the dubspace itsel
 - Player joined or left.
 - Loop started or stopped.
 - Control changed.
+- Percussion step, tempo, and transport changed.
 - Gesture began, moved, ended.
 - Scene saved or recalled.
 
-Gesture samples that affect the shared mix are sequenced messages. Pure UI
-presence hints may stay ephemeral. The latest committed control values are
-persistent materialized state.
+Gesture previews are ephemeral; gesture commits that affect the shared mix are
+sequenced messages. Pure UI presence hints may stay ephemeral. The latest
+committed control values are persistent materialized state.
 
 ## Minimal Interactions
 
 - Start or stop a loop.
 - Drag a knob or fader and see/hear the shared change.
+- Toggle an 8-step percussion pattern and start/stop the shared transport.
 - Save the current controls as one scene.
 - Reload and recover the persisted mix state.
 

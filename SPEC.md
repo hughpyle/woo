@@ -34,9 +34,22 @@ The system is **infrastructure, not UI**. The chat-text interface is one rendere
 
 ---
 
+## Profiles
+
+Spec scope is organized into four progressive profiles. See [profiles.md](spec/profiles.md) for the per-doc map.
+
+| Profile | Scope | Status |
+|---|---|---|
+| **first-light** | T0 VM, dubspace + taskspace demos, minimal IDE, in-memory | reference impl in `src/` |
+| **v1-core** | Full semantics + protocol + Cloudflare reference; durable, multi-actor, recoverable | spec ready |
+| **v1-ops** | Worktrees, migrations, backups, deployments, observability, debugging, teams, credentialed auth, catalogs, conformance | spec ready |
+| **v2-federation** | Cross-world calls (mTLS), peer trust, federated identity | reserved; designs in `spec/deferred/` |
+
+Each profile is a superset of the one above.
+
 ## Layers
 
-The spec is split into four layers. Implementation references in semantics and protocol layers are explicit pointers to reference; you can read semantics + protocol without committing to Cloudflare.
+The spec is split into layers, mostly orthogonal to profiles. Implementation references in semantics and protocol layers are explicit pointers to reference; you can read semantics + protocol without committing to Cloudflare.
 
 | Path | Layer | Contents |
 |---|---|---|
@@ -60,6 +73,7 @@ The spec is split into four layers. Implementation references in semantics and p
 - [events.md](spec/semantics/events.md) — emit, schemas (§12, §13)
 - [tasks.md](spec/semantics/tasks.md) — lifecycle, suspend, fork, read (§16)
 - [builtins.md](spec/semantics/builtins.md) — builtins, errors (§19, §20)
+- [failures.md](spec/semantics/failures.md) — consolidated failure model (F1–F11)
 
 ### Protocol
 - [hosts.md](spec/protocol/hosts.md) — three host classes, task migration, trust boundaries (§3)
@@ -71,11 +85,30 @@ The spec is split into four layers. Implementation references in semantics and p
 - [persistence.md](spec/reference/persistence.md) — per-object SQLite schema, caching (§14, §15)
 - [quotas.md](spec/reference/quotas.md) — QuotaAccountant DO (R5)
 
-### Deferred
-- [federation.md](spec/deferred/federation.md) — cross-world interop (§24)
+### Operations
+- [worktrees.md](spec/operations/worktrees.md) — staging changes, sandboxes, atomic promote (W1–W12)
+- [migrations.md](spec/operations/migrations.md) — bytecode upgrades, schema changes, data migrations (M1–M9)
+- [backups.md](spec/operations/backups.md) — world export format, restore, disaster recovery (B1–B8)
+- [deployments.md](spec/operations/deployments.md) — dev / staging / prod, version coordination, cross-environment sync (DP1–DP9)
+- [observability.md](spec/operations/observability.md) — logs, metrics, traces, audit (O1–O9)
+
+### Identity
+- [auth.md](spec/identity/auth.md) — credentialed auth, account vs actor, multi-character, recovery, service accounts (A1–A11)
+- [teams.md](spec/identity/teams.md) — team membership, role-based gating, team quotas, service accounts (TM1–TM10)
+
+### Discovery
+- [catalogs.md](spec/discovery/catalogs.md) — published reusable object sets, registries, versioned imports (CT1–CT10)
+
+### Tooling
+- [debugging.md](spec/tooling/debugging.md) — stepping, breakpoints, replay debugging in a sandbox (D1–D10)
+- [conformance.md](spec/tooling/conformance.md) — behavioral test corpus (CF1–CF9)
 
 ### Authoring
 - [minimal-ide.md](spec/authoring/minimal-ide.md) — first Web IDE and authoring primitives (A1–A11)
+
+### Deferred
+- [federation.md](spec/deferred/federation.md) — full cross-world interop design (§24)
+- [federation-early.md](spec/deferred/federation-early.md) — earliest-buildable v2 subset: mTLS peers, cross-world calls gated by verb annotation (FE1–FE11)
 
 ---
 

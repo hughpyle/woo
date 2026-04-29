@@ -1,6 +1,6 @@
 # Spaces
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core** (§S7 snapshots escalate to **v1-ops**, see §S7.1).
 
 `$space` is woo's coordination primitive: it gives a totally-ordered sequence to messages directed through it. This document is the normative behavior of `$space:call` and the related lifecycle. The conceptual framing is in [core.md §C4–§C6](core.md).
 
@@ -27,7 +27,7 @@ Spaces may carry additional materialized state — the dubspace's `delay_feedbac
 
 1. **Validate the message.** Required fields present (per [values.md §V10](values.md#v10-message-and-sequenced-message-serialization)); types match. If validation fails, raise `E_INVARG`. *No `seq` is assigned.*
 2. **Authorize the actor.** Check that `message.actor` may call through this space. If denied, raise `E_PERM`. *No `seq` is assigned.*
-3. **Assign `seq`.** `seq = next_seq; next_seq = next_seq + 1`. Append `(seq, message)` to log. **This is the commit point for the message having been accepted.**
+3. **Assign `seq` and append to log.** `seq = next_seq; next_seq = next_seq + 1`. Append `(seq, message)` to the log atomically with the counter increment. **This is the commit point for the message having been accepted.** If the storage layer fails to commit this step, the call is rejected pre-sequence with `E_STORAGE` and `next_seq` does not advance — see [failures.md §F6](failures.md#f6-storage-and-persistence-failures). The runtime never reaches "seq advanced but message not in the log."
 4. **Resolve the target verb.** Walk `message.target`'s parent chain for `message.verb`. If not found, the call moves directly to step 7 (apply failure) with `E_VERBNF`.
 5. **Run the behavior.** Execute the verb's bytecode (T0 or full VM) within a sub-transaction of the call. The behavior may read/write properties on objects in the same anchor cluster (atomic), call other verbs (recursive within cluster), and emit observations.
 6. **On success:** commit mutations from step 5; observations from step 5 are queued for delivery.
@@ -103,6 +103,18 @@ verb $space:snapshot() rxd {
 Reload follows: load the latest snapshot, then `replay(snapshot.seq + 1, limit)` paged until current. Subscribers far behind use the same path.
 
 Snapshots are content-addressable via replay-canonical encoding ([values.md §V8](values.md#v8-replay-canonical-form)): two snapshots with the same materialized state hash to the same bytes regardless of insertion order.
+
+### S7.1 Snapshot profile escalation
+
+Snapshots are **optional in v1-core** — a sequencer can run without them; small spaces don't need them, and replay-from-1 is cheap.
+
+Snapshots are **required in v1-ops** because:
+- Worktree creation requires a snapshot for sandbox seeding ([worktrees.md §W4](../operations/worktrees.md#w4-sandboxes)).
+- Replay debugging requires snapshot+forward-replay reconstruction ([debugging.md §D6](../tooling/debugging.md#d6-replay-debugging)).
+- Backup export depends on snapshot+log composition ([backups.md §B2](../operations/backups.md#b2-world-export-format)).
+- Conformance includes snapshot reconstruction tests ([conformance.md §CF3](../tooling/conformance.md#cf3-required-categories)).
+
+A v1-ops implementation must implement snapshots; a v1-core implementation may skip them and skip the corresponding conformance categories.
 
 **Triggering convention.** Short-lived spaces (e.g., the dubspace demo, where the log is bounded by control surface complexity) can skip snapshots entirely — replay from seq 1 is cheap. Long-lived spaces (e.g., the taskspace demo, where the log accumulates over weeks) need snapshots so late-joining clients and agents have a reasonable reload path. The recommended trigger is **every K calls or M minutes idle**, whichever comes first — defaults `K = 256`, `M = 10`. Concretely:
 

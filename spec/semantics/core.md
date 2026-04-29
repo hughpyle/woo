@@ -1,6 +1,6 @@
 # Woo Core Model
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
 
 Woo-core is the smallest model needed for persistent, programmable, multi-user
 worlds. It is inspired by LambdaMOO's object system, but it does not assume a

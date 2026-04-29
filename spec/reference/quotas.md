@@ -1,6 +1,6 @@
 # Quota accounting
 
-> Part of the [woo specification](../../SPEC.md). Layer: **reference**. CF-specific implementation of the per-owner quotas defined abstractly in [../semantics/permissions.md §11.7](../semantics/permissions.md#117-storage-quotas-and-accounting).
+> Part of the [woo specification](../../SPEC.md). Layer: **reference**. Profile: **v1-core**. CF-specific implementation of the per-owner quotas defined abstractly in [../semantics/permissions.md §11.7](../semantics/permissions.md#117-storage-quotas-and-accounting).
 
 ---
 

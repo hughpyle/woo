@@ -1,6 +1,6 @@
 # Introspection
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
 
 The minimum agent/developer-facing API for "what is this object, and what can I do with it?" — the contract that lets agents discover affordances without hardcoded knowledge of a world's verbs.
 

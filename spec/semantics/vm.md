@@ -1,6 +1,6 @@
 # Bytecode and VM
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
 
 Covers the VM's data structures (frames, tasks, bytecode), the full opcode table with stack effects and yield semantics, tick and memory metering, and the per-host scheduler. Task lifecycle (suspend, fork, read) is in [tasks.md §16](tasks.md).
 

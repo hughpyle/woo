@@ -1,6 +1,6 @@
 # Persistence and caching
 
-> Part of the [woo specification](../../SPEC.md). Layer: **reference**. CF-specific schema and cache implementation.
+> Part of the [woo specification](../../SPEC.md). Layer: **reference**. Profile: **v1-core**. CF-specific schema and cache implementation.
 
 Covers per-DO SQLite schema, the cross-host bytecode/property cache, and invalidation. Task serialization details are in [../semantics/tasks.md §16](../semantics/tasks.md).
 

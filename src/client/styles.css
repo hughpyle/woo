@@ -1,0 +1,283 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f3f5f2;
+  color: #20251f;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 1px solid #9ba399;
+  background: #ffffff;
+  color: #20251f;
+  border-radius: 6px;
+  padding: 0.45rem 0.7rem;
+  cursor: pointer;
+}
+
+button:hover,
+button.active {
+  background: #dfe9dc;
+}
+
+input,
+select,
+textarea {
+  border: 1px solid #aab2a6;
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem;
+  background: #fff;
+}
+
+.shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr) 360px;
+}
+
+.nav,
+.events {
+  border-right: 1px solid #d0d7cd;
+  background: #ecf0ea;
+  padding: 1rem;
+}
+
+.events {
+  border-right: 0;
+  border-left: 1px solid #d0d7cd;
+  overflow: auto;
+}
+
+.brand {
+  font-size: 1.35rem;
+  font-weight: 700;
+  margin-bottom: 0.3rem;
+}
+
+.actor {
+  color: #5f685d;
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.nav-button {
+  width: 100%;
+  text-align: left;
+  margin-bottom: 0.5rem;
+}
+
+.main {
+  padding: 1rem;
+  overflow: auto;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-bottom: 1rem;
+}
+
+.toolbar h1 {
+  font-size: 1.35rem;
+  margin: 0;
+  margin-right: auto;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0.8rem;
+}
+
+.panel {
+  background: #fff;
+  border: 1px solid #d5dcd1;
+  border-radius: 8px;
+  padding: 1rem;
+  min-width: 0;
+}
+
+.panel h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.panel-head h2 {
+  margin: 0;
+}
+
+.slot.playing {
+  border-color: #377d5b;
+  box-shadow: inset 0 0 0 2px #c7e8d6;
+}
+
+label {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.7rem 0;
+  color: #4b5449;
+}
+
+input[type="range"] {
+  width: 100%;
+  padding: 0;
+}
+
+.sequencer {
+  grid-column: span 2;
+}
+
+.steps {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.step-row {
+  display: grid;
+  grid-template-columns: 4.5rem repeat(8, minmax(1.9rem, 1fr));
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.step-row span {
+  color: #4b5449;
+  font-size: 0.9rem;
+}
+
+.step {
+  aspect-ratio: 1;
+  min-width: 0;
+  padding: 0;
+  text-align: center;
+}
+
+.step.active {
+  background: #242c24;
+  border-color: #242c24;
+  color: #fff;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(360px, 1.1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.tree {
+  min-height: 420px;
+}
+
+.task-node {
+  margin: 0.25rem 0;
+}
+
+.task-node button {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.task-node .children {
+  margin-left: 1rem;
+}
+
+.selected {
+  background: #dfe9dc;
+}
+
+.row,
+.button-row,
+.inline-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0.65rem 0;
+}
+
+.row {
+  justify-content: space-between;
+}
+
+.inline-form input {
+  flex: 1;
+  min-width: 160px;
+}
+
+.checklist {
+  padding-left: 1.2rem;
+}
+
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.82rem;
+}
+
+.event-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.event-list pre {
+  background: #fff;
+  border: 1px solid #d5dcd1;
+  border-radius: 8px;
+  padding: 0.7rem;
+}
+
+.editor {
+  display: grid;
+  gap: 0.65rem;
+}
+
+textarea {
+  min-height: 270px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@media (max-width: 980px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .nav,
+  .events {
+    border: 0;
+  }
+
+  .split {
+    grid-template-columns: 1fr;
+  }
+
+  .sequencer {
+    grid-column: auto;
+  }
+
+  .step-row {
+    grid-template-columns: 3.8rem repeat(8, minmax(1.7rem, 1fr));
+  }
+}

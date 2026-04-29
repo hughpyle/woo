@@ -1,6 +1,6 @@
 # Objects, identity, verb dispatch, properties
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
 
 Covers the object model (§4), identity and addressing (§5), verb dispatch and inheritance (§9), and property definition/value/inheritance semantics (§10).
 

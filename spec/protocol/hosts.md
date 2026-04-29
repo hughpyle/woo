@@ -1,6 +1,6 @@
 # Hosts and execution model
 
-> Part of the [woo specification](../../SPEC.md). Layer: **protocol**. Implementation specifics (Durable Objects, alarms, persistent storage schema) are in the [reference layer](../reference/cloudflare.md).
+> Part of the [woo specification](../../SPEC.md). Layer: **protocol**. Profile: **v1-core**. Implementation specifics (Durable Objects, alarms, persistent storage schema) are in the [reference layer](../reference/cloudflare.md).
 
 The abstract model of hosts: where verb code can run, how tasks move between hosts, the trust boundary classes.
 

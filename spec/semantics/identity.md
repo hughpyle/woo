@@ -1,6 +1,6 @@
 # Identity, sessions, and actors
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core** (guest auth only; credentialed auth lives in `identity/auth.md`, profile **v1-ops**).
 
 The contract for who is connected, what an actor is, and how a session binds a client to an actor.
 

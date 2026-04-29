@@ -1,6 +1,6 @@
 # Reference architecture: Cloudflare
 
-> Part of the [woo specification](../../SPEC.md). Layer: **reference**. Concrete mapping of woo's abstract host model and persistence onto Cloudflare's primitives. Other implementations are possible; this document is the v1 plan.
+> Part of the [woo specification](../../SPEC.md). Layer: **reference**. Profile: **v1-core**. Concrete mapping of woo's abstract host model and persistence onto Cloudflare's primitives. Other implementations are possible; this document is the reference plan.
 
 ---
 

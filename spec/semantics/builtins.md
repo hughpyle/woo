@@ -1,6 +1,6 @@
 # Builtins and errors
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
 
 Sketch of the v1 builtin function set (registered with stable indices for the `BUILTIN` opcode) and the canonical error catalogue.
 

@@ -7,13 +7,15 @@ Woo is a specification-first project for designing a programmable, shared,
 persistent object world for networked social spaces.  Inspired by LambdaMOO
 with an intention to be a suitable platform for broad coordination use cases.
 
-This repository is intentionally a container for the spec before it is a
-codebase. Implementation choices should follow from the design work rather
-than precede it.
+This repository began as a spec container and now includes a small local
+implementation slice. Implementation choices should continue to follow from
+the design work rather than precede it.
 
 ## Current Status
 
-Pre-implementation. The active work is writing and refining the specification.
+Early implementation. The current runtime is a local TypeScript/Vite slice that
+proves bootstrap objects, T0 bytecode dispatch, `$space:call`, Dubspace,
+Taskspace, and a minimal IDE authoring loop.
 
 ## Specification
 
@@ -21,10 +23,21 @@ Start with [spec/README.md](spec/README.md).
 
 ## Implementation Plan
 
-Implementation planning lives in [impl/README.md](impl/README.md). It is still
-documentation, not runtime scaffolding.
+Implementation planning lives in [impl/README.md](impl/README.md). Runtime code
+lives under [src/](src/), with focused tests under [tests/](tests/).
+
+## Run Locally
+
+```sh
+npm install
+npm test
+npm run dev
+```
+
+Then open <http://localhost:5173>.
 
 ## Working Rule
 
-Do not add runtime scaffolding, dependencies, or application code until the
-spec explicitly calls for an implementation phase.
+Keep runtime changes aligned with the spec. When implementation pressure
+reveals a semantic gap, update the relevant spec or `impl/` note alongside the
+code.

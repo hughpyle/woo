@@ -1,6 +1,6 @@
 # Minimal IDE
 
-> Part of the Woo authoring specification. Working draft.
+> Part of the Woo authoring specification. Working draft. Profile: **first-light**.
 
 The minimal IDE is a Web UI for developing woocode against live Woo objects. It
 is not a full builder, package manager, or collaborative editor. Its purpose is

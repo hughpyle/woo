@@ -1,6 +1,6 @@
 # Tiny VM Profile
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **first-light** (T0 carries forward into v1-core as a subset of the full VM).
 
 The tiny demo should run real Woo behavior in a VM. It should not wait for the
 entire future VM: task migration, suspension, browser-host execution, exception

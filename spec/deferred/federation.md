@@ -1,6 +1,6 @@
 # Federation
 
-> Part of the [woo specification](../../SPEC.md). Layer: **deferred**.
+> Part of the [woo specification](../../SPEC.md). Layer: **deferred**. Profile: **v2-federation**.
 
 Cross-world interoperation. A "world" is a single deployment with its own object graph, base classes, and policy. Federation is **deferred to v2**; this document specifies the design, reserved syntax, and trust model so that v1 leaves the right hooks in place.
 

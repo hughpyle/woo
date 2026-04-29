@@ -19,7 +19,18 @@ The sections below distinguish three flavors of pending item:
 - ~~value model~~ — done (`spec/semantics/values.md`)
 - ~~$space normative behavior~~ — done (`spec/semantics/space.md`)
 - ~~identity / session (lite)~~ — done (`spec/semantics/identity.md`); full account/credential/recovery flows still deferred
-- failure model consolidation (`spec/semantics/failures.md`): one table covering recycled objects, in-flight calls, duplicate replies, hibernation resume, version skew, browser disconnect — partial coverage now in protocol/hosts.md §3.4 and space.md §S3
+- ~~failure model consolidation~~ — done (`spec/semantics/failures.md`)
+- ~~worktrees / sandbox / promote~~ — done (`spec/operations/worktrees.md`)
+- ~~migrations (bytecode, schema, data)~~ — done (`spec/operations/migrations.md`)
+- ~~credentialed auth (account vs actor, OAuth, multi-character)~~ — done (`spec/identity/auth.md`)
+- ~~debugging (step / breakpoint / replay)~~ — done (`spec/tooling/debugging.md`)
+- ~~backups + restore + cross-environment migration~~ — done (`spec/operations/backups.md`)
+- ~~deployments (dev/staging/prod, spec versions, blue-green)~~ — done (`spec/operations/deployments.md`)
+- ~~observability (logs, metrics, traces, audit)~~ — done (`spec/operations/observability.md`)
+- ~~conformance suite (behavioral test corpus)~~ — done (`spec/tooling/conformance.md`)
+- ~~catalogs (named reusable object sets)~~ — done (`spec/discovery/catalogs.md`)
+- ~~teams (team membership, role-based gating, team quotas)~~ — done (`spec/identity/teams.md`)
+- ~~federation v1 (minimum cross-world surface)~~ — done (`spec/discovery/federation-v1.md`)
 - ~~bootstrap world contract~~ — done (`spec/semantics/bootstrap.md`); concrete T0 bytecode fixtures in `spec/semantics/tiny-vm.md` "Concrete fixtures"
 - ~~discovery / introspection surface~~ — done (`spec/semantics/introspection.md`)
 - ~~observation schemas for the demos~~ — done (sections in dubspace-demo.md and taskspace-demo.md)

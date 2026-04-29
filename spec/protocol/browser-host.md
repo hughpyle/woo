@@ -1,6 +1,6 @@
 # Browser host bootstrap
 
-> Part of the [woo specification](../../SPEC.md). Layer: **protocol**.
+> Part of the [woo specification](../../SPEC.md). Layer: **protocol**. Profile: **v1-core**.
 
 Wire-level interaction between a player host and a browser tab hosting transient objects.
 

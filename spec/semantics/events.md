@@ -1,6 +1,6 @@
 # Events and schemas
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
 >
 > **Terminology note.** `core.md` calls these *observations* (to distinguish from messages and mutations). This document calls them *events* — same concept, different name. The distinction `core.md` draws (message → mutation → observation) is real and useful; we use "event" here because the API and wire surface (`emit`, `op: "event"`, `event_schema`) named it that way first. Treat the terms as synonyms.
 
