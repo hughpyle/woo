@@ -8,8 +8,9 @@ Built for humans and agents. Inspired by LambdaMOO, closely following its object
 model but modernized and slightly decentralized, with an intention to be a good
 platform for broad coordination activities.
 
-Current example apps include "Dubspace", a realtime interactive audio playground,
-and "Taskspace", a task-management space designed for AI agents to live in.
+Current example apps include a small chat-room; "Dubspace", a realtime interactive
+audio playground; "Taskspace", a task-management workspace (e.g. for AI agents),
+and a very minimal IDE.
 
 This repository began as a spec container and now includes a small local
 implementation slice. Implementation choices should continue to follow from
@@ -17,12 +18,9 @@ the design work rather than precede it.
 
 ## Current Status
 
-Early implementation. The current runtime is a local TypeScript/Vite slice that
-proves bootstrap objects, T0 bytecode dispatch, `$space:call`, Dubspace,
-Taskspace, and a minimal IDE authoring loop.
-
-Next steps include completing the core VM, implementing persistence, and
-then building a version that runs on Cloudflare Durable Objects.
+Early implementation.  Run locally, backed by in-memory or SQLite persistence.
+Next steps include finishing the core VM and DSL compiler, then backing with
+Cloudflare Durable Objects.
 
 ## Specification
 
