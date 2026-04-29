@@ -172,21 +172,20 @@ CREATE TABLE space_snapshot (
   PRIMARY KEY (space_id, seq)
 );
 
--- Session state for attached websocket (player objects only).
+-- Session state for reconnect credentials (player objects only).
 -- See semantics/identity.md.
 CREATE TABLE session (
   id          TEXT PRIMARY KEY,            -- session_id (random 128-bit)
   actor       TEXT NOT NULL,               -- objref of bound actor
   started     INTEGER NOT NULL,
-  attachment  TEXT NOT NULL                -- JSON; <2KiB for hibernation
+  expires_at  INTEGER NOT NULL,
+  last_detach_at INTEGER,                  -- null while attached
+  token_class TEXT NOT NULL
 );
 
--- Attached websockets for a session (multi-attach; see identity.md §I5).
-CREATE TABLE session_socket (
-  ws_id       TEXT PRIMARY KEY,            -- websocket connection id
-  session_id  TEXT NOT NULL,
-  attached_at INTEGER NOT NULL
-);
+-- Live websocket ids are not persisted. The in-memory connection registry is
+-- rebuilt from current connections; persisting socket ids creates orphaned
+-- attachments after restart.
 ```
 
 ### 14.2 Singleton DOs and Directory schema

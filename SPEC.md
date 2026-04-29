@@ -101,6 +101,7 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 ### Identity
 - [auth.md](spec/identity/auth.md) — credentialed auth, account vs actor, multi-character, recovery, service accounts (A1–A11)
 - [teams.md](spec/identity/teams.md) — team membership, role-based gating, team quotas, service accounts (TM1–TM10)
+- [provisioning.md](spec/identity/provisioning.md) — actor creation, class assignment, capability granting, directory sync (AP1–AP7) — **placeholder**
 
 ### Discovery
 - [catalogs.md](spec/discovery/catalogs.md) — published reusable object sets, registries, versioned imports (CT1–CT10)
@@ -120,7 +121,7 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 
 See [LATER.md](LATER.md) for the informal todo list — open items, sketches, gaps, decisions still pending. Not commitments.
 
-For what is *currently built* (as opposed to what the spec is building toward), see the implementation snapshots in [`notes/`](notes/). The current cut is documented in [notes/impl-v0.5-rich-vm-persistence-compiler.md](notes/impl-v0.5-rich-vm-persistence-compiler.md); the older [notes/impl-v0-first-light.md](notes/impl-v0-first-light.md) is historical. Current spec/implementation drift is tracked in [notes/spec-impl-alignment-2026-04-29.md](notes/spec-impl-alignment-2026-04-29.md).
+For what is *currently built* (as opposed to what the spec is building toward), see the implementation snapshots in [`notes/`](notes/). The current cut is documented in [notes/impl-v0.5-rich-vm-persistence-compiler.md](notes/impl-v0.5-rich-vm-persistence-compiler.md); the older [notes/impl-v0-first-light.md](notes/impl-v0-first-light.md) is historical. Current debt and spec/impl drift is in [TECH_DEBT_AUDIT.md](TECH_DEBT_AUDIT.md).
 
 Loose docs alongside the spec layers:
 - [spec/vision.md](spec/vision.md), [spec/README.md](spec/README.md) — author's working docs.

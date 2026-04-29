@@ -106,6 +106,30 @@ describe("sqlite persistence", () => {
     }
   });
 
+  it("does not persist socket attachments across SQLite reload", () => {
+    const { dir, path } = tempDb();
+    try {
+      const firstRepo = new SQLiteWorldRepository(path);
+      const firstWorld = createWorld({ repository: firstRepo });
+      const session = firstWorld.auth("guest:socket-reload");
+      firstWorld.attachSocket(session.id, "ws-old");
+      expect(firstWorld.sessions.get(session.id)?.attachedSockets.size).toBe(1);
+      firstRepo.close();
+
+      const secondRepo = new SQLiteWorldRepository(path);
+      const secondWorld = createWorld({ repository: secondRepo });
+      const reloaded = secondWorld.sessions.get(session.id);
+      expect(reloaded?.attachedSockets.size).toBe(0);
+      expect(reloaded?.lastDetachAt).toEqual(expect.any(Number));
+      const resumed = secondWorld.auth(`session:${session.id}`);
+      expect(resumed.actor).toBe(session.actor);
+      expect(secondWorld.sessions.get(session.id)?.lastDetachAt).toBe(reloaded?.lastDetachAt);
+      secondRepo.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("persists space snapshots", () => {
     const { dir, path } = tempDb();
     try {

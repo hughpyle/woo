@@ -22,18 +22,35 @@ Not every object is an actor. The runtime decides whether to permit a given obje
 
 ---
 
-## I2. Session
+## I2. Three layers: actor, session, connection
 
-A **session** is the binding between a client connection (a websocket) and an actor.
+The runtime distinguishes three things that look similar but have different lifetimes. Conflating them is the source of most identity bugs (guest pool exhaustion, ghost presence, audit confusion).
+
+| Layer | Concept | Lifetime | Persisted? | Identifier |
+|---|---|---|---|---|
+| **Actor** | A `$player` (or other `$actor`-descended) object in the world. The principal that authors calls and is checked for `progr`. | Indefinite — lives in the world. Guests are recycled, not deleted. | **Yes**, in object storage. | objref / ULID |
+| **Session** | A reconnect credential bound to an actor. Lets a client re-attach without re-auth. | Bounded TTL with grace after the last connection detaches; reaped on expiry. | Credential metadata only (id, actor, expires_at, last_detach_at). **Not** the list of attached sockets. | random 128-bit id |
+| **Connection** | A live transport attachment — one websocket, or one in-flight REST request. | Open-to-close of the transport. | **No** — in-memory only on the player host. Lost on host restart by design. | host-local socket id |
+
+Concretely:
+
+- An actor exists whether anyone is connected to it. A guest sitting in the pool is still a `$player` in the world.
+- A session exists from `op: "auth"` until reap. Across that window, zero or more connections may be attached.
+- A connection exists from socket-open to socket-close. One session may have multiple concurrent connections (one per browser tab); see §I5.
+
+**`is_connected(actor)`** is derived: "any live connection has `actor_ref == actor`." Not a stored property. Implementations may cache it, but the truth is the connection registry.
+
+The persisted session record carries:
 
 | Field | Meaning |
 |---|---|
-| `session_id` | opaque identifier (random 128-bit value); the client uses this to reconnect |
+| `session_id` | opaque random identifier; the client uses this to reconnect |
 | `actor` | objref of the bound actor |
-| `started` | ms timestamp |
-| `attachment` | small JSON state for hibernation; see [reference/cloudflare.md §R1.4](../reference/cloudflare.md#r14-hibernation) |
+| `started_at` | ms timestamp |
+| `expires_at` | absolute deadline; session is unconditionally reaped after this |
+| `last_detach_at` | ms timestamp of the most recent connection close (null while connected). Drives the grace-period reap path. |
 
-A session is established by the `op: "auth"` frame and confirmed by the server's `op: "session"` frame ([wire.md §17](../protocol/wire.md#17-wire-protocol)). One session may have **multiple** attached websockets (I5).
+It does **not** carry a list of attached sockets — those live in the in-memory connection registry on the player host. Persisting socket ids creates the failure mode where a server restart leaves orphaned "attached" entries that never clear.
 
 ---
 
@@ -48,7 +65,7 @@ server → client: { op: "session", actor: ObjRef }
 
 The token is a string; the server interprets it. First-light vocabulary:
 
-- **`guest:<random>`** — server creates a fresh `$player` (or pulls one from a pre-seeded guest pool), binds it to a new session, and returns the actor's objref. Guest actors persist for the session and a configurable grace period (default 1 hour) after the last websocket detach.
+- **`guest:<random>`** — server creates a fresh `$player` (or pulls one from a pre-seeded guest pool), binds it to a new session, and returns the actor's objref. Guest actors persist for the session and the guest grace period after the last connection detaches (defaults in §I6.2).
 - **`session:<session_id>`** — if the session is alive in the server's session table, auth resumes it. If expired, the server replies with `op: "error"` code `E_NOSESSION`; the client must establish a new session.
 - **`bearer:<...>`** — reserved for credentialed auth, post-first-light.
 
@@ -79,15 +96,69 @@ This matches the principle that an actor is an actor regardless of how many UIs 
 
 ---
 
-## I6. Disconnect lifecycle
+## I6. Disconnect and reap lifecycle
 
-When a websocket closes:
+The lifecycle has three steps, in this order:
 
-1. The session's outbound queue stops draining for that websocket. Other attached websockets continue. If this was the last attached websocket, the session enters a *detached* state.
-2. Any task waiting on `READ player` ([tasks.md §16.6](tasks.md#166-read-tasks)) for this session enters a grace period.
-3. After the grace period (default 5 minutes), still-detached sessions: their `READ` tasks are killed; their in-memory state is released. The session record itself persists for the broader session timeout.
-4. After the session timeout (default 1 hour), the session is reaped: its record is deleted, and a guest actor bound to it is recycled.
-5. A non-guest actor (post-first-light) survives session reaping.
+### I6.1 Connection close
+
+1. The connection record is dropped from the host's in-memory registry.
+2. If other connections remain on the same session, broadcast continues to them; the session stays *attached*.
+3. If this was the last connection: set `session.last_detach_at = now`. The session enters *detached* state. No reap yet.
+
+`READ` tasks waiting for input from this player ([tasks.md §16.6](tasks.md#166-read-tasks)) continue to wait — they belong to the actor, not the connection. They are killed at session reap (§I6.3), not connection close.
+
+### I6.2 Grace period
+
+A reattach during grace re-binds the new connection to the existing session and clears `last_detach_at`. The actor is unchanged, presence is preserved, the client can resume by gap-recovering applied frames per space.
+
+Grace defaults are token-class dependent:
+
+| Token class | Default grace | Default total session TTL |
+|---|---|---|
+| `guest:` | 60 seconds | 5 minutes after `started_at`, or 60s after detach, whichever is sooner |
+| `session:` (renewing) | inherits from underlying token class | unchanged on resume |
+| `bearer:` / `apikey:` (v1-ops) | 5 minutes | 24 hours rolling |
+
+Operators may override per world via `$server_options.session_*`.
+
+### I6.3 Reap
+
+When `session.last_detach_at + grace < now` *or* `now > session.expires_at`, the runtime reaps:
+
+1. Kill any `READ` tasks for this actor (`E_INTRPT`).
+2. Remove the actor from every space's `subscribers` list and from `actor.presence_in`. Pair the two; they're a mirror.
+3. Call `actor:on_disfunc()` if defined. This is where guest reset happens (§I6.4). Errors are caught and logged; reap continues.
+4. Delete the session record.
+
+After reap, the *actor* may persist or not depending on its class:
+
+- **Guest actors** (`$guest`-descended): the disfunc returns the guest to the free pool. The objref persists; a future connection can bind to the same objref.
+- **Credentialed actors** (`$player` non-guest): the disfunc resets per-session state if any. The actor stays in the world. A new auth establishes a new session.
+
+### I6.4 Guest reset (the `:on_disfunc` convention)
+
+Guests accumulate state during their session — they may have moved rooms, picked up artifacts, set their description, attached features. None of that should leak to the next user of that guest objref.
+
+The convention is `:on_disfunc()` on `$guest`:
+
+```woo
+verb $guest:on_disfunc() {
+  this:moveto(this.home);          // back to $nowhere
+  this.description = "";           // wipe self-description
+  this.aliases = [];               // wipe aliases
+  this.features = [];              // detach all features
+  for item in this.contents {      // drop everything held
+    item:moveto(this.home);
+  }
+  // re-add to the free pool so the next auth can bind here
+  $system:return_guest(this);
+}
+```
+
+This is the LambdaCore `@disfunc` pattern under a clearer name. The `home` property is conventionally `$nowhere` (a seeded `$thing`; see [bootstrap.md §B6](bootstrap.md#b6-demo-instances)); operators may override per-guest if they want named lounges.
+
+The disfunc runs with `progr = this.owner` (typically `$wiz`), so it has authority to reset state regardless of what permission flips occurred during the session.
 
 ---
 

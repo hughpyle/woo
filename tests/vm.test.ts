@@ -515,6 +515,52 @@ describe("v0.5 in-memory VM", () => {
     expect(world.parkedTasks.size).toBe(0);
   });
 
+  it("serializes observations that exist when a VM continuation parks", () => {
+    const { world, session, actor } = authedWorld();
+    world.addVerb(
+      "delay_1",
+      addBytecodeVerb("observe_then_suspend", {
+        literals: ["type", "before_suspend", null],
+        num_locals: 0,
+        max_stack: 4,
+        version: 1,
+        ops: [["PUSH_LIT", 0], ["PUSH_LIT", 1], ["MAKE_MAP", 1], ["OBSERVE"], ["PUSH_INT", 0], ["SUSPEND"], ["PUSH_LIT", 2], ["RETURN"]]
+      })
+    );
+
+    const applied = world.call("observe-suspend", session.id, "the_dubspace", message(actor, "delay_1", "observe_then_suspend", []));
+    expect(applied.op).toBe("applied");
+    if (applied.op === "applied") expect(applied.observations.map((obs) => obs.type)).toEqual(["before_suspend", "task_suspended"]);
+    const parked = Array.from(world.parkedTasks.values())[0]?.serialized as any;
+    expect(parked?.task?.frames?.[0]?.ctx?.observations?.map((obs: any) => obs.type)).toEqual(["before_suspend"]);
+  });
+
+  it("does not count suspended wall time against resumed VM continuations", () => {
+    const { world, session, actor } = authedWorld();
+    world.addVerb(
+      "delay_1",
+      addBytecodeVerb("short_wall_suspend", {
+        literals: ["after_wall_suspend", null],
+        num_locals: 0,
+        max_stack: 4,
+        max_wall_ms: 5,
+        version: 1,
+        ops: [["PUSH_INT", 0], ["SUSPEND"], ["POP"], ["PUSH_THIS"], ["PUSH_LIT", 0], ["PUSH_ARG", 0], ["SET_PROP"], ["PUSH_LIT", 1], ["RETURN"]]
+      })
+    );
+
+    const applied = world.call("wall-suspend", session.id, "the_dubspace", message(actor, "delay_1", "short_wall_suspend", ["ok"]));
+    expect(applied.op).toBe("applied");
+    const parked = Array.from(world.parkedTasks.values())[0]?.serialized as any;
+    parked.task.frames[0].startedAt = Date.now() - 60_000;
+    parked.task.frames[0].activeWallMs = 0;
+
+    const ran = world.runDueTasks(Date.now() + 1);
+    expect(ran).toHaveLength(1);
+    expect(ran[0].frame?.op).toBe("applied");
+    expect(world.getProp("delay_1", "after_wall_suspend")).toBe("ok");
+  });
+
   it("parks READ continuations and resumes them through a sequenced input frame", () => {
     const { world, session, actor } = authedWorld();
     world.addVerb(

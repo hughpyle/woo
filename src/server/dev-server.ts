@@ -1,7 +1,7 @@
 import http from "node:http";
 import { parse } from "node:url";
 import { createServer as createViteServer } from "vite";
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import { compileVerb, definePropertyVersioned, installVerb } from "../core/authoring";
 import { createWorld } from "../core/bootstrap";
 import { normalizeError, type ParkedTaskRun } from "../core/world";
@@ -12,7 +12,8 @@ import { SQLiteWorldRepository } from "./sqlite-repository";
 // unauthenticated for local poking. Do not deploy as-is.
 const repository = new SQLiteWorldRepository(process.env.WOO_DB ?? ".woo/dev.sqlite");
 const world = createWorld({ repository });
-const sockets = new Map<WebSocket, { sessionId: string; actor: string; socketId: string }>();
+type AttachedSocket = { sessionId: string; actor: string; socketId: string };
+const sockets = new Map<WebSocket, AttachedSocket>();
 let socketCounter = 1;
 
 const vite = await createViteServer({
@@ -35,10 +36,12 @@ const server = http.createServer(async (req, res) => {
       });
     }
     if (req.method === "POST" && url.pathname === "/api/compile") {
+      if (!authoringEnabled()) return json(res, { error: wooError("E_PERM", "authoring endpoints are disabled") }, 403);
       const body = await readJson(req);
       return json(res, compileVerb(String(body.source ?? ""), { format: body.format }));
     }
     if (req.method === "POST" && url.pathname === "/api/install") {
+      if (!authoringEnabled()) return json(res, { error: wooError("E_PERM", "authoring endpoints are disabled") }, 403);
       const body = await readJson(req);
       const result = installVerb(
         world,
@@ -51,6 +54,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, result);
     }
     if (req.method === "POST" && url.pathname === "/api/property") {
+      if (!authoringEnabled()) return json(res, { error: wooError("E_PERM", "authoring endpoints are disabled") }, 403);
       const body = await readJson(req);
       const result = definePropertyVersioned(
         world,
@@ -91,11 +95,8 @@ wss.on("connection", (ws) => {
         return;
       }
       if (frame.op === "call") {
-        const session = sockets.get(ws);
-        if (!session) {
-          ws.send(JSON.stringify({ op: "error", id: frame.id, error: { code: "E_NOSESSION", message: "authenticate first" } }));
-          return;
-        }
+        const session = requireAttached(ws, frame.id);
+        if (!session) return;
         const message: Message = {
           actor: session.actor,
           target: frame.message?.target,
@@ -109,11 +110,8 @@ wss.on("connection", (ws) => {
         return;
       }
       if (frame.op === "direct") {
-        const session = sockets.get(ws);
-        if (!session) {
-          ws.send(JSON.stringify({ op: "error", id: frame.id, error: { code: "E_NOSESSION", message: "authenticate first" } }));
-          return;
-        }
+        const session = requireAttached(ws, frame.id);
+        if (!session) return;
         const args = Array.isArray(frame.args) ? frame.args : [];
         const result = world.directCall(frame.id, session.actor, String(frame.target ?? "") as ObjRef, String(frame.verb ?? ""), args);
         if (result.op === "result") {
@@ -125,11 +123,8 @@ wss.on("connection", (ws) => {
         return;
       }
       if (frame.op === "replay") {
-        const session = sockets.get(ws);
-        if (!session) {
-          ws.send(JSON.stringify({ op: "error", id: frame.id, error: { code: "E_NOSESSION", message: "authenticate first" } }));
-          return;
-        }
+        const session = requireAttached(ws, frame.id);
+        if (!session) return;
         const space = String(frame.space ?? "") as ObjRef;
         if (!world.hasPresence(session.actor, space)) throw wooError("E_PERM", `${session.actor} is not present in ${space}`);
         const from = Math.max(1, Number(frame.from ?? 1));
@@ -138,11 +133,8 @@ wss.on("connection", (ws) => {
         return;
       }
       if (frame.op === "input") {
-        const session = sockets.get(ws);
-        if (!session) {
-          ws.send(JSON.stringify({ op: "error", id: frame.id, error: { code: "E_NOSESSION", message: "authenticate first" } }));
-          return;
-        }
+        const session = requireAttached(ws, frame.id);
+        if (!session) return;
         const input = Object.prototype.hasOwnProperty.call(frame, "value") ? frame.value : frame.text ?? "";
         const result = world.deliverInput(session.actor, input);
         if (!result) {
@@ -175,7 +167,38 @@ server.listen(port, () => {
 
 setInterval(() => {
   for (const result of world.runDueTasks()) broadcastTaskResult(result);
+  expireAttachedSessions(world.reapExpiredSessions());
 }, 250).unref();
+
+function requireAttached(ws: WebSocket, frameId: string | undefined): AttachedSocket | null {
+  const session = sockets.get(ws);
+  if (!session) {
+    sendNoSession(ws, frameId, "authenticate first");
+    return null;
+  }
+  if (world.sessionAlive(session.sessionId)) return session;
+  expireAttachedSessions([session.sessionId]);
+  return null;
+}
+
+function expireAttachedSessions(sessionIds: string[]): void {
+  if (sessionIds.length === 0) return;
+  const expired = new Set(sessionIds);
+  for (const [ws, session] of Array.from(sockets.entries())) {
+    if (!expired.has(session.sessionId)) continue;
+    sockets.delete(ws);
+    sendNoSession(ws, undefined, "session token is expired or unknown");
+  }
+}
+
+function sendNoSession(ws: WebSocket, id: string | undefined, message: string): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ op: "error", id, error: { code: "E_NOSESSION", message } }));
+}
+
+function authoringEnabled(): boolean {
+  return process.env.NODE_ENV !== "production" || process.env.WOO_DEV === "1";
+}
 
 function broadcastApplied(frame: AppliedFrame, originator?: WebSocket): void {
   for (const [ws, session] of sockets) {
@@ -205,8 +228,15 @@ function broadcastLiveEvents(result: DirectResultFrame): void {
 
 function broadcastLiveEvent(frame: LiveEventFrame, audience: ObjRef): void {
   const data = JSON.stringify(frame);
+  const directedTo = typeof frame.observation.to === "string" ? frame.observation.to : null;
+  const directedFrom = typeof frame.observation.from === "string" ? frame.observation.from : null;
   for (const [ws, session] of sockets) {
-    if (ws.readyState !== ws.OPEN || !world.hasPresence(session.actor, audience)) continue;
+    if (ws.readyState !== ws.OPEN) continue;
+    if (directedTo || directedFrom) {
+      if (session.actor !== directedTo && session.actor !== directedFrom) continue;
+    } else if (!world.hasPresence(session.actor, audience)) {
+      continue;
+    }
     ws.send(data);
   }
 }

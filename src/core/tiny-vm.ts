@@ -31,6 +31,7 @@ type VmFrame = {
   pc: number;
   ticksRemaining: number;
   startedAt: number;
+  activeWallMs: number;
   memoryUsed: number;
 };
 
@@ -45,6 +46,7 @@ export type SerializedVmContext = {
   verbName: string;
   definer: ObjRef;
   message: Message;
+  observations?: Observation[];
 };
 
 export type SerializedVmFrame = {
@@ -57,6 +59,7 @@ export type SerializedVmFrame = {
   pc: number;
   ticksRemaining: number;
   startedAt: number;
+  activeWallMs?: number;
   memoryUsed: number;
 };
 
@@ -191,7 +194,7 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
   };
   const callVerb = (obj: string, name: string, callArgs: WooValue[], startAt?: string | null): void => {
     const caller = frame();
-    const { definer, verb } = caller.ctx.world.resolveVerbFrom(startAt ?? obj, name);
+    const { definer, verb } = startAt === undefined ? caller.ctx.world.resolveVerb(obj, name) : caller.ctx.world.resolveVerbFrom(startAt, name);
     const callCtx: CallContext = {
       ...caller.ctx,
       thisObj: obj,
@@ -222,7 +225,9 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
     try {
       current.ticksRemaining -= tickWeight(op);
       if (current.ticksRemaining < 0) throw wooError("E_TICKS", "VM tick budget exceeded");
-      if (Date.now() - current.startedAt > (current.bytecode.max_wall_ms ?? DEFAULT_WALL_MS)) throw wooError("E_TIMEOUT", "VM wall-time budget exceeded");
+      if (current.activeWallMs + Date.now() - current.startedAt > (current.bytecode.max_wall_ms ?? DEFAULT_WALL_MS)) {
+        throw wooError("E_TIMEOUT", "VM wall-time budget exceeded");
+      }
 
       switch (op) {
         case "PUSH_LIT":
@@ -754,6 +759,7 @@ function makeFrame(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): 
     pc: 0,
     ticksRemaining: bytecode.max_ticks ?? DEFAULT_TICKS,
     startedAt: Date.now(),
+    activeWallMs: 0,
     memoryUsed: 0
   };
 }
@@ -777,7 +783,8 @@ function serializeVmFrame(frame: VmFrame): SerializedVmFrame {
       thisObj: frame.ctx.thisObj,
       verbName: frame.ctx.verbName,
       definer: frame.ctx.definer,
-      message: cloneValue(frame.ctx.message as unknown as WooValue) as unknown as Message
+      message: cloneValue(frame.ctx.message as unknown as WooValue) as unknown as Message,
+      observations: cloneValue(frame.ctx.observations as unknown as WooValue) as unknown as Observation[]
     },
     bytecode: cloneValue(frame.bytecode as unknown as WooValue) as unknown as TinyBytecode,
     args: cloneValue(frame.args as WooValue) as WooValue[],
@@ -787,6 +794,7 @@ function serializeVmFrame(frame: VmFrame): SerializedVmFrame {
     pc: frame.pc,
     ticksRemaining: frame.ticksRemaining,
     startedAt: frame.startedAt,
+    activeWallMs: frame.activeWallMs + Math.max(0, Date.now() - frame.startedAt),
     memoryUsed: frame.memoryUsed
   };
 }
@@ -818,7 +826,8 @@ function hydrateVmFrame(world: CallContext["world"], frame: SerializedVmFrame, o
     handlers: cloneValue(frame.handlers as unknown as WooValue) as unknown as VmHandler[],
     pc: frame.pc,
     ticksRemaining: frame.ticksRemaining,
-    startedAt: frame.startedAt,
+    startedAt: Date.now(),
+    activeWallMs: frame.activeWallMs ?? 0,
     memoryUsed: frame.memoryUsed
   };
 }

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SerializedObject, SerializedWorld, SpaceSnapshotRecord, WorldRepository } from "../core/repository";
-import type { ObjRef } from "../core/types";
+import { wooError, type ObjRef } from "../core/types";
 
 type JsonFolderManifest = {
   format: "woo-json-folder";
@@ -150,7 +150,11 @@ function writeJson(path: string, value: unknown): void {
 }
 
 function readJson<T>(path: string): T {
-  return JSON.parse(readFileSync(path, "utf8")) as T;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as T;
+  } catch (err) {
+    throw wooError("E_STORAGE", `invalid JSON file: ${path}`, err instanceof Error ? err.message : String(err));
+  }
 }
 
 function fileForId(id: ObjRef): string {

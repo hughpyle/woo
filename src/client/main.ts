@@ -4,20 +4,35 @@ type AppState = {
   socket?: WebSocket;
   actor?: string;
   session?: string;
-  tab: "dubspace" | "taskspace" | "ide";
+  tab: "dubspace" | "taskspace" | "chat" | "ide";
   world?: any;
   clockOffset: number;
   liveControls: Record<string, { value: any; actor: string; at: number }>;
+  chatFeed: ChatLine[];
+  chatPresent: string[];
+  chatDraft: string;
   observations: any[];
   selectedObject: string;
   selectedTask?: string;
   compileResult?: any;
 };
 
+type ChatLine = {
+  kind: "said" | "emoted" | "told" | "entered" | "left" | "system" | "error";
+  actor?: string;
+  from?: string;
+  to?: string;
+  text?: string;
+  ts?: number;
+};
+
 const state: AppState = {
-  tab: "dubspace",
+  tab: "chat",
   clockOffset: 0,
   liveControls: {},
+  chatFeed: [],
+  chatPresent: [],
+  chatDraft: "",
   observations: [],
   selectedObject: "delay_1"
 };
@@ -32,6 +47,7 @@ const drumVoices = [
   { id: "tone", label: "Tone" }
 ] as const;
 const directThrottle = new Map<string, number>();
+const pendingDirect = new Map<string, (result: any) => void>();
 
 connect();
 void refresh();
@@ -61,6 +77,13 @@ function connect() {
     if (frame.op === "event") {
       receiveLiveEvent(frame.observation);
     }
+    if (frame.op === "result") {
+      const handler = pendingDirect.get(frame.id);
+      if (handler) {
+        pendingDirect.delete(frame.id);
+        handler(frame.result);
+      }
+    }
     if (frame.op === "task") {
       state.observations.unshift({ task: frame.task, space: frame.space, observations: frame.observations });
       state.observations = state.observations.slice(0, 30);
@@ -75,6 +98,7 @@ function connect() {
       await refresh();
     }
     if (frame.op === "error") {
+      if (typeof frame.id === "string") pendingDirect.delete(frame.id);
       if (frame.error?.code === "E_NOSESSION") {
         clearSession();
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ op: "auth", token: "guest:local" }));
@@ -136,6 +160,7 @@ async function refresh() {
   const response = await fetch("/api/state");
   state.world = await response.json();
   state.clockOffset = Number(state.world.server_time ?? Date.now()) - Date.now();
+  state.chatPresent = Array.isArray(state.world?.chat?.present) ? state.world.chat.present : state.chatPresent;
   audio?.sync(effectiveDubspace(), state.clockOffset);
   render();
 }
@@ -145,9 +170,11 @@ function call(space: string, target: string, verb: string, args: any[] = []) {
   state.socket?.send(JSON.stringify({ op: "call", id, space, message: { target, verb, args } }));
 }
 
-function direct(target: string, verb: string, args: any[] = []) {
+function direct(target: string, verb: string, args: any[] = [], onResult?: (result: any) => void) {
   const id = crypto.randomUUID();
+  if (onResult) pendingDirect.set(id, onResult);
   state.socket?.send(JSON.stringify({ op: "direct", id, target, verb, args }));
+  return id;
 }
 
 function liveKey(target: string, name: string) {
@@ -188,6 +215,10 @@ function sendPreviewControl(target: string, name: string, value: any) {
 }
 
 function receiveLiveEvent(observation: any) {
+  if (isChatObservation(observation)) {
+    receiveChatEvent(observation);
+    return;
+  }
   if (observation?.type === "gesture_progress") {
     receiveLiveControl(observation);
     return;
@@ -225,7 +256,8 @@ function render() {
     <div class="shell">
       <aside class="nav">
         <div class="brand">Woo</div>
-        <div class="actor">${state.actor ?? "connecting..."}</div>
+        <div class="actor">${escapeHtml(state.actor ?? "connecting...")}</div>
+        ${navButton("chat", "Chat")}
         ${navButton("dubspace", "Dubspace")}
         ${navButton("taskspace", "Taskspace")}
         ${navButton("ide", "IDE")}
@@ -233,6 +265,7 @@ function render() {
       <main class="main">
         ${state.tab === "dubspace" ? renderDubspace() : ""}
         ${state.tab === "taskspace" ? renderTaskspace() : ""}
+        ${state.tab === "chat" ? renderChat() : ""}
         ${state.tab === "ide" ? renderIde() : ""}
       </main>
       <aside class="events">
@@ -247,7 +280,9 @@ function render() {
   bindCommon();
   if (state.tab === "dubspace") bindDubspace();
   if (state.tab === "taskspace") bindTaskspace();
+  if (state.tab === "chat") bindChat();
   if (state.tab === "ide") bindIde();
+  if (state.tab === "chat") focusChatInput();
 }
 
 function navButton(tab: AppState["tab"], label: string) {
@@ -283,15 +318,15 @@ function renderDubspace() {
           const slot = dub[id]?.props ?? {};
           return `
           <article class="panel slot ${slot.playing ? "playing" : ""}">
-            <h2>${dub[id]?.name ?? id}</h2>
-            <button data-loop="${id}" data-playing="${slot.playing ? "true" : "false"}">${slot.playing ? "Stop" : "Start"}</button>
-            <label>Gain <input data-control="${id}:gain" type="range" min="0" max="1" step="0.01" value="${slot.gain ?? 0.75}"></label>
+            <h2>${escapeHtml(String(dub[id]?.name ?? id))}</h2>
+            <button data-loop="${escapeHtml(id)}" data-playing="${slot.playing ? "true" : "false"}">${slot.playing ? "Stop" : "Start"}</button>
+            <label>Gain <input data-control="${escapeHtml(`${id}:gain`)}" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(slot.gain ?? 0.75))}"></label>
           </article>`;
         })
         .join("")}
       <article class="panel">
         <h2>Filter</h2>
-        <label>Cutoff <input data-control="filter_1:cutoff" type="range" min="80" max="5000" step="1" value="${filter.cutoff ?? 1000}"></label>
+        <label>Cutoff <input data-control="filter_1:cutoff" type="range" min="80" max="5000" step="1" value="${escapeHtml(String(filter.cutoff ?? 1000))}"></label>
       </article>
       <article class="panel">
         <h2>Delay</h2>
@@ -305,7 +340,7 @@ function renderDubspace() {
           <h2>Percussion</h2>
           <button data-transport="${drum.playing ? "stop" : "start"}">${drum.playing ? "Stop" : "Start"}</button>
         </div>
-        <label>BPM <input data-tempo type="range" min="60" max="200" step="1" value="${drum.bpm ?? 118}"><span>${drum.bpm ?? 118}</span></label>
+        <label>BPM <input data-tempo type="range" min="60" max="200" step="1" value="${escapeHtml(String(drum.bpm ?? 118))}"><span>${escapeHtml(String(drum.bpm ?? 118))}</span></label>
         <div class="steps">
           ${drumVoices.map((voice) => renderStepRow(voice.id, voice.label, pattern[voice.id])).join("")}
         </div>
@@ -315,7 +350,7 @@ function renderDubspace() {
 }
 
 function slider(obj: string, prop: string, value: number) {
-  return `<label>${prop} <input data-control="${obj}:${prop}" type="range" min="0" max="1" step="0.01" value="${value}"></label>`;
+  return `<label>${escapeHtml(prop)} <input data-control="${escapeHtml(`${obj}:${prop}`)}" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(value))}"></label>`;
 }
 
 function bindDubspace() {
@@ -370,15 +405,210 @@ function normalizePattern(raw: any): Record<string, boolean[]> {
 function renderStepRow(voice: string, label: string, row: boolean[]) {
   return `
     <div class="step-row">
-      <span>${label}</span>
+      <span>${escapeHtml(label)}</span>
       ${row
         .map(
           (enabled, index) =>
-            `<button class="step ${enabled ? "active" : ""}" data-step="${voice}:${index}" data-enabled="${enabled ? "true" : "false"}">${index + 1}</button>`
+            `<button class="step ${enabled ? "active" : ""}" data-step="${escapeHtml(`${voice}:${index}`)}" data-enabled="${enabled ? "true" : "false"}">${index + 1}</button>`
         )
         .join("")}
     </div>
   `;
+}
+
+function enterChat() {
+  direct("the_chatroom", "enter", [], (result) => {
+    setChatPresent(result);
+    if (state.tab === "chat") render();
+  });
+}
+
+function isChatObservation(observation: any) {
+  return ["said", "emoted", "told", "entered", "left"].includes(String(observation?.type ?? ""));
+}
+
+function receiveChatEvent(observation: any) {
+  const kind = String(observation.type) as ChatLine["kind"];
+  if (kind === "entered" && typeof observation.actor === "string" && !state.chatPresent.includes(observation.actor)) {
+    state.chatPresent = [...state.chatPresent, observation.actor];
+  }
+  if (kind === "left" && typeof observation.actor === "string") {
+    state.chatPresent = state.chatPresent.filter((id) => id !== observation.actor);
+  }
+  pushChatLine({
+    kind,
+    actor: typeof observation.actor === "string" ? observation.actor : undefined,
+    from: typeof observation.from === "string" ? observation.from : undefined,
+    to: typeof observation.to === "string" ? observation.to : undefined,
+    text: typeof observation.text === "string" ? observation.text : undefined,
+    ts: typeof observation.ts === "number" ? observation.ts : undefined
+  });
+}
+
+function pushChatLine(line: ChatLine) {
+  state.chatFeed = [...state.chatFeed, line].slice(-160);
+  if (state.tab === "chat") render();
+}
+
+function setChatPresent(result: any) {
+  if (Array.isArray(result)) state.chatPresent = result.map(String);
+}
+
+function renderChat() {
+  const room = state.world?.chat?.room;
+  const present = state.chatPresent;
+  const inRoom = Boolean(state.actor && present.includes(state.actor));
+  if (!inRoom) {
+    return `
+      <section class="toolbar">
+        <h1>${escapeHtml(room?.name ?? "Chat")}</h1>
+        <button data-chat-enter>Enter</button>
+      </section>
+      <section class="chat-layout solo">
+        <div class="panel chat-empty-panel">
+          <p>${escapeHtml(room?.description ?? "Enter the room to chat.")}</p>
+        </div>
+      </section>
+    `;
+  }
+  return `
+    <section class="toolbar">
+      <h1>${escapeHtml(room?.name ?? "Chat")}</h1>
+      <button data-chat-leave>Leave</button>
+      <button data-chat-look>Look</button>
+      <button data-chat-who>Who</button>
+    </section>
+    <section class="chat-layout">
+      <div class="panel chat-panel">
+        <div class="chat-feed" aria-live="polite">
+          ${state.chatFeed.map(renderChatLine).join("") || `<div class="chat-empty">${escapeHtml(room?.description ?? "No chat events yet.")}</div>`}
+        </div>
+        <form class="chat-form" data-chat-form>
+          <input data-chat-input autocomplete="off" placeholder="Say, /me acts, /tell guest_2 hello" value="${escapeHtml(state.chatDraft)}" />
+          <button>Send</button>
+        </form>
+      </div>
+      <aside class="panel chat-presence">
+        <h2>Present</h2>
+        <div class="presence-list">
+          ${present.map((id: string) => `<button data-chat-recipient="${escapeHtml(id)}">${escapeHtml(actorLabel(id))}<span>${escapeHtml(id)}</span></button>`).join("") || "<p>No actors present.</p>"}
+        </div>
+      </aside>
+    </section>
+  `;
+}
+
+function renderChatLine(line: ChatLine) {
+  const time = line.ts ? new Date(line.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  if (line.kind === "said") {
+    return `<div class="chat-line said"><span class="chat-time">${escapeHtml(time)}</span><strong>${escapeHtml(actorLabel(line.actor))}</strong><span>${escapeHtml(line.text ?? "")}</span></div>`;
+  }
+  if (line.kind === "emoted") {
+    return `<div class="chat-line emote"><span class="chat-time">${escapeHtml(time)}</span><span>${escapeHtml(actorLabel(line.actor))} ${escapeHtml(line.text ?? "")}</span></div>`;
+  }
+  if (line.kind === "told") {
+    return `<div class="chat-line told"><span class="chat-time">${escapeHtml(time)}</span><strong>${escapeHtml(actorLabel(line.from))} -> ${escapeHtml(actorLabel(line.to))}</strong><span>${escapeHtml(line.text ?? "")}</span></div>`;
+  }
+  if (line.kind === "entered" || line.kind === "left") {
+    return `<div class="chat-line system"><span class="chat-time">${escapeHtml(time)}</span><span>${escapeHtml(actorLabel(line.actor))} ${line.kind === "entered" ? "entered" : "left"}.</span></div>`;
+  }
+  return `<div class="chat-line system"><span class="chat-time">${escapeHtml(time)}</span><span>${escapeHtml(line.text ?? "")}</span></div>`;
+}
+
+function bindChat() {
+  document.querySelector<HTMLInputElement>("[data-chat-input]")?.addEventListener("input", (event) => {
+    state.chatDraft = (event.currentTarget as HTMLInputElement).value;
+  });
+  document.querySelector<HTMLFormElement>("[data-chat-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = document.querySelector<HTMLInputElement>("[data-chat-input]");
+    const text = input?.value.trim() ?? "";
+    if (!text) return;
+    state.chatDraft = "";
+    sendChatInput(text);
+    if (input) {
+      input.value = "";
+      input.focus();
+    }
+  });
+  document.querySelector<HTMLButtonElement>("[data-chat-enter]")?.addEventListener("click", enterChat);
+  document.querySelector<HTMLButtonElement>("[data-chat-leave]")?.addEventListener("click", () => {
+    direct("the_chatroom", "leave", [], (result) => {
+      setChatPresent(result);
+      if (state.tab === "chat") render();
+    });
+  });
+  document.querySelector<HTMLButtonElement>("[data-chat-who]")?.addEventListener("click", refreshChatWho);
+  document.querySelector<HTMLButtonElement>("[data-chat-look]")?.addEventListener("click", refreshChatLook);
+  document.querySelectorAll<HTMLButtonElement>("[data-chat-recipient]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const input = document.querySelector<HTMLInputElement>("[data-chat-input]");
+      if (!input) return;
+      state.chatDraft = `/tell ${button.dataset.chatRecipient} `;
+      input.value = state.chatDraft;
+      input.focus();
+    });
+  });
+}
+
+function focusChatInput() {
+  window.requestAnimationFrame(() => {
+    const input = document.querySelector<HTMLInputElement>("[data-chat-input]");
+    input?.focus();
+    if (input) input.setSelectionRange(input.value.length, input.value.length);
+  });
+}
+
+function sendChatInput(text: string) {
+  if (text === "/who" || text === "who") {
+    refreshChatWho();
+    return;
+  }
+  if (text === "/look" || text === "look") {
+    refreshChatLook();
+    return;
+  }
+  if (text.startsWith("/me ")) {
+    direct("the_chatroom", "emote", [text.slice(4).trim()]);
+    return;
+  }
+  if (text.startsWith(":")) {
+    direct("the_chatroom", "emote", [text.slice(1).trim()]);
+    return;
+  }
+  if (text.startsWith("/tell ")) {
+    const rest = text.slice("/tell ".length).trim();
+    const split = rest.indexOf(" ");
+    if (split <= 0) {
+      pushChatLine({ kind: "error", text: "Tell needs a recipient and text." });
+      return;
+    }
+    direct("the_chatroom", "tell", [rest.slice(0, split), rest.slice(split + 1).trim()]);
+    return;
+  }
+  direct("the_chatroom", "say", [text]);
+}
+
+function refreshChatWho() {
+  direct("the_chatroom", "who", [], (result) => {
+    setChatPresent(result);
+    const names = state.chatPresent.map(actorLabel).join(", ") || "nobody";
+    pushChatLine({ kind: "system", text: `Present: ${names}` });
+  });
+}
+
+function refreshChatLook() {
+  direct("the_chatroom", "look", [], (result) => {
+    const present = Array.isArray(result?.present_actors) ? result.present_actors.map(String) : [];
+    state.chatPresent = present;
+    const names = present.map(actorLabel).join(", ") || "nobody";
+    pushChatLine({ kind: "system", text: `${String(result?.description ?? "")} Present: ${names}.` });
+  });
+}
+
+function actorLabel(id: string | undefined) {
+  if (!id) return "unknown";
+  return String(state.world?.objects?.[id]?.name ?? id);
 }
 
 function renderTaskspace() {
@@ -405,7 +635,7 @@ function renderTaskNode(id: string, tasks: any): string {
   const props = task.props;
   return `
     <div class="task-node">
-      <button data-select-task="${id}" class="${state.selectedTask === id ? "selected" : ""}">${escapeHtml(props.title)} <span>${props.status}</span></button>
+      <button data-select-task="${escapeHtml(id)}" class="${state.selectedTask === id ? "selected" : ""}">${escapeHtml(String(props.title ?? id))} <span>${escapeHtml(String(props.status ?? ""))}</span></button>
       <div class="children">${(props.subtasks ?? []).map((child: string) => renderTaskNode(child, tasks)).join("")}</div>
     </div>
   `;
@@ -414,10 +644,10 @@ function renderTaskNode(id: string, tasks: any): string {
 function renderTaskInspector(task: any) {
   const props = task.props;
   return `
-    <h2>${escapeHtml(props.title)}</h2>
-    <p>${escapeHtml(props.description ?? "")}</p>
-    <div class="row"><strong>Status</strong><span>${props.status}</span></div>
-    <div class="row"><strong>Assignee</strong><span>${props.assignee ?? "none"}</span></div>
+    <h2>${escapeHtml(String(props.title ?? task.id ?? ""))}</h2>
+    <p>${escapeHtml(String(props.description ?? ""))}</p>
+    <div class="row"><strong>Status</strong><span>${escapeHtml(String(props.status ?? ""))}</span></div>
+    <div class="row"><strong>Assignee</strong><span>${escapeHtml(String(props.assignee ?? "none"))}</span></div>
     <div class="button-row">
       <button data-task-action="claim">Claim</button>
       <button data-task-action="release">Release</button>
@@ -428,7 +658,7 @@ function renderTaskInspector(task: any) {
     <div class="inline-form"><input data-subtask-title placeholder="Subtask title"><button data-add-subtask>Add Subtask</button></div>
     <div class="inline-form"><input data-requirement placeholder="Requirement"><button data-add-requirement>Add Requirement</button></div>
     <ul class="checklist">${(props.requirements ?? [])
-      .map((item: any, index: number) => `<li><label><input data-check-req="${index}" type="checkbox" ${item.checked ? "checked" : ""}> ${escapeHtml(item.text)}</label></li>`)
+      .map((item: any, index: number) => `<li><label><input data-check-req="${index}" type="checkbox" ${item.checked ? "checked" : ""}> ${escapeHtml(String(item.text ?? ""))}</label></li>`)
       .join("")}</ul>
     <div class="inline-form"><input data-message placeholder="Message"><button data-add-message>Add Message</button></div>
     <div class="inline-form"><input data-artifact placeholder="https://example.com/artifact"><button data-add-artifact>Add Artifact</button></div>
@@ -482,7 +712,7 @@ function renderIde() {
   return `
     <section class="toolbar">
       <h1>IDE</h1>
-      <select data-object-select>${objects.map((id) => `<option ${id === state.selectedObject ? "selected" : ""}>${id}</option>`).join("")}</select>
+      <select data-object-select>${objects.map((id) => `<option value="${escapeHtml(id)}" ${id === state.selectedObject ? "selected" : ""}>${escapeHtml(id)}</option>`).join("")}</select>
       <button data-refresh-object>Inspect</button>
     </section>
     <section class="split">

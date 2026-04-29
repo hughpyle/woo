@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ParkedTaskRecord, SerializedObject, SerializedWorld, SpaceSnapshotRecord, WorldRepository } from "../core/repository";
-import type { ObjRef, SpaceLogEntry, VerbDef, WooValue } from "../core/types";
+import { wooError, type ObjRef, type SpaceLogEntry, type VerbDef, type WooValue } from "../core/types";
 
 type Row = Record<string, any>;
 
@@ -58,7 +58,10 @@ export class SQLiteWorldRepository implements WorldRepository {
     const sessions = (this.db.prepare("SELECT * FROM session ORDER BY id").all() as Row[]).map((row) => ({
       id: row.id,
       actor: row.actor,
-      started: Number(row.started)
+      started: Number(row.started),
+      expiresAt: row.expires_at === null || row.expires_at === undefined ? undefined : Number(row.expires_at),
+      lastDetachAt: row.last_detach_at === null || row.last_detach_at === undefined ? null : Number(row.last_detach_at),
+      tokenClass: row.token_class as "guest" | "bearer" | "apikey" | undefined
     }));
 
     const logRows = this.db.prepare("SELECT * FROM space_message ORDER BY space_id, seq").all() as Row[];
@@ -99,7 +102,6 @@ export class SQLiteWorldRepository implements WorldRepository {
         "task",
         "space_snapshot",
         "space_message",
-        "session_socket",
         "session",
         "event_schema",
         "content",
@@ -139,8 +141,16 @@ export class SQLiteWorldRepository implements WorldRepository {
         for (const [type, schema] of obj.eventSchemas) insertSchema.run(obj.id, type, stringifyValue(schema as WooValue));
       }
 
-      const insertSession = this.db.prepare("INSERT INTO session(id, actor, started, attachment) VALUES (?, ?, ?, ?)");
-      for (const session of world.sessions) insertSession.run(session.id, session.actor, session.started, "{}");
+      const hasAttachmentColumn = this.tableColumns("session").has("attachment");
+      const insertSession = this.db.prepare(
+        hasAttachmentColumn
+          ? "INSERT INTO session(id, actor, started, expires_at, last_detach_at, token_class, attachment) VALUES (?, ?, ?, ?, ?, ?, ?)"
+          : "INSERT INTO session(id, actor, started, expires_at, last_detach_at, token_class) VALUES (?, ?, ?, ?, ?, ?)"
+      );
+      for (const session of world.sessions) {
+        const values = [session.id, session.actor, session.started, session.expiresAt ?? null, session.lastDetachAt ?? null, session.tokenClass ?? "guest"];
+        insertSession.run(...(hasAttachmentColumn ? [...values, "{}"] : values));
+      }
 
       const insertLog = this.db.prepare("INSERT INTO space_message(space_id, seq, ts, actor, message, applied_ok, error) VALUES (?, ?, ?, ?, ?, ?, ?)");
       for (const [space, entries] of world.logs) {
@@ -277,18 +287,29 @@ export class SQLiteWorldRepository implements WorldRepository {
         id TEXT PRIMARY KEY,
         actor TEXT NOT NULL,
         started INTEGER NOT NULL,
-        attachment TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS session_socket (
-        ws_id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        attached_at INTEGER NOT NULL
+        expires_at INTEGER,
+        last_detach_at INTEGER,
+        token_class TEXT NOT NULL DEFAULT 'guest'
       );
       CREATE TABLE IF NOT EXISTS world_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
     `);
+    this.ensureColumn("session", "expires_at", "INTEGER");
+    this.ensureColumn("session", "last_detach_at", "INTEGER");
+    this.ensureColumn("session", "token_class", "TEXT NOT NULL DEFAULT 'guest'");
+    this.db.exec("DROP TABLE IF EXISTS session_socket");
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    if (this.tableColumns(table).has(column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  private tableColumns(table: string): Set<string> {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[];
+    return new Set(rows.map((row) => String(row.name)));
   }
 
   private transaction(fn: () => void): void {
@@ -357,7 +378,11 @@ function stringifyValue(value: WooValue): string {
 }
 
 function parseValue(value: string): WooValue {
-  return JSON.parse(value);
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    throw wooError("E_STORAGE", "invalid JSON value in SQLite repository", err instanceof Error ? err.message : String(err));
+  }
 }
 
 function flagsToInt(flags: SerializedObject["flags"]): number {

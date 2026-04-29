@@ -30,8 +30,9 @@ Start with [spec/README.md](spec/README.md).
 
 ## Implementation Plan
 
-Implementation planning lives in [impl/README.md](impl/README.md). Runtime code
-lives under [src/](src/), with focused tests under [tests/](tests/).
+Runtime code lives under [src/](src/), with focused tests under [tests/](tests/).
+Current debt and spec/impl drift is in [TECH_DEBT_AUDIT.md](TECH_DEBT_AUDIT.md).
+Historical milestone notes are in [notes/](notes/).
 
 ## Run Locally
 
@@ -46,5 +47,4 @@ Then open <http://localhost:5173>.
 ## Working Rule
 
 Keep runtime changes aligned with the spec. When implementation pressure
-reveals a semantic gap, update the relevant spec or `impl/` note alongside the
-code.
+reveals a semantic gap, update the relevant spec doc alongside the code.

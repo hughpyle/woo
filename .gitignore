@@ -5,3 +5,6 @@ coverage/
 .env
 .env.*
 .woo/
+test-results/
+playwright-report/
+playwright/.cache/

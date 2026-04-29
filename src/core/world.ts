@@ -25,6 +25,15 @@ import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializ
 
 type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue;
 const DRUM_VOICES = ["kick", "snare", "hat", "tone"] as const;
+const GUEST_SESSION_GRACE_MS = 60_000;
+const GUEST_SESSION_TTL_MS = 5 * 60_000;
+const CREDENTIAL_SESSION_GRACE_MS = 5 * 60_000;
+const CREDENTIAL_SESSION_TTL_MS = 24 * 60 * 60_000;
+
+type ResolvedVerb = {
+  definer: ObjRef;
+  verb: VerbDef;
+};
 
 export type CallContext = {
   world: WooWorld;
@@ -48,6 +57,7 @@ export type WorldSnapshot = {
   spaces: Record<string, { next_seq: number; log_count: number }>;
   dubspace: ReturnType<WooWorld["dubspaceState"]>;
   taskspace: ReturnType<WooWorld["taskspaceState"]>;
+  chat: ReturnType<WooWorld["chatState"]>;
   objects: Record<string, unknown>;
 };
 
@@ -72,7 +82,10 @@ export class WooWorld {
   private parkedTaskCounter = 1;
   private sessionCounter = 1;
   private persistencePaused = 0;
+  private persistenceDeferred = 0;
+  private persistenceDirty = false;
   private callDepth = 0;
+  private guestFreePool = new Set<ObjRef>();
 
   constructor(private repository?: WorldRepository) {
     this.registerNativeHandlers();
@@ -160,11 +173,22 @@ export class WooWorld {
     return verb;
   }
 
-  resolveVerb(objRef: ObjRef, name: string): { definer: ObjRef; verb: VerbDef } {
-    return this.resolveVerbFrom(objRef, name);
+  resolveVerb(objRef: ObjRef, name: string): ResolvedVerb {
+    const parentMatch = this.resolveVerbFrom(objRef, name, false);
+    if (parentMatch) return parentMatch;
+    if (this.canCarryFeatures(objRef)) {
+      const features = this.featureList(objRef);
+      for (const feature of features) {
+        const featureMatch = this.resolveVerbFrom(feature, name, false);
+        if (featureMatch) return featureMatch;
+      }
+    }
+    throw wooError("E_VERBNF", `verb not found: ${objRef}:${name}`, { obj: objRef, name });
   }
 
-  resolveVerbFrom(startRef: ObjRef | null, name: string): { definer: ObjRef; verb: VerbDef } {
+  resolveVerbFrom(startRef: ObjRef | null, name: string): ResolvedVerb;
+  resolveVerbFrom(startRef: ObjRef | null, name: string, required: false): ResolvedVerb | null;
+  resolveVerbFrom(startRef: ObjRef | null, name: string, required = true): ResolvedVerb | null {
     let current: ObjRef | null = startRef;
     while (current) {
       const obj = this.object(current);
@@ -172,6 +196,7 @@ export class WooWorld {
       if (verb) return { definer: current, verb };
       current = obj.parent;
     }
+    if (!required) return null;
     throw wooError("E_VERBNF", `verb not found: ${startRef ?? "#-1"}:${name}`, { obj: startRef ?? "#-1", name });
   }
 
@@ -223,11 +248,9 @@ export class WooWorld {
 
   verbs(objRef: ObjRef): WooValue[] {
     const names = new Set<string>();
-    let current: ObjRef | null = objRef;
-    while (current) {
-      const obj = this.object(current);
-      for (const name of obj.verbs.keys()) names.add(name);
-      current = obj.parent;
+    this.collectVerbNames(objRef, names);
+    if (this.canCarryFeatures(objRef)) {
+      for (const feature of this.featureList(objRef)) this.collectVerbNames(feature, names);
     }
     return Array.from(names).sort();
   }
@@ -276,29 +299,66 @@ export class WooWorld {
   }
 
   auth(token: string): Session {
+    this.reapExpiredSessions();
     if (token.startsWith("session:")) {
       const session = this.sessions.get(token.slice("session:".length));
       if (!session) throw wooError("E_NOSESSION", "session token is expired or unknown");
+      if (this.sessionExpired(session, Date.now())) {
+        this.reapSession(session.id);
+        this.persist(true);
+        throw wooError("E_NOSESSION", "session token is expired or unknown");
+      }
       return session;
     }
+    const tokenClass = this.tokenClassFor(token);
     const id = `session-${this.sessionCounter++}`;
     const actor = this.allocateGuest();
-    const session: Session = { id, actor, started: Date.now(), attachedSockets: new Set() };
-    this.sessions.set(id, session);
-    this.ensurePresence(actor, "the_dubspace");
-    this.ensurePresence(actor, "the_taskspace");
-    this.persist();
+    const now = Date.now();
+    const session: Session = {
+      id,
+      actor,
+      started: now,
+      expiresAt: now + this.sessionTtl(tokenClass),
+      lastDetachAt: null,
+      tokenClass,
+      attachedSockets: new Set()
+    };
+    this.withPersistenceDeferred(() => {
+      this.sessions.set(id, session);
+      this.setProp(actor, "session_id", id);
+      this.ensurePresence(actor, "the_dubspace");
+      this.ensurePresence(actor, "the_taskspace");
+    });
     return session;
   }
 
   attachSocket(sessionId: string, socketId: string): void {
-    this.sessions.get(sessionId)?.attachedSockets.add(socketId);
-    this.persist();
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.withPersistenceDeferred(() => {
+      session.attachedSockets.add(socketId);
+      session.lastDetachAt = null;
+      this.persist();
+    });
   }
 
   detachSocket(sessionId: string, socketId: string): void {
-    this.sessions.get(sessionId)?.attachedSockets.delete(socketId);
-    this.persist();
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.withPersistenceDeferred(() => {
+      session.attachedSockets.delete(socketId);
+      if (session.attachedSockets.size === 0) session.lastDetachAt = Date.now();
+      this.persist();
+    });
+  }
+
+  sessionAlive(sessionId: string, now = Date.now()): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    if (!this.sessionExpired(session, now)) return true;
+    this.reapSession(sessionId);
+    this.persist(true);
+    return false;
   }
 
   hasPresence(actor: ObjRef, space: ObjRef): boolean {
@@ -307,6 +367,13 @@ export class WooWorld {
   }
 
   call(frameId: string | undefined, sessionId: string, space: ObjRef, message: Message): AppliedFrame | ErrorFrame {
+    const session = this.sessions.get(sessionId);
+    if (!session || !this.sessionAlive(sessionId)) {
+      return { op: "error", id: frameId, error: wooError("E_NOSESSION", "session token is expired or unknown") };
+    }
+    if (message.actor !== session.actor) {
+      return { op: "error", id: frameId, error: wooError("E_PERM", "message actor does not match session actor", { actor: message.actor, session_actor: session.actor }) };
+    }
     this.sweepIdempotency();
     if (frameId) {
       const cached = this.idempotency.get(`${sessionId}:${frameId}`);
@@ -334,7 +401,7 @@ export class WooWorld {
         throw wooError("E_DIRECT_DENIED", `direct call denied for ${target}:${verbName}`, { target, verb: verbName });
       }
       const audience = this.directAudience(target);
-      if (audience) this.authorizePresence(actor, audience);
+      if (audience && verb.skip_presence_check !== true) this.authorizePresence(actor, audience);
       const observations: Observation[] = [];
       const message: Message = { actor, target, verb: verbName, args };
       let result: WooValue = null;
@@ -463,7 +530,7 @@ export class WooWorld {
     if (this.callDepth >= MAX_CALL_DEPTH) throw wooError("E_CALL_DEPTH", "maximum verb call depth exceeded");
     this.callDepth += 1;
     try {
-      const { definer, verb } = this.resolveVerbFrom(startAt ?? target, verbName);
+      const { definer, verb } = startAt === undefined ? this.resolveVerb(target, verbName) : this.resolveVerbFrom(startAt, verbName);
       const runCtx: CallContext = {
         ...ctx,
         thisObj: target,
@@ -486,15 +553,16 @@ export class WooWorld {
 
   state(): WorldSnapshot {
     const spaces: WorldSnapshot["spaces"] = {};
-    for (const id of ["the_dubspace", "the_taskspace"]) {
-      spaces[id] = { next_seq: Number(this.getProp(id, "next_seq")), log_count: this.logs.get(id)?.length ?? 0 };
+    for (const id of ["the_dubspace", "the_taskspace", "the_chatroom"]) {
+      if (this.objects.has(id)) spaces[id] = { next_seq: Number(this.getProp(id, "next_seq")), log_count: this.logs.get(id)?.length ?? 0 };
     }
     return {
       server_time: Date.now(),
-      actorCount: Array.from(this.objects.values()).filter((obj) => obj.parent === "$player").length,
+      actorCount: Array.from(this.objects.values()).filter((obj) => this.inheritsFrom(obj.id, "$player")).length,
       spaces,
       dubspace: this.dubspaceState(),
       taskspace: this.taskspaceState(),
+      chat: this.chatState(),
       objects: Object.fromEntries(Array.from(this.objects.keys()).map((id) => [id, this.describe(id)]))
     };
   }
@@ -528,6 +596,19 @@ export class WooWorld {
       ])
     );
     return { root_tasks: this.getProp("the_taskspace", "root_tasks"), tasks };
+  }
+
+  chatState() {
+    if (!this.objects.has("the_chatroom")) return { room: null, present: [] as ObjRef[] };
+    const present = this.getProp("the_chatroom", "subscribers");
+    return {
+      room: {
+        id: "the_chatroom",
+        name: this.object("the_chatroom").name,
+        description: this.getProp("the_chatroom", "description")
+      },
+      present: Array.isArray(present) ? (present as ObjRef[]) : []
+    };
   }
 
   createTask(space: ObjRef, title: string, description: string, parentTask: ObjRef | null): ObjRef {
@@ -681,7 +762,14 @@ export class WooWorld {
         contents: Array.from(obj.contents),
         eventSchemas: Array.from(obj.eventSchemas.entries()).map(([type, schema]) => [type, cloneValue(schema as WooValue) as Record<string, WooValue>])
       })),
-      sessions: Array.from(this.sessions.values()).map((session) => ({ id: session.id, actor: session.actor, started: session.started })),
+      sessions: Array.from(this.sessions.values()).map((session) => ({
+        id: session.id,
+        actor: session.actor,
+        started: session.started,
+        expiresAt: session.expiresAt,
+        lastDetachAt: session.lastDetachAt,
+        tokenClass: session.tokenClass
+      })),
       logs: Array.from(this.logs.entries()).map(([space, entries]) => [space, cloneValue(entries as unknown as WooValue) as unknown as SpaceLogEntry[]]),
       snapshots: cloneValue(this.snapshots as unknown as WooValue) as unknown as SpaceSnapshotRecord[],
       parkedTasks: Array.from(this.parkedTasks.values()).map((task) => cloneValue(task as unknown as WooValue) as unknown as ParkedTaskRecord)
@@ -716,7 +804,7 @@ export class WooWorld {
         });
       }
       for (const session of serialized.sessions) {
-        this.sessions.set(session.id, { ...session, attachedSockets: new Set() });
+        this.sessions.set(session.id, this.hydrateSession(session, Date.now()));
       }
       for (const [space, entries] of serialized.logs) {
         this.logs.set(space, cloneValue(entries as unknown as WooValue) as unknown as SpaceLogEntry[]);
@@ -728,6 +816,7 @@ export class WooWorld {
       this.taskCounter = serialized.taskCounter;
       this.parkedTaskCounter = serialized.parkedTaskCounter ?? 1;
       this.sessionCounter = serialized.sessionCounter;
+      this.rebuildGuestPool();
     });
   }
 
@@ -762,9 +851,57 @@ export class WooWorld {
     }
   }
 
+  withPersistenceDeferred<T>(fn: () => T): T {
+    this.persistenceDeferred += 1;
+    try {
+      return fn();
+    } finally {
+      this.persistenceDeferred -= 1;
+      if (this.persistenceDeferred === 0 && this.persistencePaused === 0 && this.persistenceDirty) this.persist(true);
+    }
+  }
+
   persist(force = false): void {
-    if (!this.repository || (this.persistencePaused > 0 && !force)) return;
+    if (!this.repository) return;
+    if (!force && (this.persistencePaused > 0 || this.persistenceDeferred > 0)) {
+      this.persistenceDirty = true;
+      return;
+    }
     this.repository.save(this.exportWorld());
+    this.persistenceDirty = false;
+  }
+
+  rebuildGuestPool(): void {
+    this.guestFreePool.clear();
+    const sessions = Array.from(this.sessions.values());
+    for (const obj of this.objects.values()) {
+      if (obj.id.startsWith("guest_") && obj.parent === "$player" && this.objects.has("$guest")) {
+        this.object("$player").children.delete(obj.id);
+        obj.parent = "$guest";
+        this.object("$guest").children.add(obj.id);
+        if (!obj.properties.has("home") && this.objects.has("$nowhere")) {
+          obj.properties.set("home", "$nowhere");
+          obj.propertyVersions.set("home", (obj.propertyVersions.get("home") ?? 0) + 1);
+        }
+      }
+      if (!obj.id.startsWith("guest_")) continue;
+      if (!this.inheritsFrom(obj.id, "$guest")) continue;
+      const bound = sessions.some((session) => session.actor === obj.id);
+      if (!bound) this.guestFreePool.add(obj.id);
+    }
+  }
+
+  reapExpiredSessions(now = Date.now()): string[] {
+    const reaped: string[] = [];
+    this.withPersistencePaused(() => {
+      for (const session of Array.from(this.sessions.values())) {
+        if (!this.sessionExpired(session, now)) continue;
+        this.reapSession(session.id);
+        reaped.push(session.id);
+      }
+    });
+    if (reaped.length > 0) this.persist(true);
+    return reaped;
   }
 
   private validateMessage(message: Message): void {
@@ -775,10 +912,208 @@ export class WooWorld {
     if (!Array.isArray(message.args)) throw wooError("E_INVARG", "message.args must be a list");
   }
 
+  private hydrateSession(
+    session: { id: string; actor: ObjRef; started: number; expiresAt?: number; lastDetachAt?: number | null; tokenClass?: Session["tokenClass"] },
+    now: number
+  ): Session {
+    const tokenClass = session.tokenClass ?? (this.inheritsFrom(session.actor, "$guest") ? "guest" : "bearer");
+    return {
+      id: session.id,
+      actor: session.actor,
+      started: session.started,
+      expiresAt: session.expiresAt ?? session.started + this.sessionTtl(tokenClass),
+      lastDetachAt: session.lastDetachAt ?? now,
+      tokenClass,
+      attachedSockets: new Set()
+    };
+  }
+
+  private tokenClassFor(token: string): Session["tokenClass"] {
+    if (token.startsWith("bearer:")) return "bearer";
+    if (token.startsWith("apikey:")) return "apikey";
+    return "guest";
+  }
+
+  private sessionTtl(tokenClass: Session["tokenClass"]): number {
+    return tokenClass === "guest" ? GUEST_SESSION_TTL_MS : CREDENTIAL_SESSION_TTL_MS;
+  }
+
+  private sessionGrace(tokenClass: Session["tokenClass"]): number {
+    return tokenClass === "guest" ? GUEST_SESSION_GRACE_MS : CREDENTIAL_SESSION_GRACE_MS;
+  }
+
+  private sessionExpired(session: Session, now: number): boolean {
+    if (now >= session.expiresAt) return true;
+    if (session.lastDetachAt === null) return false;
+    return now >= session.lastDetachAt + this.sessionGrace(session.tokenClass);
+  }
+
+  private reapSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.attachedSockets.clear();
+    this.killReadTasksFor(session.actor);
+    this.removeActorPresence(session.actor);
+    try {
+      const observations: Observation[] = [];
+      const message: Message = { actor: session.actor, target: session.actor, verb: "on_disfunc", args: [] };
+      const ctx: CallContext = {
+        world: this,
+        space: "#-1",
+        seq: -1,
+        actor: session.actor,
+        player: session.actor,
+        caller: "#-1",
+        progr: this.object(session.actor).owner,
+        thisObj: session.actor,
+        verbName: "on_disfunc",
+        definer: session.actor,
+        message,
+        observations,
+        observe: () => {
+          // Session reap is host maintenance; disfunc observations are not broadcast.
+        }
+      };
+      this.dispatch(ctx, session.actor, "on_disfunc", []);
+    } catch {
+      if (this.inheritsFrom(session.actor, "$guest")) this.returnGuest(session.actor);
+    }
+    this.setProp(session.actor, "session_id", null);
+    this.sessions.delete(sessionId);
+    if (this.inheritsFrom(session.actor, "$guest")) this.returnGuest(session.actor);
+  }
+
+  private killReadTasksFor(actor: ObjRef): void {
+    for (const [id, task] of Array.from(this.parkedTasks.entries())) {
+      if (task.state === "awaiting_read" && task.awaiting_player === actor) this.parkedTasks.delete(id);
+    }
+  }
+
+  private removeActorPresence(actor: ObjRef): void {
+    const presence = this.propOrNull(actor, "presence_in");
+    if (Array.isArray(presence)) {
+      for (const space of presence) {
+        if (typeof space === "string" && this.objects.has(space)) this.updatePresence(actor, space, false);
+      }
+    }
+    const remaining = this.propOrNull(actor, "presence_in");
+    if (this.objects.has(actor) && Array.isArray(remaining) && remaining.length > 0) this.setProp(actor, "presence_in", []);
+  }
+
+  private moveObject(objRef: ObjRef, targetRef: ObjRef): void {
+    const obj = this.object(objRef);
+    this.object(targetRef);
+    if (obj.location && this.objects.has(obj.location)) this.object(obj.location).contents.delete(objRef);
+    obj.location = targetRef;
+    this.object(targetRef).contents.add(objRef);
+    obj.modified = Date.now();
+  }
+
+  private returnGuest(actor: ObjRef): void {
+    if (!this.inheritsFrom(actor, "$guest")) return;
+    if (Array.from(this.sessions.values()).some((session) => session.actor === actor)) return;
+    this.guestFreePool.add(actor);
+  }
+
+  private collectVerbNames(startRef: ObjRef | null, names: Set<string>): void {
+    let current: ObjRef | null = startRef;
+    while (current) {
+      const obj = this.object(current);
+      for (const name of obj.verbs.keys()) names.add(name);
+      current = obj.parent;
+    }
+  }
+
   private authorizePresence(actor: ObjRef, space: ObjRef): void {
+    if (this.isWizard(actor)) return;
     if (!this.hasPresence(actor, space)) {
       throw wooError("E_PERM", `${actor} is not present in ${space}`);
     }
+  }
+
+  private featureList(objRef: ObjRef): ObjRef[] {
+    const value = this.getProp(objRef, "features");
+    if (!Array.isArray(value)) throw wooError("E_TYPE", "features must be a list", value);
+    return value.map((item) => assertObj(item));
+  }
+
+  private canCarryFeatures(objRef: ObjRef): boolean {
+    return this.inheritsFrom(objRef, "$actor") || this.inheritsFrom(objRef, "$space");
+  }
+
+  private assertFeatureConsumer(objRef: ObjRef): void {
+    if (!this.canCarryFeatures(objRef)) throw wooError("E_NOTAPPLICABLE", `${objRef} cannot carry features`, objRef);
+  }
+
+  private isWizard(actor: ObjRef): boolean {
+    return Boolean(this.object(actor).flags.wizard);
+  }
+
+  private bumpFeaturesVersion(objRef: ObjRef): void {
+    const current = Number(this.getProp(objRef, "features_version") ?? 0);
+    this.setProp(objRef, "features_version", Number.isFinite(current) ? current + 1 : 1);
+  }
+
+  private canFeatureBeAttachedBy(feature: ObjRef, actor: ObjRef): boolean {
+    const message: Message = { actor, target: feature, verb: "can_be_attached_by", args: [actor] };
+    const observations: Observation[] = [];
+    const ctx: CallContext = {
+      world: this,
+      space: "#-1",
+      seq: -1,
+      actor,
+      player: actor,
+      caller: "#-1",
+      progr: actor,
+      thisObj: feature,
+      verbName: "can_be_attached_by",
+      definer: feature,
+      message,
+      observations,
+      observe: () => {
+        // Attachment-policy checks are predicates; observations are ignored.
+      }
+    };
+    try {
+      return Boolean(this.dispatch(ctx, feature, "can_be_attached_by", [actor]));
+    } catch (err) {
+      const error = normalizeError(err);
+      if (error.code === "E_VERBNF") return actor === this.object(feature).owner;
+      throw err;
+    }
+  }
+
+  private addFeature(consumer: ObjRef, feature: ObjRef, actor: ObjRef, observations?: Observation[]): boolean {
+    this.assertFeatureConsumer(consumer);
+    if (feature.startsWith("~")) throw wooError("E_INVARG", "transient objects cannot be features", feature);
+    this.object(feature);
+    if (consumer === feature) throw wooError("E_RECMOVE", "object cannot add itself as a feature", feature);
+    const consumerOwner = this.object(consumer).owner;
+    const wizard = this.isWizard(actor);
+    if (!wizard && consumerOwner !== actor) throw wooError("E_PERM", `${actor} cannot add features to ${consumer}`);
+    if (!wizard && !this.canFeatureBeAttachedBy(feature, actor)) throw wooError("E_PERM", `${feature} cannot be attached by ${actor}`);
+    const features = this.featureList(consumer);
+    if (features.includes(feature)) {
+      observations?.push({ type: "feature_already_added", source: consumer, feature });
+      return false;
+    }
+    this.setProp(consumer, "features", [...features, feature]);
+    this.bumpFeaturesVersion(consumer);
+    observations?.push({ type: "feature_added", source: consumer, feature });
+    return true;
+  }
+
+  private removeFeature(consumer: ObjRef, feature: ObjRef, actor: ObjRef, observations?: Observation[]): boolean {
+    this.assertFeatureConsumer(consumer);
+    this.object(feature);
+    const consumerOwner = this.object(consumer).owner;
+    if (!this.isWizard(actor) && consumerOwner !== actor) throw wooError("E_PERM", `${actor} cannot remove features from ${consumer}`);
+    const features = this.featureList(consumer);
+    if (!features.includes(feature)) return false;
+    this.setProp(consumer, "features", features.filter((item) => item !== feature));
+    this.bumpFeaturesVersion(consumer);
+    observations?.push({ type: "feature_removed", source: consumer, feature });
+    return true;
   }
 
   private directAudience(target: ObjRef): ObjRef | null {
@@ -799,15 +1134,43 @@ export class WooWorld {
   }
 
   private ensurePresence(actor: ObjRef, space: ObjRef): void {
+    this.updatePresence(actor, space, true);
+  }
+
+  private removePresence(actor: ObjRef, space: ObjRef): boolean {
+    return this.updatePresence(actor, space, false);
+  }
+
+  private updatePresence(actor: ObjRef, space: ObjRef, present: boolean): boolean {
+    this.object(actor);
+    this.object(space);
+    const rawPresence = this.getProp(actor, "presence_in");
+    const rawSubscribers = this.getProp(space, "subscribers");
+    if (!Array.isArray(rawPresence)) throw wooError("E_TYPE", `${actor}.presence_in must be a list`, rawPresence);
+    if (!Array.isArray(rawSubscribers)) throw wooError("E_TYPE", `${space}.subscribers must be a list`, rawSubscribers);
+
+    const presence = rawPresence.filter((item): item is ObjRef => typeof item === "string");
+    const subscribers = rawSubscribers.filter((item): item is ObjRef => typeof item === "string");
+    const nextPresence = present ? addUnique(presence, space) : presence.filter((item) => item !== space);
+    const nextSubscribers = present ? addUnique(subscribers, actor) : subscribers.filter((item) => item !== actor);
+    const changed = !valuesEqual(nextPresence, rawPresence) || !valuesEqual(nextSubscribers, rawSubscribers);
+    if (!changed) return false;
+
+    this.withPersistenceDeferred(() => {
+      this.setProp(actor, "presence_in", nextPresence);
+      this.setProp(space, "subscribers", nextSubscribers);
+    });
+    this.assertPresenceMirror(actor, space, present);
+    return true;
+  }
+
+  private assertPresenceMirror(actor: ObjRef, space: ObjRef, expected: boolean): void {
     const presence = this.getProp(actor, "presence_in");
-    if (Array.isArray(presence) && !presence.includes(space)) {
-      presence.push(space);
-      this.setProp(actor, "presence_in", presence);
-    }
     const subscribers = this.getProp(space, "subscribers");
-    if (Array.isArray(subscribers) && !subscribers.includes(actor)) {
-      subscribers.push(actor);
-      this.setProp(space, "subscribers", subscribers);
+    const actorHasSpace = Array.isArray(presence) && presence.includes(space);
+    const spaceHasActor = Array.isArray(subscribers) && subscribers.includes(actor);
+    if (actorHasSpace !== spaceHasActor || actorHasSpace !== expected) {
+      throw wooError("E_INTERNAL", "presence mirror invariant failed", { actor, space, actor_has_space: actorHasSpace, space_has_actor: spaceHasActor });
     }
   }
 
@@ -1016,16 +1379,18 @@ export class WooWorld {
   }
 
   private allocateGuest(): ObjRef {
-    for (const id of ["guest_1", "guest_2", "guest_3", "guest_4", "guest_5", "guest_6", "guest_7", "guest_8"]) {
-      const used = Array.from(this.sessions.values()).some((session) => session.actor === id);
-      if (!used) return id;
+    if (this.guestFreePool.size === 0) this.rebuildGuestPool();
+    const pooled = Array.from(this.guestFreePool).sort()[0];
+    if (pooled) {
+      this.guestFreePool.delete(pooled);
+      return pooled;
     }
     const id = `guest_${this.objects.size}`;
-    this.createObject({ id, name: id, parent: "$player", owner: "$wiz" });
+    this.createObject({ id, name: id, parent: this.objects.has("$guest") ? "$guest" : "$player", owner: "$wiz", location: this.objects.has("$nowhere") ? "$nowhere" : null });
     this.setProp(id, "description", "Dynamically allocated guest player. It can be bound to a temporary session, gains presence in demo spaces on auth, and gives a local user or agent a stable actor for first-light testing.");
     this.setProp(id, "presence_in", []);
     this.setProp(id, "session_id", null);
-    this.setProp(id, "attached_sockets", []);
+    if (this.objects.has("$nowhere")) this.setProp(id, "home", "$nowhere");
     return id;
   }
 
@@ -1065,6 +1430,36 @@ export class WooWorld {
 
   private registerNativeHandlers(): void {
     this.nativeHandlers.set("describe", (ctx) => this.describe(ctx.thisObj));
+    this.nativeHandlers.set("player_on_disfunc", () => true);
+    this.nativeHandlers.set("player_moveto", (ctx, args) => {
+      const target = assertObj(args[0] ?? "$nowhere");
+      this.moveObject(ctx.thisObj, target);
+      return true;
+    });
+    this.nativeHandlers.set("guest_on_disfunc", (ctx) => {
+      const homeValue = this.propOrNull(ctx.thisObj, "home");
+      const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
+      this.moveObject(ctx.thisObj, home);
+      this.setProp(ctx.thisObj, "description", "");
+      this.setProp(ctx.thisObj, "aliases", []);
+      this.setProp(ctx.thisObj, "features", []);
+      this.setProp(ctx.thisObj, "features_version", Number(this.propOrNull(ctx.thisObj, "features_version") ?? 0) + 1);
+      for (const item of Array.from(this.object(ctx.thisObj).contents)) this.moveObject(item, home);
+      this.returnGuest(ctx.thisObj);
+      return true;
+    });
+    this.nativeHandlers.set("return_guest", (_ctx, args) => {
+      this.returnGuest(assertObj(args[0]));
+      return true;
+    });
+    this.nativeHandlers.set("feature_can_be_attached_by", (ctx, args) => {
+      const actor = assertObj(args[0] ?? ctx.actor);
+      return actor === this.object(ctx.thisObj).owner;
+    });
+    this.nativeHandlers.set("conversational_can_be_attached_by", () => true);
+    this.nativeHandlers.set("add_feature", (ctx, args) => this.addFeature(ctx.thisObj, assertObj(args[0]), ctx.actor, ctx.observations));
+    this.nativeHandlers.set("remove_feature", (ctx, args) => this.removeFeature(ctx.thisObj, assertObj(args[0]), ctx.actor, ctx.observations));
+    this.nativeHandlers.set("has_feature", (ctx, args) => this.featureList(ctx.thisObj).includes(assertObj(args[0])));
     this.nativeHandlers.set("replay", (ctx, args) => {
       const from = Number(args[0] ?? 1);
       const limit = Number(args[1] ?? 100);
@@ -1090,6 +1485,44 @@ export class WooWorld {
       ctx.observe({ type: "cursor", source: ctx.thisObj, actor: ctx.actor, x, y, sent_at: Date.now() });
       return true;
     });
+    this.nativeHandlers.set("chat_say", (ctx, args) => {
+      const text = assertString(args[0] ?? "");
+      if (!text.trim()) throw wooError("E_INVARG", "say requires text");
+      ctx.observe({ type: "said", source: ctx.thisObj, actor: ctx.actor, text, ts: Date.now() });
+      return true;
+    });
+    this.nativeHandlers.set("chat_emote", (ctx, args) => {
+      const text = assertString(args[0] ?? "");
+      if (!text.trim()) throw wooError("E_INVARG", "emote requires text");
+      ctx.observe({ type: "emoted", source: ctx.thisObj, actor: ctx.actor, text, ts: Date.now() });
+      return true;
+    });
+    this.nativeHandlers.set("chat_tell", (ctx, args) => {
+      const to = assertObj(args[0]);
+      const text = assertString(args[1] ?? "");
+      if (!text.trim()) throw wooError("E_INVARG", "tell requires text");
+      ctx.observe({ type: "told", source: ctx.thisObj, from: ctx.actor, to, text, ts: Date.now() });
+      return true;
+    });
+    this.nativeHandlers.set("chat_look", (ctx) => ({
+      description: this.getProp(ctx.thisObj, "description"),
+      present_actors: this.chatPresent(ctx.thisObj),
+      contents: Array.from(this.object(ctx.thisObj).contents)
+    }));
+    this.nativeHandlers.set("chat_who", (ctx) => this.chatPresent(ctx.thisObj));
+    this.nativeHandlers.set("chat_enter", (ctx) => {
+      const actor = ctx.actor;
+      const wasPresent = this.hasPresence(actor, ctx.thisObj);
+      this.ensurePresence(actor, ctx.thisObj);
+      if (!wasPresent) ctx.observe({ type: "entered", source: ctx.thisObj, actor, ts: Date.now() });
+      return this.chatPresent(ctx.thisObj);
+    });
+    this.nativeHandlers.set("chat_leave", (ctx) => {
+      const actor = ctx.actor;
+      if (this.removePresence(actor, ctx.thisObj)) ctx.observe({ type: "left", source: ctx.thisObj, actor, ts: Date.now() });
+      return this.chatPresent(ctx.thisObj);
+    });
+    this.nativeHandlers.set("chat_command", (ctx, args) => this.runChatCommand(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("start_loop", (ctx, args) => {
       const slot = assertObj(args[0]);
       this.setProp(slot, "playing", true);
@@ -1279,6 +1712,43 @@ export class WooWorld {
     return ctx.thisObj;
   }
 
+  private chatPresent(room: ObjRef): WooValue[] {
+    const present = this.getProp(room, "subscribers");
+    return Array.isArray(present) ? [...present] : [];
+  }
+
+  private runChatCommand(ctx: CallContext, rawText: string): WooValue {
+    const text = rawText.trim();
+    if (!text) throw wooError("E_INVARG", "empty chat command");
+    if (text === "/who" || text === "who") return this.chatPresent(ctx.thisObj);
+    if (text === "/look" || text === "look") {
+      return {
+        description: this.getProp(ctx.thisObj, "description"),
+        present_actors: this.chatPresent(ctx.thisObj),
+        contents: Array.from(this.object(ctx.thisObj).contents)
+      };
+    }
+    if (text.startsWith("/me ")) {
+      ctx.observe({ type: "emoted", source: ctx.thisObj, actor: ctx.actor, text: text.slice(4).trim(), ts: Date.now() });
+      return true;
+    }
+    if (text.startsWith(":")) {
+      ctx.observe({ type: "emoted", source: ctx.thisObj, actor: ctx.actor, text: text.slice(1).trim(), ts: Date.now() });
+      return true;
+    }
+    if (text.startsWith("/tell ")) {
+      const rest = text.slice("/tell ".length).trim();
+      const split = rest.indexOf(" ");
+      if (split <= 0) throw wooError("E_INVARG", "tell needs recipient and text");
+      const to = rest.slice(0, split) as ObjRef;
+      const body = rest.slice(split + 1).trim();
+      ctx.observe({ type: "told", source: ctx.thisObj, from: ctx.actor, to, text: body, ts: Date.now() });
+      return true;
+    }
+    ctx.observe({ type: "said", source: ctx.thisObj, actor: ctx.actor, text, ts: Date.now() });
+    return true;
+  }
+
   private descendants(task: ObjRef): Set<ObjRef> {
     const out = new Set<ObjRef>();
     const stack = [...((this.getProp(task, "subtasks") as WooValue[]) ?? [])] as ObjRef[];
@@ -1318,6 +1788,10 @@ export function normalizeError(err: unknown): ErrorValue {
   if (err instanceof SyntaxError) return wooError("E_INVARG", err.message);
   if (err instanceof Error) return wooError("E_INTERNAL", err.message);
   return wooError("E_INTERNAL", "unknown error", String(err));
+}
+
+function addUnique<T>(items: T[], item: T): T[] {
+  return items.includes(item) ? items : [...items, item];
 }
 
 function hashCanonical(value: WooValue): string {

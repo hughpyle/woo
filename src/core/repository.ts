@@ -23,6 +23,9 @@ export type SerializedSession = {
   id: string;
   actor: ObjRef;
   started: number;
+  expiresAt?: number;
+  lastDetachAt?: number | null;
+  tokenClass?: "guest" | "bearer" | "apikey";
 };
 
 export type SpaceSnapshotRecord = {

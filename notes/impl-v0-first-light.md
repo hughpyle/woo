@@ -106,7 +106,7 @@ This is enough to demonstrate the platform claim ("persistent programmable objec
 
 ## Where to go next
 
-[`impl/milestones.md`](../impl/milestones.md) lays out M-numbered milestones. The intermediate v0.5 cut (between this first-light and v1-core proper) is roughly:
+The intermediate v0.5 cut (between this first-light and v1-core proper) is roughly:
 
 - v0.5a — full VM, in-memory, with tests.
 - v0.5b — persistence (local SQLite via repository abstraction).

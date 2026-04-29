@@ -2,7 +2,7 @@
 
 This directory holds the Woo specification. It is layered. Read [`../SPEC.md`](../SPEC.md) for the entry index and the recommended reading order.
 
-The spec is intended to be detailed enough to guide implementation, testing, operations, and future compatibility decisions. The implementation tree at [`../impl/`](../impl/) translates these specs into agent-sized work packages tracking the same source-of-truth documents.
+The spec is intended to be detailed enough to guide implementation, testing, operations, and future compatibility decisions. The reference TypeScript implementation lives in [`../src/`](../src/); current debt and spec/impl drift is tracked in [`../TECH_DEBT_AUDIT.md`](../TECH_DEBT_AUDIT.md).
 
 ## Layout
 

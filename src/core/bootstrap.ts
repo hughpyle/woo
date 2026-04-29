@@ -19,9 +19,12 @@ export function createWorld(options: { repository?: WorldRepository } = {}): Woo
 
 export function bootstrap(world: WooWorld): WooWorld {
   seedUniversal(world);
+  seedDemoScaffold(world);
   seedDubspace(world);
   seedTaskspace(world);
+  seedChat(world);
   seedGuests(world);
+  world.rebuildGuestPool();
   return world;
 }
 
@@ -31,31 +34,54 @@ function seedUniversal(world: WooWorld): void {
   world.createObject({ id: "$actor", name: "$actor", parent: "$root", owner: "$wiz" });
   world.createObject({ id: "$player", name: "$player", parent: "$actor", owner: "$wiz" });
   world.createObject({ id: "$wiz", name: "$wiz", parent: "$player", owner: "$wiz", flags: { wizard: true, programmer: true } });
+  world.createObject({ id: "$guest", name: "$guest", parent: "$player", owner: "$wiz" });
   world.createObject({ id: "$space", name: "$space", parent: "$root", owner: "$wiz" });
   world.createObject({ id: "$thing", name: "$thing", parent: "$root", owner: "$wiz" });
 
   for (const id of ["$root", "$actor", "$player", "$space", "$thing"]) {
     define(world, id, "name", "", "str");
     define(world, id, "description", "", "str");
+    define(world, id, "aliases", [], "list<str>");
   }
   describeSeed(world, "$system", "Bootstrap object and world registry root. It has no parent, owns the reserved #0 identity, carries wizard authority, and is where corenames and world-level metadata are anchored.");
   describeSeed(world, "$root", "Universal base class for ordinary persistent objects. It defines common descriptive slots and inherited utility verbs, so most object parent chains terminate here before reaching $system.");
   describeSeed(world, "$actor", "Base class for principals that can originate messages. Actors participate in spaces through presence, appear as message.actor, and are the objects whose authority user-facing calls represent.");
-  describeSeed(world, "$player", "Session-capable actor class for humans, agents, or tools connected over the wire. A player composes actor identity with session bookkeeping and attached websocket state.");
+  describeSeed(world, "$player", "Session-capable actor class for humans, agents, or tools connected over the wire. A player composes actor identity with session bookkeeping and live connection state.");
   describeSeed(world, "$wiz", "Seed administrator player. It carries wizard and programmer flags so the initial world can bootstrap, inspect, and repair code, schema, and seeded objects.");
+  describeSeed(world, "$guest", "Reusable temporary player class. Guest instances bind to short-lived sessions, reset through on_disfunc when the session is reaped, and then return to the free guest pool.");
   describeSeed(world, "$space", "Coordination base class. A space owns a local message sequence, accepts calls, applies them one at a time, stores replayable history, and pushes observations to present subscribers.");
   describeSeed(world, "$thing", "Simple non-actor base class for persistent objects that primarily hold state. Use it when an object should be addressable and programmable but should not itself originate calls.");
   define(world, "$actor", "presence_in", [], "list<obj>");
+  define(world, "$actor", "features", [], "list<obj>");
+  define(world, "$actor", "features_version", 0, "int");
   define(world, "$player", "session_id", null, "str|null");
-  define(world, "$player", "attached_sockets", [], "list<str>");
+  define(world, "$player", "home", "$nowhere", "obj|null");
+  removeSeedProperty(world, "$player", "attached_sockets");
   define(world, "$space", "next_seq", 1, "int");
   define(world, "$space", "subscribers", [], "list<obj>");
   define(world, "$space", "last_snapshot_seq", 0, "int");
+  define(world, "$space", "features", [], "list<obj>");
+  define(world, "$space", "features_version", 0, "int");
 
   bytecode(world, "$root", "set_value", setValueBytecode, "verb :set_value(value) rx { ... }");
   bytecode(world, "$root", "set_prop", setPropBytecode, "verb :set_prop(name, value) rx { ... }");
   native(world, "$root", "describe", "describe", "verb :describe() rxd { ... }", { directCallable: true });
+  native(world, "$player", "on_disfunc", "player_on_disfunc", "verb :on_disfunc() rx { ... }");
+  native(world, "$player", "moveto", "player_moveto", "verb :moveto(target) rx { ... }");
+  native(world, "$guest", "on_disfunc", "guest_on_disfunc", "verb :on_disfunc() rx { ... }");
+  native(world, "$system", "return_guest", "return_guest", "verb :return_guest(guest) rx { ... }");
+  native(world, "$thing", "can_be_attached_by", "feature_can_be_attached_by", "verb :can_be_attached_by(actor) rxd { ... }", { directCallable: true });
+  for (const obj of ["$actor", "$space"]) {
+    native(world, obj, "add_feature", "add_feature", "verb :add_feature(f) rx { ... }");
+    native(world, obj, "remove_feature", "remove_feature", "verb :remove_feature(f) rx { ... }");
+    native(world, obj, "has_feature", "has_feature", "verb :has_feature(f) rxd { ... }", { directCallable: true });
+  }
   native(world, "$space", "replay", "replay", "verb :replay(from_seq, limit) rxd { ... }", { directCallable: true });
+}
+
+function seedDemoScaffold(world: WooWorld): void {
+  world.createObject({ id: "$nowhere", name: "$nowhere", parent: "$thing", owner: "$wiz" });
+  describeSeed(world, "$nowhere", "Seed default home for disconnected guests and recycled objects. It is a quiet holding place outside active demo spaces, owned by the wizard for reset operations.");
 }
 
 function seedDubspace(world: WooWorld): void {
@@ -163,14 +189,49 @@ function seedTaskspace(world: WooWorld): void {
   bytecode(world, "$task", "set_status_fixture", setStatusBytecode, "verb :set_status_fixture(status) rx { ... }");
 }
 
+function seedChat(world: WooWorld): void {
+  world.createObject({ id: "$match", name: "$match", parent: "$thing", owner: "$wiz" });
+  world.createObject({ id: "$failed_match", name: "$failed_match", parent: "$thing", owner: "$wiz" });
+  world.createObject({ id: "$ambiguous_match", name: "$ambiguous_match", parent: "$thing", owner: "$wiz" });
+  world.createObject({ id: "$conversational", name: "$conversational", parent: "$thing", owner: "$wiz" });
+  world.createObject({ id: "$chatroom", name: "$chatroom", parent: "$space", owner: "$wiz" });
+  world.createObject({ id: "the_chatroom", name: "Lobby", parent: "$chatroom", owner: "$wiz" });
+
+  describeSeed(world, "$match", "Chat-shaped text-to-action scaffold. It tokenizes input, resolves visible objects and verbs, and lets text clients lower commands into structured calls.");
+  describeSeed(world, "$failed_match", "Stable sentinel returned by matching code when no visible object matches a text phrase. It is compared by identity rather than raised as an exception.");
+  describeSeed(world, "$ambiguous_match", "Stable sentinel returned by matching code when more than one visible object matches a text phrase. It lets callers ask for clarification without exceptions.");
+  describeSeed(world, "$conversational", "Feature object carrying live chat verbs for spaces. Consumers attach it through their features list so talk, emote, tell, look, who, enter, leave, and command compose without inheritance.");
+  describeSeed(world, "$chatroom", "Standalone chat room class for live, direct, non-logged conversation. It is a small $space subclass whose chat behavior comes from the $conversational feature.");
+  describeSeed(world, "the_chatroom", "The first runnable chat room. It is a live lobby where connected actors can speak, emote, tell, look, and see who is present through the $conversational feature.");
+
+  seedProp(world, "the_chatroom", "next_seq", 1);
+  seedProp(world, "the_chatroom", "subscribers", []);
+  seedProp(world, "the_chatroom", "last_snapshot_seq", 0);
+  seedFeature(world, "the_chatroom", "$conversational");
+  seedFeature(world, "the_taskspace", "$conversational");
+
+  native(world, "$conversational", "can_be_attached_by", "conversational_can_be_attached_by", "verb :can_be_attached_by(actor) rxd { ... }", { directCallable: true });
+  native(world, "$conversational", "say", "chat_say", "verb :say(text) rxd { ... }", { directCallable: true });
+  native(world, "$conversational", "emote", "chat_emote", "verb :emote(text) rxd { ... }", { directCallable: true });
+  native(world, "$conversational", "tell", "chat_tell", "verb :tell(recipient, text) rxd { ... }", { directCallable: true });
+  native(world, "$conversational", "look", "chat_look", "verb :look() rxd { ... }", { directCallable: true });
+  native(world, "$conversational", "who", "chat_who", "verb :who() rxd { ... }", { directCallable: true });
+  native(world, "$conversational", "enter", "chat_enter", "verb :enter(actor?) rxd { ... }", { directCallable: true, skipPresenceCheck: true });
+  native(world, "$conversational", "leave", "chat_leave", "verb :leave(actor?) rxd { ... }", { directCallable: true });
+  native(world, "$conversational", "command", "chat_command", "verb :command(text) rxd { ... }", { directCallable: true });
+  for (const name of ["say", "emote", "tell", "look", "who", "enter", "leave", "command"]) removeSeedNative(world, "$chatroom", name, `chat_${name}`);
+}
+
 function seedGuests(world: WooWorld): void {
   for (let i = 1; i <= 8; i++) {
     const id = `guest_${i}`;
-    world.createObject({ id, name: `Guest ${i}`, parent: "$player", owner: "$wiz" });
+    world.createObject({ id, name: `Guest ${i}`, parent: "$guest", owner: "$wiz", location: "$nowhere" });
+    reparentSeed(world, id, "$guest");
     describeSeed(world, id, `Pre-seeded guest player ${i}. It can be bound to a temporary session, gains presence in demo spaces on auth, and gives local users or agents a stable actor for first-light testing.`);
     seedProp(world, id, "presence_in", []);
     seedProp(world, id, "session_id", null);
-    seedProp(world, id, "attached_sockets", []);
+    seedProp(world, id, "home", "$nowhere");
+    removeSeedProperty(world, id, "attached_sockets");
   }
 }
 
@@ -196,10 +257,45 @@ function seedProp(world: WooWorld, obj: ObjRef, name: string, value: WooValue): 
   world.setProp(obj, name, value);
 }
 
-function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: TinyBytecode, source: string, options: { directCallable?: boolean } = {}): void {
+function seedFeature(world: WooWorld, obj: ObjRef, feature: ObjRef): void {
+  const raw = world.getProp(obj, "features");
+  const features = Array.isArray(raw) ? raw.map((item) => String(item)) : [];
+  if (features.includes(feature)) return;
+  world.setProp(obj, "features", [...features, feature]);
+  const rawVersion = Number(world.getProp(obj, "features_version") ?? 0);
+  world.setProp(obj, "features_version", Number.isFinite(rawVersion) ? rawVersion + 1 : 1);
+}
+
+function removeSeedNative(world: WooWorld, obj: ObjRef, name: string, nativeName: string): void {
+  const verbs = world.object(obj).verbs;
+  const existing = verbs.get(name);
+  if (existing?.kind === "native" && existing.native === nativeName) verbs.delete(name);
+}
+
+function removeSeedProperty(world: WooWorld, obj: ObjRef, name: string): void {
+  const target = world.object(obj);
+  target.propertyDefs.delete(name);
+  target.properties.delete(name);
+  target.propertyVersions.delete(name);
+}
+
+function reparentSeed(world: WooWorld, obj: ObjRef, parent: ObjRef): void {
+  const target = world.object(obj);
+  if (target.parent === parent) return;
+  if (target.parent && world.objects.has(target.parent)) world.object(target.parent).children.delete(obj);
+  target.parent = parent;
+  world.object(parent).children.add(obj);
+}
+
+function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: TinyBytecode, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean } = {}): void {
   const existing = world.object(obj).verbs.get(name);
   if (existing) {
-    if (options.directCallable && !existing.direct_callable) world.addVerb(obj, { ...existing, direct_callable: true });
+    const next = {
+      ...existing,
+      direct_callable: existing.direct_callable || options.directCallable === true,
+      skip_presence_check: existing.skip_presence_check || options.skipPresenceCheck === true
+    };
+    if (next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
     return;
   }
   world.addVerb(obj, {
@@ -214,14 +310,20 @@ function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: Tin
     bytecode: bytecodeValue,
     version: bytecodeValue.version,
     line_map: {},
-    direct_callable: options.directCallable === true
+    direct_callable: options.directCallable === true,
+    skip_presence_check: options.skipPresenceCheck === true
   });
 }
 
-function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean } = {}): void {
+function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean } = {}): void {
   const existing = world.object(obj).verbs.get(name);
   if (existing) {
-    if (options.directCallable && !existing.direct_callable) world.addVerb(obj, { ...existing, direct_callable: true });
+    const next = {
+      ...existing,
+      direct_callable: existing.direct_callable || options.directCallable === true,
+      skip_presence_check: existing.skip_presence_check || options.skipPresenceCheck === true
+    };
+    if (next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
     return;
   }
   world.addVerb(obj, {
@@ -236,7 +338,8 @@ function native(world: WooWorld, obj: ObjRef, name: string, handler: string, sou
     version: 1,
     line_map: {},
     native: handler,
-    direct_callable: options.directCallable === true
+    direct_callable: options.directCallable === true,
+    skip_presence_check: options.skipPresenceCheck === true
   });
 }
 

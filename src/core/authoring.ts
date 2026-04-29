@@ -1,6 +1,6 @@
 import { hashSource } from "./bootstrap";
 import type { CompileResult, InstallResult, ObjRef, TinyBytecode, WooValue } from "./types";
-import { wooError } from "./types";
+import { isErrorValue, wooError } from "./types";
 import type { WooWorld } from "./world";
 
 type AuthoringOptions = {
@@ -17,7 +17,7 @@ export function compileVerb(source: string, options: AuthoringOptions = {}): Com
     } catch (err) {
       return {
         ok: false,
-        diagnostics: [{ severity: "error", code: "E_COMPILE", message: err instanceof Error ? err.message : String(err) }]
+        diagnostics: [compileDiagnostic(err)]
       };
     }
   }
@@ -71,10 +71,10 @@ function inferFormat(source: string): "t0-source" | "t0-json-bytecode" {
 
 function verifyBytecode(bytecode: TinyBytecode): void {
   if (!bytecode || !Array.isArray(bytecode.ops) || !Array.isArray(bytecode.literals)) {
-    throw new Error("invalid TinyBytecode shape");
+    throw wooError("E_COMPILE", "invalid TinyBytecode shape");
   }
   for (const [op] of bytecode.ops) {
-    if (!VALID_OPS.has(op)) throw new Error(`unknown opcode ${op}`);
+    if (!VALID_OPS.has(op)) throw wooError("E_COMPILE", `unknown opcode ${op}`);
   }
 }
 
@@ -84,7 +84,7 @@ function compileT0Source(source: string): CompileResult {
   // The full T0 source parser belongs with the next compiler milestone.
   try {
     const header = source.match(/verb\s+:?([A-Za-z_][\w]*)\s*\(([^)]*)\)/);
-    if (!header) throw new Error("expected `verb :name(args) { ... }` header");
+    if (!header) throw wooError("E_COMPILE", "expected `verb :name(args) { ... }` header");
     const args = header[2].split(",").map((arg) => arg.trim()).filter(Boolean);
     const ops: TinyBytecode["ops"] = [];
     const literals: WooValue[] = [];
@@ -107,7 +107,7 @@ function compileT0Source(source: string): CompileResult {
       else if (/^-?\d+(\.\d+)?$/.test(trimmed)) ops.push(["PUSH_LIT", lit(Number(trimmed))]);
       else if (trimmed === "true" || trimmed === "false") ops.push(["PUSH_LIT", lit(trimmed === "true")]);
       else if (trimmed === "null") ops.push(["PUSH_LIT", lit(null)]);
-      else throw new Error(`unsupported expression: ${trimmed}`);
+      else throw wooError("E_COMPILE", `unsupported expression: ${trimmed}`);
     };
 
     const assignmentRe = /this\.([A-Za-z_][\w]*)\s*=\s*([^;]+);/g;
@@ -143,9 +143,14 @@ function compileT0Source(source: string): CompileResult {
   } catch (err) {
     return {
       ok: false,
-      diagnostics: [{ severity: "error", code: "E_COMPILE", message: err instanceof Error ? err.message : String(err), span: { line: 1, column: 0 } }]
+      diagnostics: [{ ...compileDiagnostic(err), span: { line: 1, column: 0 } }]
     };
   }
+}
+
+function compileDiagnostic(err: unknown): CompileResult["diagnostics"][number] {
+  if (isErrorValue(err)) return { severity: "error", code: err.code, message: err.message ?? err.code };
+  return { severity: "error", code: "E_COMPILE", message: err instanceof Error ? err.message : String(err) };
 }
 
 const VALID_OPS = new Set([

@@ -82,6 +82,7 @@ export type VerbDef =
       version: number;
       line_map: Record<string, WooValue>;
       direct_callable?: boolean;
+      skip_presence_check?: boolean;
     }
   | {
       kind: "native";
@@ -96,6 +97,7 @@ export type VerbDef =
       line_map: Record<string, WooValue>;
       native: string;
       direct_callable?: boolean;
+      skip_presence_check?: boolean;
     };
 
 export type PropertyDef = {
@@ -151,6 +153,9 @@ export type Session = {
   id: string;
   actor: ObjRef;
   started: number;
+  expiresAt: number;
+  lastDetachAt: number | null;
+  tokenClass: "guest" | "bearer" | "apikey";
   attachedSockets: Set<string>;
 };
 

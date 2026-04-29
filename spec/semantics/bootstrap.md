@@ -12,9 +12,9 @@ This is the contract the implementation must produce on first start; without it,
 
 1. **Directory** is created first. Holds corename → ULID map and world metadata. Empty at boot until populated.
 2. **`$system` (`#0`)** is created with the reserved ULID `00000000000000000000000000`. `parent = null`.
-3. **Universal classes** are created in dependency order: `$root` → `$actor` → `$player` → `$wiz`, `$sequenced_log` → `$space` → `$thing`. Corenames registered in Directory.
+3. **Universal classes** are created in dependency order: `$root` → `$actor` → `$player` → `$wiz` / `$guest`, `$sequenced_log` → `$space` → `$thing`. Corenames registered in Directory.
 4. **Demo classes** are created depending on which demos are being booted: dubspace classes (`$dubspace`, `$loop_slot`, `$channel`, `$filter`, `$delay`, `$drum_loop`, `$scene`), taskspace classes (`$taskspace`, `$task`), and chat scaffolding/classes (`$match`, `$failed_match`, `$ambiguous_match`, `$conversational`, `$chatroom`).
-5. **Demo instances** (`the_dubspace`, `the_taskspace`, `the_chatroom`) are created with their internal anchored objects. `:add_feature` calls attach `$conversational` to `the_chatroom` and `the_taskspace` (running as wizard at boot, satisfying both attach-policy gates).
+5. **Demo instances** (`$nowhere`, `the_dubspace`, `the_taskspace`, `the_chatroom`) are created with their internal anchored objects. `$nowhere` is a seeded `$thing` used as the default `home` for guests being reset. `:add_feature` calls attach `$conversational` to `the_chatroom` and `the_taskspace` (running as wizard at boot, satisfying both attach-policy gates).
 6. **Guest player pool** is pre-seeded so first connections don't need to mint identities.
 
 Boot is idempotent: running it twice should be a no-op (each seed is created only if its corename isn't already mapped). This makes test setup and dev-restart trivial.
@@ -32,6 +32,7 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | `$actor` | `#2` | `$root` | — | Base class for principals that can originate messages. Actors participate in spaces through presence, appear as `message.actor`, and represent the authority behind user-facing calls. |
 | `$player` | `$actor` | — | Session-capable actor class for humans, agents, or tools connected over the wire. A player composes actor identity with session bookkeeping and attached websocket state. |
 | `$wiz` | `$player` | wizard, programmer | Seed administrator player. It carries wizard and programmer flags so the initial world can bootstrap, inspect, and repair code, schema, and seeded objects. |
+| `$guest` | `$player` | — | Reusable temporary player. Bound to a session at auth time; reset via `:on_disfunc` and returned to the free pool when its session is reaped. See [identity.md §I6.4](identity.md#i64-guest-reset-the-on_disfunc-convention). |
 | `$sequenced_log` | `$root` | — | Append-only sequenced log primitive. Owns the runtime-blessed `:append`/`:read` verbs, atomic seq allocation, and durable log storage. Subclassed by `$space` and other coordination shapes. See [sequenced-log.md](sequenced-log.md). |
 | `$space` | `$sequenced_log` | — | Coordination workhorse. Adds dispatch, subscribers, and applied-frame broadcast on top of the inherited log primitive. The v1 reference subclass for `:call`-shaped sequenced coordination. |
 | `$thing` | `$root` | — | Simple non-actor base class for persistent objects that primarily hold state. Use it when an object should be addressable and programmable but should not itself originate calls. |
@@ -74,7 +75,20 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | Property | Type | Default | Notes |
 |---|---|---|---|
 | `session_id` | str \| null | null | Current session (see identity.md §I2). |
-| `attached_sockets` | list<str> | `[]` | Per the multi-attach model in identity.md §I5. |
+| `home` | obj \| null | null | Where this player returns on `:on_disfunc`. Defaults `$nowhere` when null at reap time. |
+
+`attached_sockets` is **not** a persistent property. Connection state is in-memory on the player host (per [identity.md §I2](identity.md#i2-three-layers-actor-session-connection)); persisting socket ids causes orphaned attachments after restart.
+
+### B2.4.1 `$player` verbs
+
+| Verb | Args | Purpose |
+|---|---|---|
+| `:on_disfunc()` | — | Disfunc hook called at session reap. Default body is a no-op; `$guest` overrides. See [identity.md §I6.4](identity.md#i64-guest-reset-the-on_disfunc-convention). |
+| `:moveto(target)` | obj | Move this player to `target.contents`. Used by disfunc bodies. |
+
+### B2.4.2 `$guest` verbs
+
+`$guest:on_disfunc()` overrides the default to reset state per [identity.md §I6.4](identity.md#i64-guest-reset-the-on_disfunc-convention): move to `home` (or `$nowhere`), clear `description`/`aliases`/`features`, drop inventory, return to the free pool via `$system:return_guest(this)`.
 
 ### B2.5 `$sequenced_log` additional properties
 
@@ -301,6 +315,7 @@ the_taskspace:add_feature($conversational);
 
 | Corename | Class | Anchor | Description |
 |---|---|---|---|
+| `$nowhere` | `$thing` | n/a | Seed default-home for players whose `home` is null. Holds disconnected guests after `:on_disfunc` and any object reparented to `null` location during recycle. Wizard-owned, no contents-emitted observations. |
 | `the_dubspace` | `$dubspace` | n/a (own host root) | The first runnable sound-space instance. It owns the sequenced coordination surface for four loop slots, one channel, one filter, one delay, and one default scene. |
 | `the_taskspace` | `$taskspace` | n/a (own host root) | The first runnable task coordination space. It owns the sequenced timeline and anchored task tree used by people or agents to create, claim, discuss, and complete work. Boots with `features: [$conversational]` so `:say`/`:emote`/`:enter`/`:leave` are available alongside task verbs. |
 | `the_chatroom` | `$chatroom` | n/a (own host root) | The first runnable chat room. Standalone surface for testing the chat client and `$match` parser; carries `features: [$conversational]` set at boot. |
@@ -336,9 +351,11 @@ For the taskspace, no instances exist at boot — tasks are created at runtime b
 
 ## B7. Guest player pool
 
-A pre-seeded pool of `$player` objects, e.g. `guest_1`..`guest_8`, exists at boot. When a client presents `auth { token: "guest:<random>" }`, the server assigns one of the unbound guest players to the new session. The pool refills as guests disconnect and their sessions reap (identity.md §I6).
+A pre-seeded pool of `$guest` objects, e.g. `guest_1`..`guest_8`, exists at boot. Each has `home = $nowhere` and `parent = $guest`. When a client presents `auth { token: "guest:<random>" }`, `allocateGuest` assigns one of the unbound guest objects to the new session. The pool refills as sessions are reaped: `$guest:on_disfunc` resets the guest's state and returns it to the free pool via `$system:return_guest(this)` (identity.md §I6.4).
 
-For the demo, 8 guests is enough for a small cohort. Real worlds would mint guests on demand. Each guest's description states that it is a pre-seeded temporary player, can be bound to a session, gains demo-space presence on auth, and exists to give local users or agents a stable first-light actor.
+For the demo, 8 guests is enough for a small cohort. Real worlds would mint guests on demand or scale the pool to expected concurrent traffic. Each guest's description states that it is a pre-seeded temporary player and exists to give local users or agents a stable first-light actor.
+
+Allocation uses an explicit free pool, **not** "any guest with no live session" — the latter is what the v0.5 impl does and what causes pool exhaustion across restarts (every guest looks bound because its session record persisted past the dead connection). The free pool is in-memory and rebuilt at boot from "guests with no session in the session table."
 
 ---
 
