@@ -114,5 +114,8 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 
 See [LATER.md](LATER.md) for the informal todo list — open items, sketches, gaps, decisions still pending. Not commitments.
 
+For what is *currently built* (as opposed to what the spec is building toward), see the implementation snapshots in [`notes/`](notes/). The current cut is documented in [notes/impl-v0-first-light.md](notes/impl-v0-first-light.md).
+
 Loose docs alongside the spec layers:
-- [spec/vision.md](spec/vision.md), [spec/dubspace-demo.md](spec/dubspace-demo.md), [spec/taskspace-demo.md](spec/taskspace-demo.md), [spec/README.md](spec/README.md) — author's working docs.
+- [spec/vision.md](spec/vision.md), [spec/README.md](spec/README.md) — author's working docs.
+- [spec/dubspace-demo.md](spec/dubspace-demo.md), [spec/taskspace-demo.md](spec/taskspace-demo.md) — demo surface specs (what each demo provides; first-light profile).
