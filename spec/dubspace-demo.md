@@ -38,14 +38,14 @@ for fast reload. No world-level clock is required for ordering.
 - Percussion transport (`playing`, `started_at`), tempo, and eight-step pattern.
 - Scene name and saved control values.
 
-## Ephemeral Slider Properties
+## Live Slider Previews
 
-Slider motion has two layers:
+Slider motion has two layers — two routes for the same control surface:
 
-- **Preview**: while a player drags a slider, the client sends an ephemeral property frame `{target, name, value}`. The server broadcasts it only to actors present in the dubspace. It is not sequenced, not logged, not replayed, and not durable.
-- **Commit**: when the drag ends, the client sends the ordinary sequenced `:set_control(target, name, value)` call. This value becomes materialized persistent state and is replayable.
+- **Preview** (direct call): while a player drags a slider, the client calls a direct verb, `the_dubspace:preview_control(target, name, value)`. The verb body emits a `gesture_progress` observation; per [events.md §12.6](semantics/events.md#126-observation-durability-follows-invocation-route), the observation is live-only because the call is direct. Not sequenced, not logged, not replayed.
+- **Commit** (sequenced): when the drag ends, the client sends `$space:call({verb: "set_control", args: [target, name, value]})`. The value becomes materialized persistent state and is replayable.
 
-The preview layer exists so continuous gestures feel live without filling the `$space` log with every pointer sample. It is an optimization over the same control surface, not a second source of truth.
+The preview layer exists so continuous gestures feel live without filling the `$space` log with every pointer sample. It is the same control surface called via a different route, not a second source of truth.
 
 ## Observation Schemas
 
@@ -64,10 +64,10 @@ Each observation the dubspace emits has a defined payload shape. UI and agents c
 | `tempo_changed` | `{target: obj, bpm: int}` | `:set_tempo` applied. |
 | `transport_started` | `{target: obj, started_at: int, bpm: int}` | `:start_transport` applied. |
 | `transport_stopped` | `{target: obj}` | `:stop_transport` applied. |
-| `gesture_progress` | `{actor: obj, target: obj, name: str, value: any}` | **Ephemeral**: in-flight slider drag preview. |
-| `cursor` | `{actor: obj, x: float, y: float}` | **Ephemeral**: pointer position. |
+| `gesture_progress` | `{actor: obj, target: obj, name: str, value: any}` | Direct call: in-flight slider drag preview. Live-only. |
+| `cursor` | `{actor: obj, x: float, y: float}` | Direct call: pointer position. Live-only. |
 
-All observations include `type` (the table key) and `source` (the dubspace itself, unless noted otherwise). Persistent observations are sequenced; ephemeral observations follow [events.md §12.6](semantics/events.md#126-persistent-vs-ephemeral-events) and don't sequence.
+All observations include `type` (the table key) and `source` (the dubspace itself, unless noted otherwise). Observations from sequenced verbs (`:set_control`, `:start_loop`, etc.) become part of the resulting applied frame and are replayable. Observations from direct verbs (`:preview_control`, `:cursor`) are live-only — see [events.md §12.6](semantics/events.md#126-observation-durability-follows-invocation-route).
 
 ## Live Events
 
@@ -78,9 +78,7 @@ All observations include `type` (the table key) and `source` (the dubspace itsel
 - Gesture began, moved, ended.
 - Scene saved or recalled.
 
-Gesture previews are ephemeral; gesture commits that affect the shared mix are
-sequenced messages. Pure UI presence hints may stay ephemeral. The latest
-committed control values are persistent materialized state.
+Gesture previews go through direct calls (live-only); gesture commits that affect the shared mix go through `$space:call` (sequenced). Pure UI presence hints stay direct. The latest committed control values are persistent materialized state.
 
 ## Minimal Interactions
 

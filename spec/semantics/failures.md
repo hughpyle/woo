@@ -150,7 +150,7 @@ Reconnect: the client always uses `space:replay(from, limit)` for gap recovery r
 For clarity:
 
 - **Receiver gracefully declined.** A verb that returns an err map (without `raise()`) has not failed; the call applied successfully and the err is just the return value.
-- **Subscriber dropped an event.** Receiver-side coalescing of ephemeral events (events.md §12.6) is not a failure; it's the contract.
+- **Subscriber dropped an event.** Receiver-side coalescing of live observations from direct calls (events.md §12.6) is not a failure; it's the contract.
 - **Dead-letter delivery.** A persistent emit to an unreachable target ends up on the emitter's audit object; not a failure, an audit affordance.
 - **Wizard-bypass action recorded.** A wizard using their flag to bypass a check is not a failure; if a wizard audit log exists, it records the bypass for review.
 

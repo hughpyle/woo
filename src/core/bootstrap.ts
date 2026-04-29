@@ -1,10 +1,19 @@
 import { claimBytecode, setControlBytecode, setPropBytecode, setStatusBytecode, setValueBytecode } from "./fixtures";
+import type { WorldRepository } from "./repository";
 import type { ObjRef, TinyBytecode, VerbDef, WooValue } from "./types";
 import { WooWorld } from "./world";
 
-export function createWorld(): WooWorld {
-  const world = new WooWorld();
-  bootstrap(world);
+export function createWorld(options: { repository?: WorldRepository } = {}): WooWorld {
+  const world = new WooWorld(options.repository);
+  const stored = options.repository?.load();
+  if (stored) {
+    world.importWorld(stored);
+    world.withPersistencePaused(() => bootstrap(world));
+    world.persist();
+  } else {
+    world.withPersistencePaused(() => bootstrap(world));
+    world.persist();
+  }
   return world;
 }
 
@@ -45,8 +54,8 @@ function seedUniversal(world: WooWorld): void {
 
   bytecode(world, "$root", "set_value", setValueBytecode, "verb :set_value(value) rx { ... }");
   bytecode(world, "$root", "set_prop", setPropBytecode, "verb :set_prop(name, value) rx { ... }");
-  native(world, "$root", "describe", "describe", "verb :describe() rxd { ... }");
-  native(world, "$space", "replay", "replay", "verb :replay(from_seq, limit) rxd { ... }");
+  native(world, "$root", "describe", "describe", "verb :describe() rxd { ... }", { directCallable: true });
+  native(world, "$space", "replay", "replay", "verb :replay(from_seq, limit) rxd { ... }", { directCallable: true });
 }
 
 function seedDubspace(world: WooWorld): void {
@@ -71,12 +80,14 @@ function seedDubspace(world: WooWorld): void {
   describeSeed(world, "the_dubspace", "The first runnable sound-space instance. It owns the sequenced coordination surface for four loop slots, one channel, one filter, one delay, one percussion loop, and one default scene.");
 
   for (const id of ["the_dubspace"]) {
-    world.setProp(id, "next_seq", 1);
-    world.setProp(id, "subscribers", []);
-    world.setProp(id, "last_snapshot_seq", 0);
+    seedProp(world, id, "next_seq", 1);
+    seedProp(world, id, "subscribers", []);
+    seedProp(world, id, "last_snapshot_seq", 0);
   }
 
   bytecode(world, "$dubspace", "set_control", setControlBytecode, "verb :set_control(target, name, value) rx { ... }");
+  native(world, "$dubspace", "preview_control", "preview_control", "verb :preview_control(target, name, value) rxd { ... }", { directCallable: true });
+  native(world, "$dubspace", "cursor", "cursor", "verb :cursor(x, y) rxd { ... }", { directCallable: true });
   native(world, "$dubspace", "start_loop", "start_loop", "verb :start_loop(slot) rx { ... }");
   native(world, "$dubspace", "stop_loop", "stop_loop", "verb :stop_loop(slot) rx { ... }");
   native(world, "$dubspace", "save_scene", "save_scene", "verb :save_scene(name) rx { ... }");
@@ -90,29 +101,29 @@ function seedDubspace(world: WooWorld): void {
     const id = `slot_${i}`;
     world.createObject({ id, name: `Loop ${i}`, parent: "$loop_slot", owner: "$wiz", anchor: "the_dubspace", location: "the_dubspace" });
     describeSeed(world, id, `Loop slot ${i} in the demo dubspace. It is anchored to the_dubspace and stores its loop id, playing state, and gain as part of the shared sequenced mix.`);
-    world.setProp(id, "loop_id", `loop-${i}`);
-    world.setProp(id, "playing", false);
-    world.setProp(id, "gain", 0.75);
+    seedProp(world, id, "loop_id", `loop-${i}`);
+    seedProp(world, id, "playing", false);
+    seedProp(world, id, "gain", 0.75);
   }
   world.createObject({ id: "channel_1", name: "Channel", parent: "$channel", owner: "$wiz", anchor: "the_dubspace", location: "the_dubspace" });
   describeSeed(world, "channel_1", "Mixer channel for the demo dubspace. It is anchored to the_dubspace and contributes shared gain state to the current mix.");
-  world.setProp("channel_1", "gain", 0.8);
+  seedProp(world, "channel_1", "gain", 0.8);
   world.createObject({ id: "filter_1", name: "Filter", parent: "$filter", owner: "$wiz", anchor: "the_dubspace", location: "the_dubspace" });
   describeSeed(world, "filter_1", "Shared filter control for the demo dubspace. It is anchored to the_dubspace and exposes cutoff as a sequenced parameter.");
-  world.setProp("filter_1", "cutoff", 1000);
+  seedProp(world, "filter_1", "cutoff", 1000);
   world.createObject({ id: "delay_1", name: "Delay", parent: "$delay", owner: "$wiz", anchor: "the_dubspace", location: "the_dubspace" });
   describeSeed(world, "delay_1", "Shared delay control for the demo dubspace. It is anchored to the_dubspace and stores send, time, feedback, and wet mix values for collaborative echo gestures.");
-  world.setProp("delay_1", "send", 0.3);
-  world.setProp("delay_1", "time", 0.25);
-  world.setProp("delay_1", "feedback", 0.35);
-  world.setProp("delay_1", "wet", 0.4);
+  seedProp(world, "delay_1", "send", 0.3);
+  seedProp(world, "delay_1", "time", 0.25);
+  seedProp(world, "delay_1", "feedback", 0.35);
+  seedProp(world, "delay_1", "wet", 0.4);
   world.createObject({ id: "drum_1", name: "Percussion Loop", parent: "$drum_loop", owner: "$wiz", anchor: "the_dubspace", location: "the_dubspace" });
   describeSeed(world, "drum_1", "Eight-step percussion loop for the demo dubspace. It is anchored to the_dubspace and stores tempo, transport state, and a shared kick/snare/hat/tone pattern.");
-  world.setProp("drum_1", "bpm", 118);
-  world.setProp("drum_1", "playing", false);
-  world.setProp("drum_1", "started_at", 0);
-  world.setProp("drum_1", "step_count", 8);
-  world.setProp("drum_1", "pattern", {
+  seedProp(world, "drum_1", "bpm", 118);
+  seedProp(world, "drum_1", "playing", false);
+  seedProp(world, "drum_1", "started_at", 0);
+  seedProp(world, "drum_1", "step_count", 8);
+  seedProp(world, "drum_1", "pattern", {
     kick: [true, false, false, false, true, false, false, false],
     snare: [false, false, true, false, false, false, true, false],
     hat: [true, true, true, true, true, true, true, true],
@@ -120,8 +131,8 @@ function seedDubspace(world: WooWorld): void {
   });
   world.createObject({ id: "default_scene", name: "Default Scene", parent: "$scene", owner: "$wiz", anchor: "the_dubspace", location: "the_dubspace" });
   describeSeed(world, "default_scene", "Initial saved scene for the demo dubspace. It records a named control snapshot and gives scene recall a concrete object to read and rewrite.");
-  world.setProp("default_scene", "name", "Default");
-  world.setProp("default_scene", "controls", {});
+  seedProp(world, "default_scene", "name", "Default");
+  seedProp(world, "default_scene", "controls", {});
 }
 
 function seedTaskspace(world: WooWorld): void {
@@ -133,10 +144,10 @@ function seedTaskspace(world: WooWorld): void {
   describeSeed(world, "$task", "Base class for taskspace work items. A task stores title, description, status, assignee, requirements, artifacts, messages, parent linkage, and ordered subtasks.");
   describeSeed(world, "the_taskspace", "The first runnable task coordination space. It owns the sequenced timeline and anchored task tree used by people or agents to create, claim, discuss, and complete work.");
 
-  world.setProp("the_taskspace", "next_seq", 1);
-  world.setProp("the_taskspace", "subscribers", []);
-  world.setProp("the_taskspace", "last_snapshot_seq", 0);
-  world.setProp("the_taskspace", "root_tasks", []);
+  seedProp(world, "the_taskspace", "next_seq", 1);
+  seedProp(world, "the_taskspace", "subscribers", []);
+  seedProp(world, "the_taskspace", "last_snapshot_seq", 0);
+  seedProp(world, "the_taskspace", "root_tasks", []);
 
   native(world, "$taskspace", "create_task", "create_task", "verb :create_task(title, description) rx { ... }");
   native(world, "$task", "add_subtask", "add_subtask", "verb :add_subtask(title, description) rx { ... }");
@@ -157,13 +168,14 @@ function seedGuests(world: WooWorld): void {
     const id = `guest_${i}`;
     world.createObject({ id, name: `Guest ${i}`, parent: "$player", owner: "$wiz" });
     describeSeed(world, id, `Pre-seeded guest player ${i}. It can be bound to a temporary session, gains presence in demo spaces on auth, and gives local users or agents a stable actor for first-light testing.`);
-    world.setProp(id, "presence_in", []);
-    world.setProp(id, "session_id", null);
-    world.setProp(id, "attached_sockets", []);
+    seedProp(world, id, "presence_in", []);
+    seedProp(world, id, "session_id", null);
+    seedProp(world, id, "attached_sockets", []);
   }
 }
 
 function define(world: WooWorld, obj: ObjRef, name: string, defaultValue: WooValue, typeHint: string): void {
+  if (world.object(obj).propertyDefs.has(name)) return;
   world.defineProperty(obj, {
     name,
     defaultValue,
@@ -174,10 +186,22 @@ function define(world: WooWorld, obj: ObjRef, name: string, defaultValue: WooVal
 }
 
 function describeSeed(world: WooWorld, obj: ObjRef, description: string): void {
+  const existing = world.object(obj).properties.get("description");
+  if (typeof existing === "string" && existing.length > 0) return;
   world.setProp(obj, "description", description);
 }
 
-function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: TinyBytecode, source: string): void {
+function seedProp(world: WooWorld, obj: ObjRef, name: string, value: WooValue): void {
+  if (world.object(obj).properties.has(name)) return;
+  world.setProp(obj, name, value);
+}
+
+function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: TinyBytecode, source: string, options: { directCallable?: boolean } = {}): void {
+  const existing = world.object(obj).verbs.get(name);
+  if (existing) {
+    if (options.directCallable && !existing.direct_callable) world.addVerb(obj, { ...existing, direct_callable: true });
+    return;
+  }
   world.addVerb(obj, {
     kind: "bytecode",
     name,
@@ -189,11 +213,17 @@ function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: Tin
     source_hash: hashSource(source),
     bytecode: bytecodeValue,
     version: bytecodeValue.version,
-    line_map: {}
+    line_map: {},
+    direct_callable: options.directCallable === true
   });
 }
 
-function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string): void {
+function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean } = {}): void {
+  const existing = world.object(obj).verbs.get(name);
+  if (existing) {
+    if (options.directCallable && !existing.direct_callable) world.addVerb(obj, { ...existing, direct_callable: true });
+    return;
+  }
   world.addVerb(obj, {
     kind: "native",
     name,
@@ -205,7 +235,8 @@ function native(world: WooWorld, obj: ObjRef, name: string, handler: string, sou
     source_hash: hashSource(source),
     version: 1,
     line_map: {},
-    native: handler
+    native: handler,
+    direct_callable: options.directCallable === true
   });
 }
 

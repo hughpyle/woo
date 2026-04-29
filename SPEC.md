@@ -1,6 +1,6 @@
 # woo — specification
 
-A globally distributed successor to LambdaMOO. Programmable persistent objects, single-parent inheritance, modernized types, structured event messaging. v1 runs on a single vendor's edge (Cloudflare); cross-operator federation is reserved for v2.
+Programmable persistent objects, single-parent inheritance, modernized types, structured event messaging. A globally distributed successor to LambdaMOO. v1 runs on a single machine or a single vendor's edge (Cloudflare); cross-operator federation is reserved for v2.
 
 > Status: working draft. Section numbers in headers are stable references for conversation.
 
@@ -23,7 +23,7 @@ The system is **infrastructure, not UI**. The chat-text interface is one rendere
 | **Object** | A persistent, individually addressable entity. Holds properties, verbs, location, parent, owner. |
 | **Persistent object** | Server-hosted; one persistent host per woo object. Identifier prefix `#`. |
 | **Transient object** | Client-hosted (typically browser); lifetime bounded by the connection. Identifier prefix `~`. |
-| **Verb** | Callable code attached to an object. Dispatched by name, walks parent chain. |
+| **Verb** | Callable code attached to an object. Dispatched by name through the standard lookup rule: parent chain, then feature lookup where applicable. |
 | **Property** | Named slot on an object. *Defined* on an ancestor (with default + perms); *value* per object. |
 | **Player** | An object that has an attached client connection. Just an object, not a separate type. |
 | **Task** (VM) | A serializable activation stack; the unit of execution. Migrates between hosts on verb dispatch. Also called a *VM activation* when distinguishing from a taskspace's work-item "task" (see `spec/taskspace-demo.md`). |
@@ -40,8 +40,8 @@ Spec scope is organized into four progressive profiles. See [profiles.md](spec/p
 
 | Profile | Scope | Status |
 |---|---|---|
-| **first-light** | T0 VM, dubspace + taskspace demos, minimal IDE, in-memory | reference impl in `src/` |
-| **v1-core** | Full semantics + protocol + Cloudflare reference; durable, multi-actor, recoverable | spec ready |
+| **first-light** | Runnable dubspace + taskspace demos, minimal IDE, local dev runtime; T0 fixtures plus v0.5 VM/persistence slices | reference impl in `src/` (v0.5 local; not a v1-core claim) |
+| **v1-core** | Full semantics + protocol + Cloudflare reference; durable, multi-actor, recoverable | spec ready; impl partial |
 | **v1-ops** | Worktrees, migrations, backups, deployments, observability, debugging, teams, credentialed auth, catalogs, conformance | spec ready |
 | **v2-federation** | Cross-world calls (mTLS), peer trust, federated identity | reserved; designs in `spec/deferred/` |
 
@@ -62,9 +62,10 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 - [core.md](spec/semantics/core.md) — woo-core: objects, messages, spaces, actors, observations
 - [values.md](spec/semantics/values.md) — value contract, equality, canonical serialization (V1–V11)
 - [objects.md](spec/semantics/objects.md) — object model, identity, verb dispatch, properties (§4, §5, §9, §10)
-- [space.md](spec/semantics/space.md) — `$space` normative behavior: call lifecycle, failure rules, snapshots (S1–S10)
+- [sequenced-log.md](spec/semantics/sequenced-log.md) — `$sequenced_log` primitive: atomic seq allocation, durable append-only log (SL1–SL10)
+- [space.md](spec/semantics/space.md) — `$space` (a `$sequenced_log` subclass): call lifecycle, failure rules, snapshots (S1–S10)
 - [identity.md](spec/semantics/identity.md) — actor, session, auth lifecycle (I1–I8)
-- [bootstrap.md](spec/semantics/bootstrap.md) — seed object graph: universal classes, demo classes, instances (B1–B8)
+- [bootstrap.md](spec/semantics/bootstrap.md) — seed object graph: universal classes, demo classes, instances (B1–B9)
 - [introspection.md](spec/semantics/introspection.md) — `:describe()` convention and discovery surface (N1–N6)
 - [language.md](spec/semantics/language.md) — types, DSL syntax (§6, §7)
 - [vm.md](spec/semantics/vm.md) — bytecode, opcodes, scheduling, metering (§8)
@@ -73,11 +74,15 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 - [events.md](spec/semantics/events.md) — emit, schemas (§12, §13)
 - [tasks.md](spec/semantics/tasks.md) — lifecycle, suspend, fork, read (§16)
 - [builtins.md](spec/semantics/builtins.md) — builtins, errors (§19, §20)
+- [recycle.md](spec/semantics/recycle.md) — `recycle()` semantics: cleanup, handlers, dangling refs (RC1–RC9)
+- [match.md](spec/semantics/match.md) — `$match` scaffolding for chat-shaped text → object/verb resolution (MA1–MA7)
+- [features.md](spec/semantics/features.md) — feature objects: composition without multiple inheritance (FT1–FT10)
 - [failures.md](spec/semantics/failures.md) — consolidated failure model (F1–F11)
 
 ### Protocol
 - [hosts.md](spec/protocol/hosts.md) — three host classes, task migration, trust boundaries (§3)
-- [wire.md](spec/protocol/wire.md) — JSON message format (§17)
+- [wire.md](spec/protocol/wire.md) — JSON WebSocket message format (§17)
+- [rest.md](spec/protocol/rest.md) — HTTP+SSE REST API; six endpoints; `$me` (R1–R11)
 - [browser-host.md](spec/protocol/browser-host.md) — transient host bootstrap (§18)
 
 ### Reference (Cloudflare)
@@ -86,11 +91,12 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 - [quotas.md](spec/reference/quotas.md) — QuotaAccountant DO (R5)
 
 ### Operations
-- [worktrees.md](spec/operations/worktrees.md) — staging changes, sandboxes, atomic promote (W1–W12)
+- [worktrees.md](spec/operations/worktrees.md) — staging changes, sandboxes, atomic promote (W1–W13)
 - [migrations.md](spec/operations/migrations.md) — bytecode upgrades, schema changes, data migrations (M1–M9)
 - [backups.md](spec/operations/backups.md) — world export format, restore, disaster recovery (B1–B8)
 - [deployments.md](spec/operations/deployments.md) — dev / staging / prod, version coordination, cross-environment sync (DP1–DP9)
 - [observability.md](spec/operations/observability.md) — logs, metrics, traces, audit (O1–O9)
+- [workflows.md](spec/operations/workflows.md) — state machines on `$space`s; role gating; transition rules (WF1–WF10)
 
 ### Identity
 - [auth.md](spec/identity/auth.md) — credentialed auth, account vs actor, multi-character, recovery, service accounts (A1–A11)
@@ -114,8 +120,8 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 
 See [LATER.md](LATER.md) for the informal todo list — open items, sketches, gaps, decisions still pending. Not commitments.
 
-For what is *currently built* (as opposed to what the spec is building toward), see the implementation snapshots in [`notes/`](notes/). The current cut is documented in [notes/impl-v0-first-light.md](notes/impl-v0-first-light.md).
+For what is *currently built* (as opposed to what the spec is building toward), see the implementation snapshots in [`notes/`](notes/). The current cut is documented in [notes/impl-v0.5-rich-vm-persistence-compiler.md](notes/impl-v0.5-rich-vm-persistence-compiler.md); the older [notes/impl-v0-first-light.md](notes/impl-v0-first-light.md) is historical. Current spec/implementation drift is tracked in [notes/spec-impl-alignment-2026-04-29.md](notes/spec-impl-alignment-2026-04-29.md).
 
 Loose docs alongside the spec layers:
 - [spec/vision.md](spec/vision.md), [spec/README.md](spec/README.md) — author's working docs.
-- [spec/dubspace-demo.md](spec/dubspace-demo.md), [spec/taskspace-demo.md](spec/taskspace-demo.md) — demo surface specs (what each demo provides; first-light profile).
+- [spec/dubspace-demo.md](spec/dubspace-demo.md), [spec/taskspace-demo.md](spec/taskspace-demo.md), [spec/chat-demo.md](spec/chat-demo.md) — demo surface specs (what each demo provides; first-light profile).

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/server/dev-server.ts",
+    "dump:json": "tsx src/server/dump-json.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build": "vite build"

@@ -79,6 +79,7 @@ The suite covers every normative section of the spec. Categories:
 | **Identity** | I3 auth flows, I4 reconnect, I5 multi-attach, I6 disconnect |
 | **VM (T0)** | All T0 opcodes, T0 fixtures from tiny-vm.md, tick metering, memory metering |
 | **Wire** | All op types, idempotent retry, gap recovery via replay |
+| **REST + SSE** | All six endpoints, body-level `space` sequencing, `direct_callable` gate, `$me` resolution, single-space SSE resume, multi-space SSE re-fetch fallback |
 | **Permissions** | Verb perms, property perms, wizard bypass, progr discipline |
 | **Failures** | Every row of failures.md §F2 |
 | **Persistence** | Anchor cluster scoping, message log integrity, snapshot reconstruction |
@@ -90,7 +91,34 @@ Each category has a section of named tests; total target ~500 tests for v1 launc
 
 ---
 
-## CF4. The runner
+## CF4. Storage target profiles
+
+The conformance runner distinguishes **live storage backends** from
+**archive/import-export targets**.
+
+Live storage backends must satisfy the full runtime contract: sequenced calls,
+rollback, replay, restart reconstruction, scheduler wakeups, parked tasks,
+storage-failure behavior, and concurrent-write semantics. The reference live
+targets are in-memory, SQLite, and future host storage adapters.
+
+The JSON folder format is not a live storage backend. It is a human-readable
+world dump/import format. The suite covers it under an archive profile:
+
+- Full world dump/load round trip.
+- Manifest and per-object file shape.
+- Inclusion of logs, snapshots, sessions, and parked tasks in complete dumps.
+- Partial object dumps are inspectable but not loadable as complete worlds.
+- Deterministic ordering for files and manifest entries where specified.
+
+Archive targets do not claim live-call atomicity, scheduler semantics,
+failure-injection behavior, or incremental write guarantees. A smoke test may
+load a full JSON folder repository and run a small call to catch accidental
+breakage, but that is not a promotion of JSON folder storage to the live backend
+contract.
+
+---
+
+## CF5. The runner
 
 ```
 woo-conformance run [--category=NAME] [--implementation=PATH]
@@ -107,7 +135,7 @@ The runner is implementation-agnostic. It speaks the wire protocol; any implemen
 
 ---
 
-## CF5. Self-conformance (the reference impl)
+## CF6. Self-conformance (the reference impl)
 
 The reference implementation runs the full conformance suite as part of CI. Every spec change must be accompanied by:
 
@@ -119,7 +147,7 @@ Test diffs are reviewed alongside spec diffs. A spec change without a conformanc
 
 ---
 
-## CF6. Independent implementations
+## CF7. Independent implementations
 
 A second implementation runs the same suite. Differences surface as failing tests with structured diffs. The expected workflow:
 
@@ -133,7 +161,7 @@ This is the long-term value of the suite: it makes spec ambiguities surface as t
 
 ---
 
-## CF7. Versioning
+## CF8. Versioning
 
 The suite is versioned alongside the spec. Test version `vX.Y` matches spec version `vX.Y`. Old implementations may run old test versions; new implementations should run the latest.
 
@@ -141,13 +169,13 @@ Test additions are non-breaking (an old impl that didn't fail v1.0 may fail v1.1
 
 ---
 
-## CF8. Performance benchmarks (separate)
+## CF9. Performance benchmarks (separate)
 
 Performance benchmarks are *not* part of conformance. The same harness can run benchmarks (e.g., "1000 sequential `$space:call` finish in under N seconds"), but those don't gate spec compliance — they're operator-relevant signals.
 
 ---
 
-## CF9. What's deferred
+## CF10. What's deferred
 
 - **Live-system probing.** A "is this running deployment spec-compliant?" check that runs against a live world. Possible via the suite if you have a wizard-credentialed test actor; not first-light.
 - **Cross-world conformance.** When federation v1 lands, the suite extends to cover multi-world scenarios. v2.

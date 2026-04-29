@@ -34,8 +34,28 @@ type Task = {
   resume_at?: number;          // ms timestamp, when state='suspended'
   awaiting?: AwaitingInfo;
   origin: ObjRef;              // host where task was created (for return routing)
+  actor: ObjRef;               // sticky; the principal that initiated this task
 };
 ```
+
+### 8.1.1 Task globals visible in verb bodies
+
+Verb-body source code reads these as bare names (the compiler resolves them to opcodes that pull from the active frame or task). Implementations must expose exactly this set:
+
+| Name | Source | Sticky? | Meaning |
+|---|---|---|---|
+| `this` | current frame | no | The target object the verb is executing on. Changes on `CALL_VERB` to a different object. |
+| `player` | task-level | **yes** | The connected actor whose session originated the task. Does not change across `CALL_VERB`, even into a wizard verb. Mirrors MOO's `set_task_perms` discipline. |
+| `actor` | task-level | **yes** | The principal that initiated this task. For sequenced calls, equals `message.actor`. For direct calls, equals the bearer's session actor. Sticky across `CALL_VERB`. May differ from `player` when an agent acts on behalf of a user. |
+| `caller` | current frame | no | The previous frame's `this`. `#-1` (no caller) on the entry frame. |
+| `progr` | current frame | no | The verb's owner at compile time — the *code authority*, not the calling principal. Used for permission checks. Wizard-flagged verbs run with elevated `progr` regardless of caller. |
+| `verb` | current frame | no | The name (string) the verb was invoked under. May differ from `definer`'s canonical verb name when invoked via an alias. |
+| `definer` | current frame | no | The object on which this verb was defined (the ancestor where lookup matched). `pass()` resolves the next verb up from `definer`, not `this`. |
+| `args` | current frame | no | The argument list passed to the verb. |
+
+**Authority and audit.** `progr` is for "is this code allowed to do X" (compile-time authority). `actor` is for "who is calling right now" (runtime principal). Workflow gates ([operations/workflows.md §WF4](../operations/workflows.md#wf4-roles-and-gating)) use `actor`; permission flags on verbs and properties use `progr`. The two answer different questions and must not be conflated.
+
+**MOO parser globals not present.** LambdaMOO exposed `dobj`, `dobjstr`, `prepstr`, `iobj`, `iobjstr`, `argstr` from its built-in command parser. woo has no built-in text parser — chat-shaped interfaces build their own (see [match.md](match.md)). These names are reserved but unbound in the v1 VM.
 
 ### 8.2 Bytecode layout
 
@@ -138,7 +158,7 @@ Logical `&&` and `||` are compiled to short-circuit jumps; no dedicated opcode.
 
 | Op | Operands | Stack effect | Yield | Description |
 |---|---|---|---|---|
-| `CALL_VERB` | argc | obj name [args...] → result | **Y** | Walk parent chain for verb. Migrate task to obj's host; new frame; on return, value back. |
+| `CALL_VERB` | argc | obj name [args...] → result | **Y** | Resolve verb using standard lookup (parent chain, then features where applicable). Migrate task to obj's host; new frame; on return, value back. |
 | `PASS` | argc | [args...] → result | **Y** | Like CALL_VERB but on `this`, starting search at `definer.parent`. |
 | `RETURN` | — | val → | N | Pop frame; if last frame, task done; else push val onto caller's stack. |
 | `RAISE` | — | err → | N | Raise. Walks handler stack; on no handler and `d` perm, abort task. |
@@ -147,7 +167,7 @@ Logical `&&` and `||` are compiled to short-circuit jumps; no dedicated opcode.
 `CALL_VERB` algorithm:
 1. Pop args, name, obj from stack.
 2. If `obj` is remote: serialize current frame state, RPC the call to obj's host, suspend until reply. The remote host runs steps 3–6 and returns.
-3. Resolve verb: look up `(obj, name)` in this host's local verb cache. On miss, walk parent chain (using cached ancestor lookups, see [../reference/persistence.md §15](../reference/persistence.md#15-caching-and-invalidation)), fetch bytecode from defining ancestor's host if not local, store in cache.
+3. Resolve verb: look up `(obj, name)` in this host's local verb cache. On miss, use the standard lookup rule ([objects.md §9.1](objects.md#91-lookup): parent chain, then features where applicable), fetch bytecode from the defining object/ancestor's host if not local, store in cache.
 4. Permission check: caller `progr` must have `x` on the verb (or be the owner, or a wizard).
 5. Push new frame: `this=obj`, `caller=current.this_`, `player=current.player` (player is sticky through the chain), `progr=verb.owner`, `verb_name=name`, `definer=ancestor_with_verb`, locals init from args.
 6. Resume execution in new frame.

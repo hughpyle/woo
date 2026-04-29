@@ -4,7 +4,9 @@ import {
   assertString,
   cloneValue,
   isErrorValue,
+  valuesEqual,
   type AppliedFrame,
+  type DirectResultFrame,
   type ErrorFrame,
   type ErrorValue,
   type Message,
@@ -18,7 +20,8 @@ import {
   type WooValue,
   wooError
 } from "./types";
-import { runTinyVm } from "./tiny-vm";
+import type { ParkedTaskRecord, SerializedWorld, SpaceSnapshotRecord, WorldRepository } from "./repository";
+import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializedTinyVmTaskWithInput, runTinyVm, type SerializedVmTask } from "./tiny-vm";
 
 type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue;
 const DRUM_VOICES = ["kick", "snare", "hat", "tone"] as const;
@@ -28,7 +31,12 @@ export type CallContext = {
   space: ObjRef;
   seq: number;
   actor: ObjRef;
+  player: ObjRef;
+  caller: ObjRef;
+  progr: ObjRef;
   thisObj: ObjRef;
+  verbName: string;
+  definer: ObjRef;
   message: Message;
   observations: Observation[];
   observe(event: Observation): void;
@@ -43,16 +51,30 @@ export type WorldSnapshot = {
   objects: Record<string, unknown>;
 };
 
+export type ParkedTaskRun = {
+  task: ParkedTaskRecord;
+  frame?: AppliedFrame | ErrorFrame;
+  observations: Observation[];
+  error?: ErrorValue;
+};
+
+const MAX_CALL_DEPTH = 128;
+
 export class WooWorld {
   objects = new Map<ObjRef, WooObject>();
   sessions = new Map<string, Session>();
   logs = new Map<ObjRef, SpaceLogEntry[]>();
+  snapshots: SpaceSnapshotRecord[] = [];
+  parkedTasks = new Map<string, ParkedTaskRecord>();
   private nativeHandlers = new Map<string, NativeHandler>();
   private idempotency = new Map<string, { at: number; frame: AppliedFrame | ErrorFrame }>();
   private taskCounter = 1;
+  private parkedTaskCounter = 1;
   private sessionCounter = 1;
+  private persistencePaused = 0;
+  private callDepth = 0;
 
-  constructor() {
+  constructor(private repository?: WorldRepository) {
     this.registerNativeHandlers();
   }
 
@@ -89,6 +111,7 @@ export class WooWorld {
     this.objects.set(obj.id, obj);
     if (obj.parent) this.objects.get(obj.parent)?.children.add(obj.id);
     if (obj.location) this.objects.get(obj.location)?.contents.add(obj.id);
+    this.persist();
     return obj;
   }
 
@@ -106,6 +129,7 @@ export class WooWorld {
       target.properties.set(property.name, cloneValue(property.defaultValue));
       target.propertyVersions.set(property.name, 1);
     }
+    this.persist();
     return property;
   }
 
@@ -114,6 +138,7 @@ export class WooWorld {
     obj.properties.set(name, cloneValue(value));
     obj.propertyVersions.set(name, (obj.propertyVersions.get(name) ?? 0) + 1);
     obj.modified = Date.now();
+    this.persist();
   }
 
   getProp(objRef: ObjRef, name: string): WooValue {
@@ -131,18 +156,23 @@ export class WooWorld {
 
   addVerb(objRef: ObjRef, verb: VerbDef): VerbDef {
     this.object(objRef).verbs.set(verb.name, verb);
+    this.persist();
     return verb;
   }
 
   resolveVerb(objRef: ObjRef, name: string): { definer: ObjRef; verb: VerbDef } {
-    let current: ObjRef | null = objRef;
+    return this.resolveVerbFrom(objRef, name);
+  }
+
+  resolveVerbFrom(startRef: ObjRef | null, name: string): { definer: ObjRef; verb: VerbDef } {
+    let current: ObjRef | null = startRef;
     while (current) {
       const obj = this.object(current);
       const verb = obj.verbs.get(name);
       if (verb) return { definer: current, verb };
       current = obj.parent;
     }
-    throw wooError("E_VERBNF", `verb not found: ${objRef}:${name}`, { obj: objRef, name });
+    throw wooError("E_VERBNF", `verb not found: ${startRef ?? "#-1"}:${name}`, { obj: startRef ?? "#-1", name });
   }
 
   describe(objRef: ObjRef): Record<string, WooValue> {
@@ -212,6 +242,7 @@ export class WooWorld {
       perms: verb.perms,
       arg_spec: verb.arg_spec,
       version: verb.version,
+      direct_callable: verb.direct_callable === true,
       readable: verb.perms.includes("r")
     };
     if (verb.perms.includes("r")) {
@@ -256,15 +287,18 @@ export class WooWorld {
     this.sessions.set(id, session);
     this.ensurePresence(actor, "the_dubspace");
     this.ensurePresence(actor, "the_taskspace");
+    this.persist();
     return session;
   }
 
   attachSocket(sessionId: string, socketId: string): void {
     this.sessions.get(sessionId)?.attachedSockets.add(socketId);
+    this.persist();
   }
 
   detachSocket(sessionId: string, socketId: string): void {
     this.sessions.get(sessionId)?.attachedSockets.delete(socketId);
+    this.persist();
   }
 
   hasPresence(actor: ObjRef, space: ObjRef): boolean {
@@ -289,69 +323,165 @@ export class WooWorld {
     return frame;
   }
 
+  directCall(frameId: string | undefined, actor: ObjRef, target: ObjRef, verbName: string, args: WooValue[]): DirectResultFrame | ErrorFrame {
+    try {
+      assertObj(actor);
+      assertObj(target);
+      assertString(verbName);
+      if (!Array.isArray(args)) throw wooError("E_INVARG", "args must be a list");
+      const { verb } = this.resolveVerb(target, verbName);
+      if (verb.direct_callable !== true) {
+        throw wooError("E_DIRECT_DENIED", `direct call denied for ${target}:${verbName}`, { target, verb: verbName });
+      }
+      const audience = this.directAudience(target);
+      if (audience) this.authorizePresence(actor, audience);
+      const observations: Observation[] = [];
+      const message: Message = { actor, target, verb: verbName, args };
+      let result: WooValue = null;
+      let mutated = false;
+      this.withPersistencePaused(() => {
+        const before = this.snapshotProps();
+        const beforeParkedTasks = new Map(this.parkedTasks);
+        const beforeParkedTaskCounter = this.parkedTaskCounter;
+        const beforeObjectCount = this.objects.size;
+        const ctx: CallContext = {
+          world: this,
+          space: audience ?? "#-1",
+          seq: -1,
+          actor,
+          player: actor,
+          caller: "#-1",
+          progr: actor,
+          thisObj: target,
+          verbName,
+          definer: target,
+          message,
+          observations,
+          observe: (event) => {
+            observations.push({ ...event, source: event.source ?? target });
+          }
+        };
+        try {
+          result = this.dispatch(ctx, target, verbName, args);
+          mutated =
+            beforeObjectCount !== this.objects.size ||
+            this.propsChanged(before) ||
+            beforeParkedTasks.size !== this.parkedTasks.size ||
+            beforeParkedTaskCounter !== this.parkedTaskCounter;
+        } catch (err) {
+          this.restoreProps(before);
+          this.parkedTasks = new Map(beforeParkedTasks);
+          this.parkedTaskCounter = beforeParkedTaskCounter;
+          throw err;
+        }
+      });
+      if (mutated) this.persist(true);
+      return { op: "result", id: frameId, result, observations, audience };
+    } catch (err) {
+      return { op: "error", id: frameId, error: normalizeError(err) };
+    }
+  }
+
   replay(space: ObjRef, from: number, limit: number): SpaceLogEntry[] {
     return (this.logs.get(space) ?? []).filter((entry) => entry.seq >= from).slice(0, limit);
   }
 
   applyCall(id: string | undefined, spaceRef: ObjRef, message: Message): AppliedFrame {
-    this.validateMessage(message);
-    const space = this.object(spaceRef);
-    this.authorizePresence(message.actor, spaceRef);
-    const nextSeq = Number(this.getProp(spaceRef, "next_seq"));
-    const seq = nextSeq;
-    this.setProp(spaceRef, "next_seq", nextSeq + 1);
+    return this.withPersistencePaused(() => {
+      this.validateMessage(message);
+      const space = this.object(spaceRef);
+      this.authorizePresence(message.actor, spaceRef);
+      const nextSeq = Number(this.getProp(spaceRef, "next_seq"));
+      const seq = nextSeq;
+      this.setProp(spaceRef, "next_seq", nextSeq + 1);
 
-    const logEntry: SpaceLogEntry = {
-      space: spaceRef,
-      seq,
-      ts: Date.now(),
-      actor: message.actor,
-      message: cloneValue(message) as Message,
-      applied_ok: true
-    };
-    const log = this.logs.get(spaceRef) ?? [];
-    log.push(logEntry);
-    this.logs.set(spaceRef, log);
+      const logEntry: SpaceLogEntry = {
+        space: spaceRef,
+        seq,
+        ts: Date.now(),
+        actor: message.actor,
+        message: cloneValue(message) as Message,
+        applied_ok: true
+      };
+      const log = this.logs.get(spaceRef) ?? [];
+      log.push(logEntry);
+      this.logs.set(spaceRef, log);
 
-    const before = this.snapshotProps();
-    const observations: Observation[] = [];
-    const ctx: CallContext = {
-      world: this,
-      space: spaceRef,
-      seq,
-      actor: message.actor,
-      thisObj: message.target,
-      message,
-      observations,
-      observe: (event) => {
-        observations.push({ ...event, source: event.source ?? space.id });
+      const before = this.snapshotProps();
+      const observations: Observation[] = [];
+      const ctx: CallContext = {
+        world: this,
+        space: spaceRef,
+        seq,
+        actor: message.actor,
+        player: message.actor,
+        caller: "#-1",
+        progr: message.actor,
+        thisObj: message.target,
+        verbName: message.verb,
+        definer: message.target,
+        message,
+        observations,
+        observe: (event) => {
+          observations.push({ ...event, source: event.source ?? space.id });
+        }
+      };
+
+      const beforeParkedTasks = new Map(this.parkedTasks);
+      const beforeParkedTaskCounter = this.parkedTaskCounter;
+      try {
+        this.dispatch(ctx, message.target, message.verb, message.args);
+        logEntry.applied_ok = true;
+      } catch (err) {
+        if (isVmSuspendSignal(err)) {
+          const task = this.parkVmContinuation(ctx, err.seconds, err.task);
+          logEntry.applied_ok = true;
+          observations.push({ type: "task_suspended", source: spaceRef, task, resume_at: this.parkedTasks.get(task)?.resume_at ?? null });
+        } else if (isVmReadSignal(err)) {
+          const task = this.parkReadContinuation(ctx, err.player, err.task);
+          logEntry.applied_ok = true;
+          observations.push({ type: "task_awaiting_read", source: spaceRef, task, player: err.player });
+        } else {
+          this.restoreProps(before);
+          this.parkedTasks = new Map(beforeParkedTasks);
+          this.parkedTaskCounter = beforeParkedTaskCounter;
+          const error = normalizeError(err);
+          logEntry.applied_ok = false;
+          logEntry.error = error;
+          observations.length = 0;
+          observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null });
+        }
       }
-    };
 
-    try {
-      this.dispatch(ctx, message.target, message.verb, message.args);
-      logEntry.applied_ok = true;
-    } catch (err) {
-      this.restoreProps(before);
-      const error = normalizeError(err);
-      logEntry.applied_ok = false;
-      logEntry.error = error;
-      observations.length = 0;
-      observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null });
-    }
-
-    return { op: "applied", id, space: spaceRef, seq, message, observations };
+      const frame = { op: "applied" as const, id, space: spaceRef, seq, message, observations };
+      this.persist(true);
+      return frame;
+    });
   }
 
-  dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[]): WooValue {
-    const { verb } = this.resolveVerb(target, verbName);
-    ctx.thisObj = target;
-    if (verb.kind === "native") {
-      const handler = this.nativeHandlers.get(verb.native);
-      if (!handler) throw wooError("E_VERBNF", `native handler not found: ${verb.native}`);
-      return handler(ctx, args);
+  dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): WooValue {
+    if (this.callDepth >= MAX_CALL_DEPTH) throw wooError("E_CALL_DEPTH", "maximum verb call depth exceeded");
+    this.callDepth += 1;
+    try {
+      const { definer, verb } = this.resolveVerbFrom(startAt ?? target, verbName);
+      const runCtx: CallContext = {
+        ...ctx,
+        thisObj: target,
+        verbName,
+        definer,
+        progr: verb.owner,
+        player: ctx.player ?? ctx.actor,
+        caller: ctx.caller ?? "#-1"
+      };
+      if (verb.kind === "native") {
+        const handler = this.nativeHandlers.get(verb.native);
+        if (!handler) throw wooError("E_VERBNF", `native handler not found: ${verb.native}`);
+        return handler(runCtx, args);
+      }
+      return runTinyVm(runCtx, verb.bytecode, args);
+    } finally {
+      this.callDepth -= 1;
     }
-    return runTinyVm(ctx, verb.bytecode, args);
   }
 
   state(): WorldSnapshot {
@@ -416,6 +546,227 @@ export class WooWorld {
     return id;
   }
 
+  scheduleFork(ctx: CallContext, seconds: number, target: ObjRef, verbName: string, args: WooValue[]): string {
+    if (!Number.isFinite(seconds)) throw wooError("E_TYPE", "fork delay must be numeric", seconds);
+    const id = `ptask_${this.parkedTaskCounter++}`;
+    const now = Date.now();
+    const task: ParkedTaskRecord = {
+      id,
+      parked_on: target,
+      state: "suspended",
+      resume_at: now + Math.max(0, seconds) * 1000,
+      awaiting_player: null,
+      correlation_id: null,
+      created: now,
+      origin: ctx.thisObj,
+      serialized: {
+        kind: "fork",
+        space: ctx.space,
+        actor: ctx.actor,
+        player: ctx.player,
+        progr: ctx.progr,
+        target,
+        verb: verbName,
+        args: cloneValue(args as WooValue) as WooValue,
+        message: cloneValue(ctx.message as unknown as WooValue)
+      }
+    };
+    this.parkedTasks.set(id, task);
+    this.persist();
+    return id;
+  }
+
+  parkVmContinuation(ctx: CallContext, seconds: number, task: SerializedVmTask): string {
+    if (!Number.isFinite(seconds)) throw wooError("E_TYPE", "suspend delay must be numeric", seconds);
+    const id = `ptask_${this.parkedTaskCounter++}`;
+    const now = Date.now();
+    const parked: ParkedTaskRecord = {
+      id,
+      parked_on: ctx.thisObj,
+      state: "suspended",
+      resume_at: now + Math.max(0, seconds) * 1000,
+      awaiting_player: null,
+      correlation_id: null,
+      created: now,
+      origin: ctx.thisObj,
+      serialized: {
+        kind: "vm_continuation",
+        space: ctx.space,
+        actor: ctx.actor,
+        player: ctx.player,
+        progr: ctx.progr,
+        target: ctx.thisObj,
+        verb: ctx.verbName,
+        task: cloneValue(task as unknown as WooValue)
+      }
+    };
+    this.parkedTasks.set(id, parked);
+    this.persist();
+    return id;
+  }
+
+  parkReadContinuation(ctx: CallContext, player: ObjRef, task: SerializedVmTask): string {
+    const id = `ptask_${this.parkedTaskCounter++}`;
+    const now = Date.now();
+    const parked: ParkedTaskRecord = {
+      id,
+      parked_on: ctx.thisObj,
+      state: "awaiting_read",
+      resume_at: null,
+      awaiting_player: player,
+      correlation_id: null,
+      created: now,
+      origin: ctx.thisObj,
+      serialized: {
+        kind: "vm_continuation",
+        space: ctx.space,
+        actor: ctx.actor,
+        player: ctx.player,
+        progr: ctx.progr,
+        target: ctx.thisObj,
+        verb: ctx.verbName,
+        task: cloneValue(task as unknown as WooValue)
+      }
+    };
+    this.parkedTasks.set(id, parked);
+    this.persist();
+    return id;
+  }
+
+  deliverInput(player: ObjRef, input: WooValue): ParkedTaskRun | null {
+    const task = Array.from(this.parkedTasks.values())
+      .filter((item) => item.state === "awaiting_read" && item.awaiting_player === player)
+      .sort((left, right) => left.created - right.created || left.id.localeCompare(right.id))[0];
+    if (!task) return null;
+    this.parkedTasks.delete(task.id);
+    const result = this.runParkedTask(task, input);
+    this.persist(true);
+    return result;
+  }
+
+  runDueTasks(now = Date.now()): ParkedTaskRun[] {
+    const due = Array.from(this.parkedTasks.values())
+      .filter((task) => task.state === "suspended" && task.resume_at !== null && task.resume_at <= now)
+      .sort((left, right) => (left.resume_at ?? 0) - (right.resume_at ?? 0) || left.created - right.created || left.id.localeCompare(right.id));
+    const results: ParkedTaskRun[] = [];
+    for (const task of due) {
+      this.parkedTasks.delete(task.id);
+      results.push(this.runParkedTask(task));
+    }
+    if (due.length > 0) this.persist(true);
+    return results;
+  }
+
+  exportWorld(): SerializedWorld {
+    return {
+      version: 1,
+      taskCounter: this.taskCounter,
+      parkedTaskCounter: this.parkedTaskCounter,
+      sessionCounter: this.sessionCounter,
+      objects: Array.from(this.objects.values()).map((obj) => ({
+        id: obj.id,
+        name: obj.name,
+        parent: obj.parent,
+        owner: obj.owner,
+        location: obj.location,
+        anchor: obj.anchor,
+        flags: obj.flags,
+        created: obj.created,
+        modified: obj.modified,
+        propertyDefs: Array.from(obj.propertyDefs.values()).map((def) => ({ ...def, defaultValue: cloneValue(def.defaultValue) })),
+        properties: Array.from(obj.properties.entries()).map(([name, value]) => [name, cloneValue(value)]),
+        propertyVersions: Array.from(obj.propertyVersions.entries()),
+        verbs: Array.from(obj.verbs.values()).map((verb) => cloneValue(verb as unknown as WooValue) as unknown as VerbDef),
+        children: Array.from(obj.children),
+        contents: Array.from(obj.contents),
+        eventSchemas: Array.from(obj.eventSchemas.entries()).map(([type, schema]) => [type, cloneValue(schema as WooValue) as Record<string, WooValue>])
+      })),
+      sessions: Array.from(this.sessions.values()).map((session) => ({ id: session.id, actor: session.actor, started: session.started })),
+      logs: Array.from(this.logs.entries()).map(([space, entries]) => [space, cloneValue(entries as unknown as WooValue) as unknown as SpaceLogEntry[]]),
+      snapshots: cloneValue(this.snapshots as unknown as WooValue) as unknown as SpaceSnapshotRecord[],
+      parkedTasks: Array.from(this.parkedTasks.values()).map((task) => cloneValue(task as unknown as WooValue) as unknown as ParkedTaskRecord)
+    };
+  }
+
+  importWorld(serialized: SerializedWorld): void {
+    this.withPersistencePaused(() => {
+      this.objects.clear();
+      this.sessions.clear();
+      this.logs.clear();
+      this.snapshots = [];
+      this.parkedTasks.clear();
+      for (const item of serialized.objects) {
+        this.objects.set(item.id, {
+          id: item.id,
+          name: item.name,
+          parent: item.parent,
+          owner: item.owner,
+          location: item.location,
+          anchor: item.anchor,
+          flags: item.flags ?? {},
+          created: item.created,
+          modified: item.modified,
+          propertyDefs: new Map(item.propertyDefs.map((def) => [def.name, { ...def, defaultValue: cloneValue(def.defaultValue) }])),
+          properties: new Map(item.properties.map(([name, value]) => [name, cloneValue(value)])),
+          propertyVersions: new Map(item.propertyVersions),
+          verbs: new Map(item.verbs.map((verb) => [verb.name, verb])),
+          children: new Set(item.children),
+          contents: new Set(item.contents),
+          eventSchemas: new Map(item.eventSchemas)
+        });
+      }
+      for (const session of serialized.sessions) {
+        this.sessions.set(session.id, { ...session, attachedSockets: new Set() });
+      }
+      for (const [space, entries] of serialized.logs) {
+        this.logs.set(space, cloneValue(entries as unknown as WooValue) as unknown as SpaceLogEntry[]);
+      }
+      this.snapshots = serialized.snapshots ?? [];
+      for (const task of serialized.parkedTasks ?? []) {
+        this.parkedTasks.set(task.id, cloneValue(task as unknown as WooValue) as unknown as ParkedTaskRecord);
+      }
+      this.taskCounter = serialized.taskCounter;
+      this.parkedTaskCounter = serialized.parkedTaskCounter ?? 1;
+      this.sessionCounter = serialized.sessionCounter;
+    });
+  }
+
+  saveSnapshot(space: ObjRef): SpaceSnapshotRecord {
+    const seq = Number(this.getProp(space, "next_seq")) - 1;
+    const state = this.materializedSpaceState(space);
+    const snapshot: SpaceSnapshotRecord = {
+      space_id: space,
+      seq,
+      ts: Date.now(),
+      state,
+      hash: hashCanonical(state)
+    };
+    this.snapshots = this.snapshots.filter((item) => !(item.space_id === space && item.seq === seq));
+    this.snapshots.push(snapshot);
+    this.setProp(space, "last_snapshot_seq", seq);
+    this.repository?.saveSpaceSnapshot?.(snapshot);
+    this.persist();
+    return snapshot;
+  }
+
+  latestSnapshot(space: ObjRef): SpaceSnapshotRecord | null {
+    return this.repository?.latestSpaceSnapshot?.(space) ?? this.snapshots.filter((snapshot) => snapshot.space_id === space).sort((a, b) => b.seq - a.seq)[0] ?? null;
+  }
+
+  withPersistencePaused<T>(fn: () => T): T {
+    this.persistencePaused += 1;
+    try {
+      return fn();
+    } finally {
+      this.persistencePaused -= 1;
+    }
+  }
+
+  persist(force = false): void {
+    if (!this.repository || (this.persistencePaused > 0 && !force)) return;
+    this.repository.save(this.exportWorld());
+  }
+
   private validateMessage(message: Message): void {
     if (!message || typeof message !== "object") throw wooError("E_INVARG", "message must be a map");
     assertObj(message.actor);
@@ -430,6 +781,23 @@ export class WooWorld {
     }
   }
 
+  private directAudience(target: ObjRef): ObjRef | null {
+    const obj = this.object(target);
+    if (this.inheritsFrom(target, "$space")) return target;
+    if (obj.anchor && this.inheritsFrom(obj.anchor, "$space")) return obj.anchor;
+    if (obj.location && this.inheritsFrom(obj.location, "$space")) return obj.location;
+    return null;
+  }
+
+  private inheritsFrom(objRef: ObjRef, ancestorRef: ObjRef): boolean {
+    let current: ObjRef | null = objRef;
+    while (current) {
+      if (current === ancestorRef) return true;
+      current = this.object(current).parent;
+    }
+    return false;
+  }
+
   private ensurePresence(actor: ObjRef, space: ObjRef): void {
     const presence = this.getProp(actor, "presence_in");
     if (Array.isArray(presence) && !presence.includes(space)) {
@@ -441,6 +809,210 @@ export class WooWorld {
       subscribers.push(actor);
       this.setProp(space, "subscribers", subscribers);
     }
+  }
+
+  private runParkedTask(task: ParkedTaskRecord, input?: WooValue): ParkedTaskRun {
+    try {
+      const serialized = assertMap(task.serialized);
+      if (serialized.kind === "vm_continuation") return this.runParkedVmContinuation(task, serialized, input);
+      if (serialized.kind !== "fork") throw wooError("E_INVARG", "unsupported parked task kind", serialized.kind);
+      const actor = assertObj(serialized.actor);
+      const player = assertObj(serialized.player);
+      const progr = assertObj(serialized.progr);
+      const target = assertObj(serialized.target);
+      const verbName = assertString(serialized.verb);
+      const args = Array.isArray(serialized.args) ? (cloneValue(serialized.args) as WooValue[]) : [];
+      const rawSpace = serialized.space;
+      if (typeof rawSpace === "string" && rawSpace !== "#-1") {
+        const message: Message = { actor, target, verb: verbName, args };
+        const frame = this.applyCall(undefined, rawSpace, message);
+        return { task, frame, observations: frame.observations };
+      }
+      const message =
+        serialized.message && typeof serialized.message === "object" && !Array.isArray(serialized.message)
+          ? (cloneValue(serialized.message as WooValue) as unknown as Message)
+          : { actor, target, verb: verbName, args };
+      const observations: Observation[] = [];
+      const hostSpace = "#-1";
+      const ctx: CallContext = {
+        world: this,
+        space: hostSpace,
+        seq: -1,
+        actor,
+        player,
+        caller: "#-1",
+        progr,
+        thisObj: target,
+        verbName,
+        definer: target,
+        message,
+        observations,
+        observe: (event) => {
+          observations.push({ ...event, source: event.source ?? hostSpace });
+        }
+      };
+
+      let error: ErrorValue | undefined;
+      this.withPersistencePaused(() => {
+        const before = this.snapshotProps();
+        const beforeParkedTasks = new Map(this.parkedTasks);
+        const beforeParkedTaskCounter = this.parkedTaskCounter;
+        try {
+          this.dispatch(ctx, target, verbName, args);
+        } catch (err) {
+          if (isVmSuspendSignal(err)) {
+            const resumedTask = this.parkVmContinuation(ctx, err.seconds, err.task);
+            observations.push({ type: "task_suspended", source: hostSpace, task: resumedTask, resume_at: this.parkedTasks.get(resumedTask)?.resume_at ?? null });
+            return;
+          }
+          if (isVmReadSignal(err)) {
+            const resumedTask = this.parkReadContinuation(ctx, err.player, err.task);
+            observations.push({ type: "task_awaiting_read", source: hostSpace, task: resumedTask, player: err.player });
+            return;
+          }
+          this.restoreProps(before);
+          this.parkedTasks = new Map(beforeParkedTasks);
+          this.parkedTaskCounter = beforeParkedTaskCounter;
+          error = normalizeError(err);
+          observations.length = 0;
+          observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null });
+        }
+      });
+      return { task, observations, error };
+    } catch (err) {
+      const error = normalizeError(err);
+      return { task, observations: [{ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null }], error };
+    }
+  }
+
+  private runParkedVmContinuation(task: ParkedTaskRecord, serialized: Record<string, WooValue>, input?: WooValue): ParkedTaskRun {
+    const rawSpace = serialized.space;
+    if (typeof rawSpace === "string" && rawSpace !== "#-1") {
+      const frame = this.applyResumeFrame(task, serialized, rawSpace, input);
+      return { task, frame, observations: frame.observations };
+    }
+
+    const observations: Observation[] = [];
+    let error: ErrorValue | undefined;
+    this.withPersistencePaused(() => {
+      const before = this.snapshotProps();
+      const beforeParkedTasks = new Map(this.parkedTasks);
+      const beforeParkedTaskCounter = this.parkedTaskCounter;
+      try {
+        if (input === undefined) runSerializedTinyVmTask(this, serialized.task as unknown as SerializedVmTask, observations);
+        else runSerializedTinyVmTaskWithInput(this, serialized.task as unknown as SerializedVmTask, input, observations);
+      } catch (err) {
+        if (isVmSuspendSignal(err)) {
+          const resumedTask = this.parkVmContinuation(this.hostContinuationContext(serialized, observations), err.seconds, err.task);
+          observations.push({ type: "task_suspended", source: "#-1", task: resumedTask, resume_at: this.parkedTasks.get(resumedTask)?.resume_at ?? null });
+          return;
+        }
+        if (isVmReadSignal(err)) {
+          const resumedTask = this.parkReadContinuation(this.hostContinuationContext(serialized, observations), err.player, err.task);
+          observations.push({ type: "task_awaiting_read", source: "#-1", task: resumedTask, player: err.player });
+          return;
+        }
+        this.restoreProps(before);
+        this.parkedTasks = new Map(beforeParkedTasks);
+        this.parkedTaskCounter = beforeParkedTaskCounter;
+        error = normalizeError(err);
+        observations.length = 0;
+        observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null });
+      }
+    });
+    return { task, observations, error };
+  }
+
+  private applyResumeFrame(task: ParkedTaskRecord, serialized: Record<string, WooValue>, spaceRef: ObjRef, input?: WooValue): AppliedFrame {
+    return this.withPersistencePaused(() => {
+      const actor = assertObj(serialized.actor);
+      this.authorizePresence(actor, spaceRef);
+      const space = this.object(spaceRef);
+      const nextSeq = Number(this.getProp(spaceRef, "next_seq"));
+      const seq = nextSeq;
+      this.setProp(spaceRef, "next_seq", nextSeq + 1);
+
+      const body: Record<string, WooValue> = {
+        kind: input === undefined ? "vm_resume" : "vm_read",
+        task: task.id,
+        continuation: cloneValue(serialized.task as WooValue)
+      };
+      if (input !== undefined) body.input = cloneValue(input);
+      const message: Message = {
+        actor,
+        target: spaceRef,
+        verb: "$resume",
+        args: [task.id],
+        body
+      };
+      const logEntry: SpaceLogEntry = {
+        space: spaceRef,
+        seq,
+        ts: Date.now(),
+        actor,
+        message: cloneValue(message) as Message,
+        applied_ok: true
+      };
+      const log = this.logs.get(spaceRef) ?? [];
+      log.push(logEntry);
+      this.logs.set(spaceRef, log);
+
+      const observations: Observation[] = [{ type: "task_resumed", source: spaceRef, task: task.id }];
+      const before = this.snapshotProps();
+      const beforeParkedTasks = new Map(this.parkedTasks);
+      const beforeParkedTaskCounter = this.parkedTaskCounter;
+      try {
+        if (input === undefined) runSerializedTinyVmTask(this, serialized.task as unknown as SerializedVmTask, observations);
+        else runSerializedTinyVmTaskWithInput(this, serialized.task as unknown as SerializedVmTask, input, observations);
+      } catch (err) {
+        if (isVmSuspendSignal(err)) {
+          const resumedTask = this.parkVmContinuation(this.resumeContext(serialized, message, observations, spaceRef, seq), err.seconds, err.task);
+          observations.push({ type: "task_suspended", source: spaceRef, task: resumedTask, resume_at: this.parkedTasks.get(resumedTask)?.resume_at ?? null });
+        } else if (isVmReadSignal(err)) {
+          const resumedTask = this.parkReadContinuation(this.resumeContext(serialized, message, observations, spaceRef, seq), err.player, err.task);
+          observations.push({ type: "task_awaiting_read", source: spaceRef, task: resumedTask, player: err.player });
+        } else {
+          this.restoreProps(before);
+          this.parkedTasks = new Map(beforeParkedTasks);
+          this.parkedTaskCounter = beforeParkedTaskCounter;
+          const error = normalizeError(err);
+          logEntry.applied_ok = false;
+          logEntry.error = error;
+          observations.length = 0;
+          observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null });
+        }
+      }
+
+      const frame = { op: "applied" as const, space: space.id, seq, message, observations };
+      this.persist(true);
+      return frame;
+    });
+  }
+
+  private resumeContext(serialized: Record<string, WooValue>, message: Message, observations: Observation[], space: ObjRef, seq: number): CallContext {
+    return {
+      world: this,
+      space,
+      seq,
+      actor: assertObj(serialized.actor),
+      player: assertObj(serialized.player),
+      caller: "#-1",
+      progr: assertObj(serialized.progr),
+      thisObj: typeof serialized.target === "string" ? serialized.target : space,
+      verbName: typeof serialized.verb === "string" ? serialized.verb : "$resume",
+      definer: typeof serialized.target === "string" ? serialized.target : space,
+      message,
+      observations,
+      observe: (event) => {
+        observations.push({ ...event, source: event.source ?? space });
+      }
+    };
+  }
+
+  private hostContinuationContext(serialized: Record<string, WooValue>, observations: Observation[]): CallContext {
+    const target = typeof serialized.target === "string" ? serialized.target : "#-1";
+    const message: Message = { actor: assertObj(serialized.actor), target, verb: typeof serialized.verb === "string" ? serialized.verb : "$resume", args: [] };
+    return this.resumeContext(serialized, message, observations, "#-1", -1);
   }
 
   private allocateGuest(): ObjRef {
@@ -457,6 +1029,18 @@ export class WooWorld {
     return id;
   }
 
+  private materializedSpaceState(space: ObjRef): WooValue {
+    const ids = Array.from(this.objects.values())
+      .filter((obj) => obj.id === space || obj.anchor === space || obj.location === space)
+      .map((obj) => obj.id)
+      .sort();
+    return {
+      space,
+      seq: Number(this.getProp(space, "next_seq")) - 1,
+      objects: Object.fromEntries(ids.map((id) => [id, Object.fromEntries(this.object(id).properties)]))
+    };
+  }
+
   private snapshotProps(): Map<ObjRef, Map<string, WooValue>> {
     return new Map(Array.from(this.objects.entries()).map(([id, obj]) => [id, new Map(Array.from(obj.properties.entries()).map(([k, v]) => [k, cloneValue(v)]))]));
   }
@@ -466,6 +1050,17 @@ export class WooWorld {
       const obj = this.objects.get(id);
       if (obj) obj.properties = new Map(Array.from(props.entries()).map(([k, v]) => [k, cloneValue(v)]));
     }
+  }
+
+  private propsChanged(snapshot: Map<ObjRef, Map<string, WooValue>>): boolean {
+    for (const [id, props] of snapshot) {
+      const obj = this.objects.get(id);
+      if (!obj || obj.properties.size !== props.size) return true;
+      for (const [name, value] of props) {
+        if (!obj.properties.has(name) || !valuesEqual(obj.properties.get(name)!, value)) return true;
+      }
+    }
+    return false;
   }
 
   private registerNativeHandlers(): void {
@@ -479,6 +1074,21 @@ export class WooWorld {
         applied_ok: entry.applied_ok,
         error: entry.error as unknown as WooValue
       }));
+    });
+    this.nativeHandlers.set("preview_control", (ctx, args) => {
+      const target = assertObj(args[0]);
+      const name = assertString(args[1]);
+      const value = args[2] ?? null;
+      this.object(target);
+      ctx.observe({ type: "gesture_progress", source: ctx.thisObj, actor: ctx.actor, target, name, value, sent_at: Date.now() });
+      return value;
+    });
+    this.nativeHandlers.set("cursor", (ctx, args) => {
+      const x = Number(args[0]);
+      const y = Number(args[1]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) throw wooError("E_TYPE", "cursor coordinates must be numeric", { x: args[0] ?? null, y: args[1] ?? null });
+      ctx.observe({ type: "cursor", source: ctx.thisObj, actor: ctx.actor, x, y, sent_at: Date.now() });
+      return true;
     });
     this.nativeHandlers.set("start_loop", (ctx, args) => {
       const slot = assertObj(args[0]);
@@ -708,4 +1318,20 @@ export function normalizeError(err: unknown): ErrorValue {
   if (err instanceof SyntaxError) return wooError("E_INVARG", err.message);
   if (err instanceof Error) return wooError("E_INTERNAL", err.message);
   return wooError("E_INTERNAL", "unknown error", String(err));
+}
+
+function hashCanonical(value: WooValue): string {
+  const text = canonicalJson(value);
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) hash = (hash * 31 + text.charCodeAt(i)) | 0;
+  return `h${Math.abs(hash).toString(16)}`;
+}
+
+function canonicalJson(value: WooValue): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+    .join(",")}}`;
 }

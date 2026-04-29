@@ -49,42 +49,32 @@ LambdaCore-style `:announce_all`, `:announce_all_but` are not built in. Authors 
 
 Events emitted by a single task are delivered in emit order to each target. Events from different tasks have no guaranteed ordering relative to each other.
 
-### 12.6 Persistent vs ephemeral events
+### 12.6 Observation durability follows invocation route
 
-Two delivery contracts share the `emit` primitive:
+Observation durability is not a per-event flag. It is determined by the **invocation route** of the verb that called `emit`. There is one `emit` primitive; its delivery contract is read from the call context.
 
-- **Persistent events** (the default) are durable. Emitters and receivers may rely on a log/sequence record — typical in event-sourced patterns like the dubspace's `$space:call` flow. Eligible for replay, gap recovery, and audit.
-- **Ephemeral events** carry transient state that does not need to survive disconnect or be replayable. Cursor positions, "I'm hovering this knob", typing indicators, gesture-in-progress samples.
+- **`emit` during a `$space:call`.** Observations are captured into the resulting `applied` frame's `observations` list ([space.md §S2](space.md#s2-the-call-lifecycle) step 9). Replay-visible because the sequenced call itself is replay-visible — replaying the message re-runs the verb body and re-emits the observation, or an implementation may persist/cache applied frames as an optimization. Audit-visible as part of the applied result. The observation is not a separate event-log entry and has no independent seq.
+- **`emit` during a direct call.** Observations are pushed live to the targeted subscribers and not stored anywhere. No seq, no replay, no gap recovery. If the subscriber wasn't connected when the call happened, the observation is lost.
 
-Same `EMIT` opcode and same wire envelope; the difference is a runtime policy hint, declared either on the event's schema (§13) or by type-name convention.
+Same opcode, same emit shape, two delivery contracts — but the contract is an automatic consequence of where the emit ran, not a flag the author sets.
 
-**Runtime policy for ephemeral events:**
+> **Schemas describe shape, not durability.** A schema (§13) is advisory typing; it does not pick the delivery contract. To make an observation durable, route the call that emits it through `$space:call`. To keep it live-only, call directly.
 
-- Best-effort delivery; no retry, no replay, no gap recovery.
-- Never persisted: not stored, not logged, not visible to audit queries.
-- Per-source rate limit (default 60 events/sec per `(source, type)`); excess dropped at the emitter's host before fanout.
-- Receiver-side coalescing by `(source, type)`: queued events of the same key may be collapsed to the latest before delivery.
-- TTL: events older than ~1 second on receipt are dropped.
-- Drop-oldest under backpressure; persistent events queue, ephemeral events are silently dropped (no `system_overflow` notification).
+**The bad pattern this rules out.** A sequenced state mutation that also emits transient side-chatter is mixing two routes in one body. Don't piggyback typing indicators on `:set_status`; emit them from a separate `:typing` direct call. The discipline keeps "what gets logged" predictable from the call site alone.
 
-**Shape constraints for ephemeral events:**
+**Delivery policy for live (direct-call) observations.** These are best-effort by construction:
 
-- Required: `type: str`.
-- Required: `source: obj`. Receivers index per-source for coalescing; without it, dedupe is undefined.
-- Forbidden: a `seq` field. Sequencing is the persistent contract; an ephemeral event carrying `seq` is a category error and is rejected at emit time with `E_INVARG`.
-- Recommended: payload < 1 KiB. Hard cap 4 KiB.
-- Optional: a sender-supplied `id` for double-send dedupe over flaky networks.
+- Per-source rate limit (default 60 obs/sec per `(source, type)`); excess dropped at the emitter's host before fanout.
+- Receiver-side coalescing by `(source, type)`: queued observations with the same key may collapse to the latest before delivery.
+- TTL: observations older than ~1 second on receipt are dropped.
+- Drop-oldest under backpressure; live observations are silently dropped (no `system_overflow` notification). Sequenced applied frames queue normally.
+- Recommended payload < 1 KiB; hard cap 4 KiB.
+- Required `source: obj` (so receivers can index for coalescing) and `type: str`. A `seq` field on a live observation is rejected at emit time with `E_INVARG` — `seq` belongs to applied frames only.
 
-**Discipline (not runtime-enforced):**
+**Receiver discipline.**
 
-- Handlers for ephemeral events should be side-effect-free: no `SET_PROP` on persistent state, no `EMIT` of persistent events, no `FORK`/`SUSPEND`. Violating this leaks non-replayable mutations into nominally-persistent state — the same anti-pattern as a log-handler that mutates state behind the log's back.
-- Receivers should not persist ephemeral events. Doing so makes a non-replayable observation durable; reload will not reproduce it.
-
-**How a type is marked ephemeral:**
-
-1. **Schema flag** (preferred). `declare_event` sets `ephemeral: true`; the runtime then treats matching events under ephemeral policy. See §13.
-2. **Type-name convention** (for ad-hoc cases without a declared schema). Types beginning `presence:`, `cursor:`, or `gesture-progress:` are ephemeral by default. A declared schema overrides convention.
-3. **Per-emit override**. `emit(target, event)` accepts an `ephemeral: true` field at the top level of `event`, but this is discouraged — mixing the durability contract into the data is awkward. Prefer the schema declaration.
+- Handlers for live observations should be side-effect-free: no `SET_PROP` on persistent state, no `emit` of would-be-sequenced observations, no `FORK`/`SUSPEND`. Violating this leaks non-replayable mutations into persistent state — the same anti-pattern as a log-handler that mutates behind the log's back.
+- Receivers should not persist live observations. Doing so makes a non-replayable observation durable; reload won't reproduce it.
 
 ### 12.7 Sequenced calls with gap recovery
 
@@ -141,7 +131,7 @@ Snapshots compose with replay: a periodic `$space:snapshot()` writes the materia
 
 If a subscriber's gap is unbounded (its `last_seq` is older than the oldest snapshot, or paging would take longer than reloading), it should drop its materialized state, fetch the latest snapshot, and resume tail replay from the snapshot's seq. Reasonable threshold: if the gap exceeds twice the snapshot interval, reload.
 
-Ephemeral events (§12.6) are explicitly *not* sequenced — they carry no `seq` field and have no replay path.
+Live observations from direct calls (§12.6) are explicitly *not* sequenced — they carry no `seq` field and have no replay path. The applied-frame replay loop above is for sequenced `$space:call` traffic only.
 
 ---
 
@@ -159,17 +149,16 @@ declare_event #room "say" {
 declare_event $space "cursor" {
   source: obj,
   x: float,
-  y: float,
-  ephemeral: true
+  y: float
 };
 ```
 
 This is sugar for storing a JSON-Schema-shaped map under the `event_schema` table on the declaring object.
 
-Schemas are **advisory in v1** for field types and required fields: they're introspectable (`event_schema(obj, type)` builtin) but not enforced at `emit` time. Tooling and agents can use them to construct valid events. Phase-2 may add enforcement as an opt-in flag.
+Schemas describe **shape only** — required fields, field types, optional fields. They do not pick a delivery contract; durability is determined by the invocation route (§12.6), not by the schema.
 
-The `ephemeral: true` flag, however, *is* enforced from day one — it picks runtime delivery policy (§12.6) and rejects mismatched `seq`-bearing events at emit.
+Schemas are **advisory in v1**: introspectable (`event_schema(obj, type)` builtin) but not enforced at `emit` time. Tooling and agents use them to construct valid events. Phase-2 may add enforcement as an opt-in flag.
 
-Inheritance: schemas declared on an ancestor are visible to descendants (chain walk). Descendants may *extend* (add optional fields) but not *redefine* (change required field types). The `ephemeral` flag, once declared on an ancestor, cannot be flipped by a descendant.
+Inheritance: schemas declared on an ancestor are visible to descendants (chain walk). Descendants may *extend* (add optional fields) but not *redefine* (change required field types).
 
-Base objects ship a small core schema set: `text`, `say`, `emote`, `enter`, `leave`, `look`, `take`, `drop` (persistent), plus `presence:hover`, `presence:idle`, `cursor` (ephemeral). New event types are open-world; objects don't have to declare a schema to emit one, but undeclared types follow the type-name convention for durability (see §12.6).
+Base objects ship a small core schema set — `text`, `say`, `emote`, `enter`, `leave`, `look`, `take`, `drop`, `cursor`, `presence:hover`, `presence:idle`. Whether any of these reach a subscriber as part of an applied frame or as a live observation depends on whether the verb that emitted it was sequenced. New event types are open-world; objects don't have to declare a schema to emit one.

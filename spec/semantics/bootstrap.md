@@ -12,9 +12,9 @@ This is the contract the implementation must produce on first start; without it,
 
 1. **Directory** is created first. Holds corename → ULID map and world metadata. Empty at boot until populated.
 2. **`$system` (`#0`)** is created with the reserved ULID `00000000000000000000000000`. `parent = null`.
-3. **Universal classes** are created in dependency order: `$root` → `$actor` → `$player` → `$wiz`, `$space` → `$thing`. Corenames registered in Directory.
-4. **Demo classes** are created depending on which demo is being booted: dubspace classes (`$dubspace`, `$loop_slot`, `$channel`, `$filter`, `$delay`, `$drum_loop`, `$scene`) or taskspace classes (`$taskspace`, `$task`).
-5. **Demo instances** (`the_dubspace`, `the_taskspace`) are created with their internal anchored objects.
+3. **Universal classes** are created in dependency order: `$root` → `$actor` → `$player` → `$wiz`, `$sequenced_log` → `$space` → `$thing`. Corenames registered in Directory.
+4. **Demo classes** are created depending on which demos are being booted: dubspace classes (`$dubspace`, `$loop_slot`, `$channel`, `$filter`, `$delay`, `$drum_loop`, `$scene`), taskspace classes (`$taskspace`, `$task`), and chat scaffolding/classes (`$match`, `$failed_match`, `$ambiguous_match`, `$conversational`, `$chatroom`).
+5. **Demo instances** (`the_dubspace`, `the_taskspace`, `the_chatroom`) are created with their internal anchored objects. `:add_feature` calls attach `$conversational` to `the_chatroom` and `the_taskspace` (running as wizard at boot, satisfying both attach-policy gates).
 6. **Guest player pool** is pre-seeded so first connections don't need to mint identities.
 
 Boot is idempotent: running it twice should be a no-op (each seed is created only if its corename isn't already mapped). This makes test setup and dev-restart trivial.
@@ -32,7 +32,8 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | `$actor` | `#2` | `$root` | — | Base class for principals that can originate messages. Actors participate in spaces through presence, appear as `message.actor`, and represent the authority behind user-facing calls. |
 | `$player` | `$actor` | — | Session-capable actor class for humans, agents, or tools connected over the wire. A player composes actor identity with session bookkeeping and attached websocket state. |
 | `$wiz` | `$player` | wizard, programmer | Seed administrator player. It carries wizard and programmer flags so the initial world can bootstrap, inspect, and repair code, schema, and seeded objects. |
-| `$space` | `$root` | — | Coordination base class. A space owns a local message sequence, accepts calls, applies them one at a time, stores replayable history, and pushes observations to present subscribers. |
+| `$sequenced_log` | `$root` | — | Append-only sequenced log primitive. Owns the runtime-blessed `:append`/`:read` verbs, atomic seq allocation, and durable log storage. Subclassed by `$space` and other coordination shapes. See [sequenced-log.md](sequenced-log.md). |
+| `$space` | `$sequenced_log` | — | Coordination workhorse. Adds dispatch, subscribers, and applied-frame broadcast on top of the inherited log primitive. The v1 reference subclass for `:call`-shaped sequenced coordination. |
 | `$thing` | `$root` | — | Simple non-actor base class for persistent objects that primarily hold state. Use it when an object should be addressable and programmable but should not itself originate calls. |
 
 (The "ULID alias" column shows the conventional short form. Real ULIDs are deterministic from a seed phrase per world, so the same seed graph is reproducible.)
@@ -57,6 +58,16 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | Property | Type | Default | Notes |
 |---|---|---|---|
 | `presence_in` | list<obj> | `[]` | Spaces the actor is currently in. |
+| `features` | list<obj> | `[]` | Feature objects contributing verbs to this actor. See [features.md](features.md). |
+| `features_version` | int | 0 | Monotonic counter incremented on feature-list changes; used for verb-lookup cache invalidation. |
+
+### B2.3.1 `$actor` feature-management verbs
+
+| Verb | Args | Purpose |
+|---|---|---|
+| `:add_feature(f)` | obj | Append to `features`; idempotent. See [features.md §FT5](features.md#ft5-adding-and-removing-features). |
+| `:remove_feature(f)` | obj | Remove from `features`. |
+| `:has_feature(f)` rxd | obj | Predicate. |
 
 ### B2.4 `$player` additional properties
 
@@ -65,24 +76,41 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | `session_id` | str \| null | null | Current session (see identity.md §I2). |
 | `attached_sockets` | list<str> | `[]` | Per the multi-attach model in identity.md §I5. |
 
-### B2.5 `$space` additional properties
+### B2.5 `$sequenced_log` additional properties
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
-| `next_seq` | int | 1 | The next seq to assign. |
-| `subscribers` | list<obj> | `[]` | Actors observing this space. |
-| `last_snapshot_seq` | int | 0 | Used for snapshot triggering. |
+| `next_seq` | int | 1 | The next seq to assign. Reserved; written only by inherited `:append`. |
+| `last_snapshot_seq` | int | 0 | Highest seq covered by a snapshot. Used for snapshot triggering and log truncation. |
 
-### B2.6 `$space` verbs
+### B2.6 `$sequenced_log` verbs
+
+| Verb | Args | Purpose |
+|---|---|---|
+| `:append(message)` rxd | any | Native; atomically allocates a seq and persists `(seq, message)`. See [sequenced-log.md §SL2](sequenced-log.md#sl2-the-native-verbs). |
+| `:read(from, limit)` rxd | int, int | Native; paged history read. |
+
+### B2.7 `$space` additional properties
+
+| Property | Type | Default | Notes |
+|---|---|---|---|
+| `subscribers` | list<obj> | `[]` | Actors observing this space's applied frames. |
+| `features` | list<obj> | `[]` | Feature objects contributing verbs to this space. See [features.md](features.md). |
+| `features_version` | int | 0 | Monotonic counter; verb-lookup cache invalidation. |
+
+### B2.8 `$space` verbs
 
 | Verb | Args | Purpose |
 |---|---|---|
 | `:call(message)` | message | Sequenced dispatch (space.md §S2). |
-| `:replay(from_seq, limit)` rxd | int, int | Paged history. |
+| `:replay(from_seq, limit)` rxd | int, int | Subclass alias for inherited `:read`. |
 | `:snapshot()` | — | Capture materialized state. Wizard or programmer-only. |
 | `:subscribe(actor)` | obj | Add to subscribers. |
 | `:unsubscribe(actor)` | obj | Remove from subscribers. |
 | `:on_applied(_event)` | event | Snapshot-trigger hook (space.md §S7). |
+| `:add_feature(f)` | obj | Append to `features`; idempotent. |
+| `:remove_feature(f)` | obj | Remove from `features`. |
+| `:has_feature(f)` rxd | obj | Predicate. |
 
 ---
 
@@ -205,12 +233,77 @@ directly.
 
 ---
 
-## B5. Demo instances
+## B5. Chat classes and scaffolding
+
+| Corename | Parent | Anchor | Description |
+|---|---|---|---|
+| `$match` | `$thing` | n/a | Chat-shaped text-to-action scaffold. It tokenizes input, resolves visible objects, resolves verbs using runtime lookup, and returns structured command maps. Ordinary worlds can omit it if they do not expose text-command surfaces. |
+| `$failed_match` | `$thing` | n/a | Stable sentinel returned by `$match:match_object` when no visible object matches. It is a value object, not an exception. |
+| `$ambiguous_match` | `$thing` | n/a | Stable sentinel returned by `$match:match_object` when multiple visible objects match at the same priority tier. It lets callers ask users to disambiguate without exceptions. |
+| `$conversational` | `$thing` | n/a | Feature object carrying chat verbs. Attached to `$actor`- or `$space`-descended consumers via `:add_feature($conversational)` per [features.md](features.md). Its verbs run with `this` = the consumer; observation routing emits to `this.subscribers`. |
+| `$chatroom` | `$space` | own host | Standalone room. A trivial `$space` subclass whose only addition is `features: [$conversational]` at boot. |
+
+### B5.1 `$match` verbs
+
+All direct-callable (rxd). See [match.md](match.md) for exact matching rules.
+
+| Verb | Args | Purpose |
+|---|---|---|
+| `:match_object(name, location?)` | str, obj? | Resolve visible objects; returns obj, `$failed_match`, or `$ambiguous_match`. |
+| `:match_verb(name, target)` | str, obj | Resolve a verb using the same lookup rule as runtime dispatch. |
+| `:parse_command(text, actor)` | str, obj | Parse free text into a structured command map for chat-shaped surfaces. |
+
+### B5.2 `$conversational` verbs
+
+All direct-callable (rxd). Observations are live-only by route per [chat-demo.md](../chat-demo.md).
+
+| Verb | Args | Purpose |
+|---|---|---|
+| `:say(text)` | str | Emits `said`. |
+| `:emote(text)` | str | Emits `emoted`. |
+| `:tell(recipient, text)` | obj, str | Emits `told` to `recipient`. |
+| `:look()` | — | Returns `{description, contents, present_actors}`. |
+| `:who()` | — | Returns the present-actor list. |
+| `:enter(actor?)` | obj? | Adds presence; emits `entered`. |
+| `:leave(actor?)` | obj? | Removes presence; emits `left`. |
+| `:command(text)` | str | Free-text dispatcher. Calls `$match:parse_command`, lowers per-verb, emits `huh` on parse failure. |
+| `:can_be_attached_by(actor)` | obj | Default policy: `actor == this.owner || is_wizard(actor)`. Override to widen. |
+
+### B5.3 `$conversational` schemas
+
+Declared at boot:
+
+```woo
+declare_event $conversational "said"    { source: obj, actor: obj, text: str };
+declare_event $conversational "emoted"  { source: obj, actor: obj, text: str };
+declare_event $conversational "told"    { source: obj, from:  obj, to:   obj, text: str };
+declare_event $conversational "entered" { source: obj, actor: obj };
+declare_event $conversational "left"    { source: obj, actor: obj };
+declare_event $conversational "huh"     { source: obj, actor: obj, text: str, suggestion?: str };
+```
+
+Schemas describe shape only ([events.md §13](events.md#13-schemas)); durability is set by the route of the verb that emits each observation.
+
+### B5.4 Feature attachment at boot
+
+The bootstrap step that creates `the_chatroom` (B6) and `the_taskspace` (B6) ends with:
+
+```woo
+the_chatroom:add_feature($conversational);    // running as wizard at boot
+the_taskspace:add_feature($conversational);
+```
+
+`the_dubspace` does *not* receive `$conversational` by default — its primary surface is sound coordination, and a feature catalog can be added per-deployment.
+
+---
+
+## B6. Demo instances
 
 | Corename | Class | Anchor | Description |
 |---|---|---|---|
 | `the_dubspace` | `$dubspace` | n/a (own host root) | The first runnable sound-space instance. It owns the sequenced coordination surface for four loop slots, one channel, one filter, one delay, and one default scene. |
-| `the_taskspace` | `$taskspace` | n/a (own host root) | The first runnable task coordination space. It owns the sequenced timeline and anchored task tree used by people or agents to create, claim, discuss, and complete work. |
+| `the_taskspace` | `$taskspace` | n/a (own host root) | The first runnable task coordination space. It owns the sequenced timeline and anchored task tree used by people or agents to create, claim, discuss, and complete work. Boots with `features: [$conversational]` so `:say`/`:emote`/`:enter`/`:leave` are available alongside task verbs. |
+| `the_chatroom` | `$chatroom` | n/a (own host root) | The first runnable chat room. Standalone surface for testing the chat client and `$match` parser; carries `features: [$conversational]` set at boot. |
 
 For the dubspace, the demo creates the four loop slots, one channel, one filter, one delay, one percussion loop, and one scene as anchored children:
 
@@ -241,7 +334,7 @@ For the taskspace, no instances exist at boot — tasks are created at runtime b
 
 ---
 
-## B6. Guest player pool
+## B7. Guest player pool
 
 A pre-seeded pool of `$player` objects, e.g. `guest_1`..`guest_8`, exists at boot. When a client presents `auth { token: "guest:<random>" }`, the server assigns one of the unbound guest players to the new session. The pool refills as guests disconnect and their sessions reap (identity.md §I6).
 
@@ -249,13 +342,13 @@ For the demo, 8 guests is enough for a small cohort. Real worlds would mint gues
 
 ---
 
-## B7. Verb bodies
+## B8. Verb bodies
 
 The seeded verbs above are implemented as T0 bytecode. Concrete JSON bytecode for the load-bearing ones is in [tiny-vm.md "Concrete fixtures"](tiny-vm.md#concrete-fixtures). Verbs not in the fixture list have straightforward bodies that follow the same pattern: read args, read/write properties, emit observation, return.
 
 ---
 
-## B8. Idempotent rebooting
+## B9. Idempotent rebooting
 
 Every step of the boot sequence checks the Directory's corename map first; if the corename already maps to a ULID, the seed is skipped. This means:
 

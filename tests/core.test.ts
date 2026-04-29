@@ -94,6 +94,31 @@ describe("woo core", () => {
     if (tempo.op === "applied") expect(tempo.observations[0].type).toBe("tempo_changed");
     if (start.op === "applied") expect(start.observations[0].type).toBe("transport_started");
   });
+
+  it("runs direct dubspace previews as live-only observations", () => {
+    const { world, actor } = authedWorld();
+    const result = world.directCall("preview-1", actor, "the_dubspace", "preview_control", ["delay_1", "feedback", 0.42]);
+    expect(result.op).toBe("result");
+    if (result.op === "result") {
+      expect(result.result).toBe(0.42);
+      expect(result.audience).toBe("the_dubspace");
+      expect(result.observations).toMatchObject([
+        { type: "gesture_progress", source: "the_dubspace", actor, target: "delay_1", name: "feedback", value: 0.42 }
+      ]);
+    }
+    expect(world.getProp("delay_1", "feedback")).toBe(0.35);
+    expect(world.getProp("the_dubspace", "next_seq")).toBe(1);
+    expect(world.replay("the_dubspace", 1, 10)).toEqual([]);
+  });
+
+  it("rejects non-direct-callable verbs over direct ingress", () => {
+    const { world, actor } = authedWorld();
+    const result = world.directCall("direct-denied", actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.44]);
+    expect(result.op).toBe("error");
+    if (result.op === "error") expect(result.error.code).toBe("E_DIRECT_DENIED");
+    expect(world.getProp("delay_1", "feedback")).toBe(0.35);
+    expect(world.replay("the_dubspace", 1, 10)).toEqual([]);
+  });
 });
 
 describe("taskspace", () => {

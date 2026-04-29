@@ -2,7 +2,7 @@
 
 > Part of the [woo specification](../../SPEC.md). Layer: **protocol**. Profile: **v1-core**.
 
-The JSON message format on the WebSocket between client and player host. First-light scope: just enough frames to drive a sequenced message dispatch loop and surface its observations.
+The JSON message format on the WebSocket between client and player host. First-light scope: enough frames to drive a sequenced message dispatch loop, direct live interactions, durable task input, and their observations.
 
 Browser bootstrap details (transient host installation, host-to-host RPC) are in [browser-host.md](browser-host.md). Cross-world federation frames are in [../deferred/federation.md §24](../deferred/federation.md#24-federation).
 
@@ -24,11 +24,24 @@ WebSockets between client and player host. JSON frames. UTF-8. Values are encode
 //   message   — message map: { actor, target, verb, args, body? }
 { op: "call", id: string, space: ObjRef, message: Map }
 
+// Make a direct call, not through a space.
+// Allowed only for verbs annotated direct_callable:true; see core.md §C12.2.
+// Live observations emitted by the verb are delivered as op:"event" frames.
+//   id      — client-chosen correlation token; echoed in result/error
+//   target  — object receiving the verb
+//   verb    — verb name
+//   args    — positional args
+{ op: "direct", id: string, target: ObjRef, verb: string, args: Value[] }
+
+// Deliver input to the oldest task awaiting READ for this actor.
+// Space-owned continuations resume as an applied $resume frame.
+{ op: "input", id?: string, value: Value }
+
 // Heartbeat.
 { op: "ping" }
 ```
 
-That is the entire first-light client→server surface.
+That is the entire first-light plus durable-task client→server surface.
 
 Reserved for transient hosts (see [browser-host.md](browser-host.md)):
 
@@ -44,24 +57,41 @@ Reserved for transient hosts (see [browser-host.md](browser-host.md)):
 { op: "session", actor: ObjRef }
 
 // A sequenced call has been applied. Carries the canonical seq and any
-// observations emitted during apply.
+// observations emitted during apply. Replayable: the same frame is reproduced
+// by `space:replay`. Authoritative for state.
 //   id            — present iff this client originated the call
 //   space         — the $space that sequenced
 //   seq           — assigned sequence number
 //   message       — the message that was applied
-//   observations  — list of observation maps emitted during apply
+//   observations  — list of observation maps emitted during apply (durable)
 { op: "applied", id?: string, space: ObjRef, seq: int, message: Map, observations: Map[] }
+
+// A direct call completed. Any observations emitted by that call are delivered
+// separately as op:"event" frames to the call's live audience.
+//   id      — matches the originating op:"direct"
+//   result  — verb return value
+{ op: "result", id: string, result: Value }
+
+// A live observation from a direct (non-sequenced) verb call. Not stored
+// anywhere; not replayable; gone after delivery. See semantics/events.md §12.6.
+//   source       — the object whose verb emitted (per observation shape)
+//   observation  — the observation map ({type, source, ...})
+{ op: "event", observation: Map }
 
 // A call could not be applied, or a system error occurred.
 //   id    — present iff associated with a specific call
 //   error — err value per V7
 { op: "error", id?: string, error: ErrValue }
 
+// Input was accepted or ignored without producing an applied frame.
+// Space-owned READ resumes normally produce op:"applied" instead.
+{ op: "input", id?: string, accepted: bool, task?: string, observations?: Map[] }
+
 // Heartbeat.
 { op: "pong" }
 ```
 
-That is the entire first-light server→client surface.
+That is the entire first-light plus durable-task server→client surface.
 
 Reserved for transient hosts:
 
@@ -90,7 +120,9 @@ If a client's connection is interrupted and reconnects, gap recovery follows the
 
 ### 17.5 Backpressure and rate limiting
 
-**Outbound**: each player host maintains a bounded outbound queue (default 1024 frames). On overflow, the oldest applied frames are dropped and the player receives an `error` frame with code `E_OVERFLOW` and a count of dropped frames. The client should treat `E_OVERFLOW` like a gap and use replay to recover.
+**Outbound**: each player host maintains a bounded outbound queue (default 1024 frames). On overflow:
+- `applied` frames are preserved (durable; the client treats loss as a gap and uses replay to recover) — when the queue is full of mostly-applied frames, the player receives an `error` frame with code `E_OVERFLOW` and a count of dropped frames.
+- `event` frames (live observations) are dropped silently on backpressure — they have no replay path, and signaling overflow for them just adds noise. The receive-side coalescing rules in [events.md §12.6](../semantics/events.md#126-observation-durability-follows-invocation-route) keep this lossy delivery the contract.
 
 **Inbound**: each WebSocket has a per-connection rate limit (default 50 ops/sec sustained, burst 100). Excess input frames are dropped with `error` (no `id`), code `E_RATE`. This protects the player host from a misbehaving or malicious client saturating its host's request budget.
 
@@ -121,7 +153,6 @@ Cross-world calls use a separate wire variant — HTTPS POST origin-to-origin, n
 
 The following frames may exist in later iterations but are deliberately not part of the first-light wire:
 
-- `op: "input"` — text-input parsing handled by a player's `:on_input` verb. Belongs to the chat-shaped second demo, not dubspace.
 - `op: "subscribe"` / `"unsubscribe"` — explicit subscription management. First-light derives subscription from actor-space presence; explicit subscribe is only needed when actors observe many spaces selectively.
 - `op: "snapshot"` / `"history"` / `"sync"` — continuity mechanisms for fast reconnect. Replay via `space:replay` (§17.4) covers gap recovery without dedicated frames.
 

@@ -2,20 +2,21 @@
 
 > Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core** (§S7 snapshots escalate to **v1-ops**, see §S7.1).
 
-`$space` is woo's coordination primitive: it gives a totally-ordered sequence to messages directed through it. This document is the normative behavior of `$space:call` and the related lifecycle. The conceptual framing is in [core.md §C4–§C6](core.md).
+`$space` is woo's coordination workhorse: a `$sequenced_log` subclass that adds dispatch, subscribers, and observation broadcast on top of the underlying append-only sequence primitive. This document is the normative behavior of `$space:call` and the related lifecycle. The lower-level append/read primitive lives in [sequenced-log.md](sequenced-log.md). The conceptual framing is in [core.md §C4–§C6](core.md).
+
+The split: `$sequenced_log` provides atomically-allocated seqs and a durable message log; `$space` provides the dispatch loop, the audience model, and the applied-frame contract. Almost every v1 coordination use case is a `$space`; alternative subclasses ([sequenced-log.md §SL6](sequenced-log.md#sl6-other-plausible-subclasses)) are possible without runtime changes.
 
 ---
 
 ## S1. The contract
 
-`$space` is an object whose role is to assign sequence numbers to messages and apply them in seq order. Anything else a space does — audience routing, snapshots, history, scenes — is either a per-app extension built on top, or part of S6/S7 below.
+`$space` is a `$sequenced_log` subclass whose role is to dispatch sequenced messages: assign each a seq via the inherited `:append`, run the target verb, and broadcast the resulting applied frame. Anything else a space does — audience routing, snapshots, scenes — is either a per-app extension built on top, or part of §S6/§S7 below.
 
-A space has, at minimum:
+A space has the inherited fields from `$sequenced_log` ([sequenced-log.md §SL1](sequenced-log.md#sl1-contract)) — `next_seq`, `last_snapshot_seq`, the durable log — plus:
 
 | Field | Meaning |
 |---|---|
-| `next_seq` | int property; the next sequence number to assign. Starts at 1. |
-| `log` | persistent collection; accepted sequenced messages in seq order. |
+| `subscribers` | list<obj>; actors observing this space's applied frames. |
 
 Spaces may carry additional materialized state — the dubspace's `delay_feedback`, a chat room's `topic`. That state is the result of applying messages.
 
@@ -27,12 +28,13 @@ Spaces may carry additional materialized state — the dubspace's `delay_feedbac
 
 1. **Validate the message.** Required fields present (per [values.md §V10](values.md#v10-message-and-sequenced-message-serialization)); types match. If validation fails, raise `E_INVARG`. *No `seq` is assigned.*
 2. **Authorize the actor.** Check that `message.actor` may call through this space. If denied, raise `E_PERM`. *No `seq` is assigned.*
-3. **Assign `seq` and append to log.** `seq = next_seq; next_seq = next_seq + 1`. Append `(seq, message)` to the log atomically with the counter increment. **This is the commit point for the message having been accepted.** If the storage layer fails to commit this step, the call is rejected pre-sequence with `E_STORAGE` and `next_seq` does not advance — see [failures.md §F6](failures.md#f6-storage-and-persistence-failures). The runtime never reaches "seq advanced but message not in the log."
-4. **Resolve the target verb.** Walk `message.target`'s parent chain for `message.verb`. If not found, the call moves directly to step 7 (apply failure) with `E_VERBNF`.
+3. **Assign `seq` and append to log.** `seq = this:append(message)` (inherited from `$sequenced_log`; see [sequenced-log.md §SL2](sequenced-log.md#sl2-the-native-verbs)). The native verb atomically allocates the seq, increments `next_seq`, and durably persists `(seq, message)`. **This is the commit point for the message having been accepted.** If the storage layer fails to commit, the call is rejected pre-sequence with `E_STORAGE` and `next_seq` does not advance — see [failures.md §F6](failures.md#f6-storage-and-persistence-failures). The runtime never reaches "seq advanced but message not in the log."
+4. **Resolve the target verb.** Use the standard verb lookup rule on `message.target` ([objects.md §9.1](objects.md#91-lookup): parent chain, then feature lookup where applicable). If not found, the call moves directly to step 8 (apply failure) with `E_VERBNF`.
 5. **Run the behavior.** Execute the verb's bytecode (T0 or full VM) within a sub-transaction of the call. The behavior may read/write properties on objects in the same anchor cluster (atomic), call other verbs (recursive within cluster), and emit observations.
 6. **On success:** commit mutations from step 5; observations from step 5 are queued for delivery.
-7. **On failure (any raised err during step 5):** roll back mutations from step 5; the message remains in the log at its assigned `seq`; an `error` observation is queued describing the failure.
-8. **Deliver `applied` frame.** Push `{op: "applied", id?, space, seq, message, observations}` to subscribers (per [protocol/wire.md §17.4](../protocol/wire.md#174-the-applied-push-model)).
+7. **On parked continuation:** if the behavior executes `SUSPEND`, `READ`, or another operation that parks the VM stack, commit the parking record and any mutations before the parking point, then deliver the applied frame for this message. The later wake/input is a new sequenced message (normally a runtime `$resume` frame; see [tasks.md §16.2](tasks.md#162-suspend-across-host-eviction) and [§16.6](tasks.md#166-read-tasks)) with a fresh seq allocated at resume time.
+8. **On failure (any raised err during step 5):** roll back mutations from step 5; the message remains in the log at its assigned `seq`; an `error` observation is queued describing the failure.
+9. **Deliver `applied` frame.** Push `{op: "applied", id?, space, seq, message, observations}` to subscribers (per [protocol/wire.md §17.4](../protocol/wire.md#174-the-applied-push-model)).
 
 ---
 
@@ -41,7 +43,7 @@ Spaces may carry additional materialized state — the dubspace's `delay_feedbac
 The six questions of failure semantics, answered:
 
 1. **Validation failure (steps 1, 2).** `seq` does not advance. The caller receives `op: "error"` with the err. No log entry. No applied frame. From other observers' perspective, the call did not happen.
-2. **Behavior failure (step 7).** `seq` was already assigned at step 3; the message stays in the log. Mutations from step 5 are rolled back atomically. Any observations emitted before the failure are also discarded — emit is part of the rolled-back set. The applied frame is delivered with a single error observation in `observations`.
+2. **Behavior failure (step 8).** `seq` was already assigned at step 3; the message stays in the log. Mutations from step 5 are rolled back atomically. Any observations emitted before the failure are also discarded — emit is part of the rolled-back set. The applied frame is delivered with a single error observation in `observations`.
 3. **Partial mutations across the anchor cluster.** Rolled back atomically. Anchor placement ([objects.md §4.1](objects.md#41-anchor-and-atomicity-scope)) is what makes this possible — the cluster is one host, one transaction.
 4. **Mutations outside the anchor cluster.** A call from inside step 5 to an object on a different host is a cross-host RPC; it is *not* in the rollback scope. Authors of call-handler verbs should avoid them. If they must, use idempotent operations and accept that partial failure may leave torn state across hosts.
 5. **Replay determinism.** Behaviors must be deterministic given `(message, target_state, anchor_cluster_state)`. Reads of `now()`, `random()`, or non-anchored-object state break replay. Replaying the log must produce the same materialized state.
@@ -72,11 +74,11 @@ The runtime does not enforce determinism; violations show up as replay divergenc
 
 ## S5. The log
 
-The log holds accepted messages in seq order. Storage shape is in [reference/persistence.md](../reference/persistence.md) (`space_message` table); semantically it is a list indexed by seq.
+The log is inherited from `$sequenced_log`; semantics live in [sequenced-log.md §SL2](sequenced-log.md#sl2-the-native-verbs). Storage shape is in [reference/persistence.md](../reference/persistence.md) (`space_message` table); semantically a list indexed by seq.
 
-- **Reads:** `space:replay(from_seq, limit)` returns up to `limit` messages with `seq >= from_seq`. See [events.md §12.7](events.md#127-sequenced-calls-with-gap-recovery) for the paging pattern subscribers use.
-- **Writes:** only step 3 of `$space:call` appends.
-- **Truncation:** older entries may be truncated when superseded by a snapshot (S7). Truncation is a host-local optimization; semantically a truncated entry is "covered by snapshot S, which represents the materialized state at seq ≤ K."
+- **Reads:** `space:replay(from_seq, limit)` is a subclass alias for the inherited `:read`. See [events.md §12.7](events.md#127-sequenced-calls-with-gap-recovery) for the paging pattern subscribers use.
+- **Writes:** only step 3 of `$space:call` appends — and it does so via the inherited `:append`, not by direct mutation of `next_seq`.
+- **Truncation:** older entries may be truncated when superseded by a snapshot (§S7). Truncation is a host-local optimization; semantically a truncated entry is "covered by snapshot S, which represents the materialized state at seq ≤ K."
 
 ---
 
@@ -84,7 +86,9 @@ The log holds accepted messages in seq order. Storage shape is in [reference/per
 
 The log is the audit trail. Wizards can read it; ordinary actors can read entries they are authorized for, per the space's permission policy on `replay`.
 
-Ephemeral observations ([events.md §12.6](events.md#126-persistent-vs-ephemeral-events)) are *not* in the log. The log is for **messages** — the things that caused state changes — not for **observations** — the things that happened in response.
+The log records **messages** — the things that caused state changes. Observations emitted while applying a sequenced message are captured in that message's `applied` frame ([§S2](#s2-the-call-lifecycle) step 9) and are replay-visible as consequences of the message that produced them.
+
+Observations from **direct calls** to verbs on this space (e.g., `the_room:say("hi")`, when `:say` is direct-callable) are *not* in the log. They flow live to subscribers and are gone after delivery, per [events.md §12.6](events.md#126-observation-durability-follows-invocation-route). Being a `$space` does not make every emit on the object durable; the route of the emitting verb does.
 
 ---
 
@@ -142,9 +146,11 @@ If a space's coordinated objects are *not* in its anchor cluster, mutations to t
 
 ## S9. Single-threaded by construction
 
-A space's `call` verb runs serially — one call at a time, fully (validate, sequence, apply, deliver) before the next call begins. This is the per-actor single-threaded model from [protocol/hosts.md §3](../protocol/hosts.md#3-hosts-and-execution-model) applied to spaces.
+A space's `call` verb runs serially — one call at a time through validate, sequence, apply-or-park, and deliver before the next call begins. This is the per-actor single-threaded model from [protocol/hosts.md §3](../protocol/hosts.md#3-hosts-and-execution-model) applied to spaces.
 
 The host's input gate is held during a call; the runtime's "release on await" mode is *not* used for `$space:call`. Implementations must enforce this; without it, the seq order is meaningless.
+
+Parking a continuation is not "awaiting inside the call." The current message has completed its sequenced apply by writing a durable parked-task record. When the continuation wakes, it re-enters the space as a new sequenced message (`$resume` or the target verb named by a space-targeted `FORK`). The original seq records that the task parked; the later seq records the effect of resuming.
 
 ---
 

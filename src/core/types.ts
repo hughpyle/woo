@@ -36,6 +36,19 @@ export type AppliedFrame = {
   observations: Observation[];
 };
 
+export type DirectResultFrame = {
+  op: "result";
+  id?: string;
+  result: WooValue;
+  observations: Observation[];
+  audience: ObjRef | null;
+};
+
+export type LiveEventFrame = {
+  op: "event";
+  observation: Observation;
+};
+
 export type ErrorFrame = {
   op: "error";
   id?: string;
@@ -49,6 +62,9 @@ export type TinyBytecode = {
   literals: WooValue[];
   num_locals: number;
   max_stack: number;
+  max_ticks?: number;
+  max_memory?: number;
+  max_wall_ms?: number;
   version: number;
 };
 
@@ -65,6 +81,7 @@ export type VerbDef =
       bytecode: TinyBytecode;
       version: number;
       line_map: Record<string, WooValue>;
+      direct_callable?: boolean;
     }
   | {
       kind: "native";
@@ -78,6 +95,7 @@ export type VerbDef =
       version: number;
       line_map: Record<string, WooValue>;
       native: string;
+      direct_callable?: boolean;
     };
 
 export type PropertyDef = {

@@ -39,6 +39,10 @@ When the alarm fires:
 2. Read all tasks where `resume_at <= now`.
 3. For each: deserialize, resume execution.
 
+If the suspended task belongs to a space, step 3 happens by appending a fresh sequenced `$resume` message to that space. The `$resume` body names the parked task and carries the serialized continuation needed to hydrate the VM stack. The wake effect gets a new `seq` at alarm time; the original call's `seq` records only that the task parked. This keeps replay honest: no hidden side-channel mutation can occur after a sequenced call without a corresponding sequenced frame.
+
+Host-only suspended tasks (no `space` recorded) resume directly on the owning host. They are for internal bookkeeping and must not mutate space-anchored state.
+
 This is the load-bearing test for the architecture; it must work for `seconds = 86400 * 365`.
 
 > **Open question:** the design here is straightforward but needs empirical validation against the runtime's alarm-after-hibernate behavior — particularly that alarms set across multi-day boundaries fire reliably and that hibernated state is fully reconstructible from persistent storage alone. First runtime task: write a test that suspends for 24h+ and verifies resume. See [LATER.md](../../LATER.md).
@@ -69,11 +73,17 @@ If the originating host is hibernated when the reply arrives, the reply is queue
 
 If the forking object is recycled before the timer fires, forked tasks are killed.
 
+If the forked task has a `space`, wakeup dispatches the named verb through that space's normal `$space:call` path. The runtime synthesizes `{actor, target: verb_obj, verb: verb_name, args}` at fire time and the space allocates a fresh seq. The original call records that a fork was scheduled; the later wake frame records what the fork did. Off-space forks remain host-only and must not mutate space-anchored state.
+
 ### 16.6 Read tasks
 
 `READ player`:
 1. Task state → `awaiting_read`, `awaiting_player = player`.
 2. When the next input event arrives for that player, the player host finds the task awaiting and resumes it with the input value on the operand stack.
+3. If the waiting task belongs to a space, input delivery resumes through a
+   sequenced `$resume` frame. The frame body records the parked task id, the
+   serialized continuation, and the input value so replay sees the input that
+   woke the task.
 
 Multiple tasks awaiting reads on the same player are queued; first-in-first-out.
 

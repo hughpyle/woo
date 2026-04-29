@@ -1,0 +1,149 @@
+# Match
+
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core** (optional bootstrap; required for chat-shaped surfaces).
+
+LambdaMOO's `parse_command` did three things at once: tokenize text, resolve direct/indirect objects, and dispatch a verb with parser globals (`dobj`, `iobj`, `prepstr`, `argstr`, etc.). woo's runtime does **none** of these — verb invocations are structured messages, not parsed text. This is correct for dubspace (UI controls) and taskspace (REST/agent calls), but a chat-shaped surface (rooms with conversational text) needs the equivalent.
+
+`$match` is a **bootstrap class**, not a runtime primitive. It scaffolds the text-to-action pipeline as ordinary verbs on a seed object, so chat surfaces don't each invent their own. The runtime privileges nothing here; everything below is implementable as user code.
+
+This doc is the convention. An implementation that doesn't ship a chat surface may skip it entirely. An implementation that does ship one should use these verb names so the pattern is portable.
+
+---
+
+## MA1. The `$match` class
+
+A seed object with these verbs. Lives with the chat classes and scaffolding ([bootstrap.md §B5](bootstrap.md#b5-chat-classes-and-scaffolding)) for any world that needs chat-shaped lookups; world boots that don't can omit it.
+
+| Verb | Returns | Purpose |
+|---|---|---|
+| `:match_object(name, location?)` rxd | obj \| `$failed_match` \| `$ambiguous_match` | Resolve a string to an object visible from `location` (defaults to `actor.location`). |
+| `:match_verb(name, target)` rxd | verb \| null | Resolve a verb name (with alias patterns per [objects.md §9.1](objects.md#91-lookup)) on `target` using runtime lookup, including features where applicable. |
+| `:parse_command(text, actor)` rxd | map | Full pipeline: tokenize, identify verb + dobj + iobj, return a structured `command` map. |
+
+Returned by `:match_object`:
+- A successful objref.
+- `$failed_match` (a sentinel object) when nothing matched.
+- `$ambiguous_match` (another sentinel) when more than one candidate matched.
+
+Sentinels are seeded at boot; their identity is stable across reboots so user code can pattern-match against them.
+
+---
+
+## MA2. Object matching
+
+`$match:match_object(name, location?)` resolves `name` to an object via:
+
+1. **Direct objref.** If `name` starts with `#` and parses as a ULID, look it up in the Directory. If found and visible to the caller, return it.
+2. **Corename.** If `name` starts with `$`, resolve via `$system.<name>`. If found, return it.
+3. **Local search.** Walk `location.contents`. For each candidate `c`:
+   - If `c.name == name` (case-insensitive), it's an exact match.
+   - Else if any of `c.aliases` matches `name` per [objects.md §9.1](objects.md#91-lookup) alias grammar, it's an alias match.
+   - Else if `c.name` starts with `name` (case-insensitive) and `name` is at least 2 characters, it's a prefix match.
+4. **Carrying-actor search.** Walk `actor.contents` (things the actor holds). Same matching as step 3.
+
+Resolution:
+- If exactly one exact match → return it.
+- If exact matches are 0 and exactly one alias match → return it.
+- If alias matches are 0 and exactly one prefix match → return it.
+- If multiple candidates at the highest-priority tier → `$ambiguous_match`.
+- If no candidates at any tier → `$failed_match`.
+
+The "me" and "here" pseudo-names resolve to `actor` and `actor.location` respectively. These are conventions, not runtime-bound.
+
+---
+
+## MA3. Verb matching
+
+`$match:match_verb(name, target)` mirrors the runtime's `CALL_VERB` lookup, including features:
+
+1. Walk `target`'s parent chain from `target` up to `$root`. For each ancestor `a`:
+   - If `a` has a verb whose canonical `name` equals the lookup name, return it.
+   - Else if any of the verb's alias patterns match (per [objects.md §9.1](objects.md#91-lookup) alias grammar), return it.
+2. If no parent-chain match **and** `target` is `$actor`- or `$space`-descended, walk `target.features` in list order per [features.md §FT2](features.md#ft2-verb-lookup-with-features). For each feature `f`, search `f`'s parent chain by the same rule. First match wins.
+3. If still no match, return null.
+
+This is the *same* lookup the runtime performs on `CALL_VERB`. Surfacing it as a user-callable verb lets the chat parser (and any other text-shaped UI) preview verb resolution before dispatching, so command interpretation matches what dispatch will actually do — feature-attached verbs included.
+
+---
+
+## MA4. Command parsing
+
+`$match:parse_command(text, actor)` is the full pipeline. Returns a map shaped:
+
+```
+{
+  verb:    str,         // the verb name
+  dobj:    obj | null,  // direct object, resolved
+  dobjstr: str,         // the original string for the direct object
+  prep:    str | null,  // preposition (one of a fixed set; see MA5)
+  iobj:    obj | null,  // indirect object, resolved
+  iobjstr: str,         // the original string
+  args:    list<str>,   // remaining tokens
+  argstr:  str          // original text minus the verb
+}
+```
+
+Pipeline:
+
+1. **Tokenize.** Split `text` on whitespace, respecting quotes (`"hello world"` is one token). Preserve original substrings for `argstr`/`dobjstr`/`iobjstr`.
+2. **Verb extraction.** First token is the verb name.
+3. **Preposition split.** Scan remaining tokens for the first preposition from §MA5. Tokens before it form the direct-object phrase; tokens after form the indirect-object phrase.
+4. **Object resolution.** Run `:match_object(dobjstr, actor.location)` and `:match_object(iobjstr, actor.location)` if present.
+5. **Return** the structured map.
+
+User code dispatches by:
+
+```woo
+let cmd = $match:parse_command(text, actor);
+let v = $match:match_verb(cmd.verb, cmd.dobj);
+if (v != null) {
+  cmd.dobj:(cmd.verb)(cmd);  // dispatch with the parsed map as the arg
+}
+```
+
+The verb body sees the structured `cmd` as its argument; it does not get parser globals injected. This is the deliberate departure from MOO: parser state is data passed in, not implicit task globals. Verbs that want MOO-style ergonomics can destructure: `verb foo(cmd) { let dobj = cmd.dobj; ... }`.
+
+---
+
+## MA5. Preposition vocabulary
+
+The parser recognizes a fixed list of prepositions. Multi-word prepositions (`in front of`, `out of`) are matched as units:
+
+```
+with using
+at to
+in inside into
+on on top of upon
+from out of
+over through under underneath
+behind beside
+for about
+is
+as
+off off of
+```
+
+Aliases are part of the vocabulary; `into` collapses to `in` for grammar purposes (the original substring is preserved in the parsed output if the verb cares).
+
+Custom worlds can extend this list by overriding `$match.prepositions` (a list property on `$match`). The default seed list is the LambdaCore set, lightly modernized.
+
+---
+
+## MA6. What's not in `$match`
+
+- **Sentence parsing.** `$match` parses one verb-shaped command per call. Multi-clause input (`get the book and read it`) is the caller's responsibility.
+- **Spell correction or fuzzy matching.** Prefix matching is the only forgiveness offered. Worlds that want Damerau-Levenshtein or phonetic matching layer it on top.
+- **Verb suggestion (`:huh`).** When `:match_verb` returns null, the caller can choose to call `room:huh(cmd)` (a convention, not a built-in). LambdaMOO's `:huh` lives on rooms; same here.
+- **Cross-room search.** `:match_object` only walks `location.contents` and `actor.contents`. A world that wants global search adds a verb that walks an index.
+
+These deferrals keep `$match` small. The pattern is "scaffolding for the 80% case"; the 20% extends it.
+
+---
+
+## MA7. Errors
+
+| Code | Meaning |
+|---|---|
+| `E_INVARG` | Empty `text` to `:parse_command`, or `name` to `:match_object` is not a string. |
+
+`$failed_match` and `$ambiguous_match` are returned values, not raised errors — they signal "no resolution" without forcing the caller into a try/catch. User code handles them with equality checks: `if (result == $ambiguous_match) { ... }`.

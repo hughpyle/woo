@@ -7,7 +7,7 @@ type AppState = {
   tab: "dubspace" | "taskspace" | "ide";
   world?: any;
   clockOffset: number;
-  ephemeralControls: Record<string, { value: any; actor: string; at: number }>;
+  liveControls: Record<string, { value: any; actor: string; at: number }>;
   observations: any[];
   selectedObject: string;
   selectedTask?: string;
@@ -17,7 +17,7 @@ type AppState = {
 const state: AppState = {
   tab: "dubspace",
   clockOffset: 0,
-  ephemeralControls: {},
+  liveControls: {},
   observations: [],
   selectedObject: "delay_1"
 };
@@ -31,11 +31,11 @@ const drumVoices = [
   { id: "hat", label: "Hat" },
   { id: "tone", label: "Tone" }
 ] as const;
-const ephemeralThrottle = new Map<string, number>();
+const directThrottle = new Map<string, number>();
 
 connect();
 void refresh();
-window.setInterval(pruneEphemeralControls, 700);
+window.setInterval(pruneLiveControls, 700);
 
 function connect() {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -52,14 +52,19 @@ function connect() {
       render();
     }
     if (frame.op === "applied") {
-      forgetEphemeralControls(frame.observations ?? []);
+      forgetLiveControls(frame.observations ?? []);
       state.observations.unshift({ seq: frame.seq, space: frame.space, observations: frame.observations, message: frame.message });
       state.observations = state.observations.slice(0, 30);
       rememberSeq(frame.space, frame.seq);
       await refresh();
     }
-    if (frame.op === "ephemeral" && frame.kind === "property") {
-      receiveEphemeralControl(frame);
+    if (frame.op === "event") {
+      receiveLiveEvent(frame.observation);
+    }
+    if (frame.op === "task") {
+      state.observations.unshift({ task: frame.task, space: frame.space, observations: frame.observations });
+      state.observations = state.observations.slice(0, 30);
+      await refresh();
     }
     if (frame.op === "replay") {
       for (const entry of frame.entries ?? []) {
@@ -140,7 +145,12 @@ function call(space: string, target: string, verb: string, args: any[] = []) {
   state.socket?.send(JSON.stringify({ op: "call", id, space, message: { target, verb, args } }));
 }
 
-function ephemeralKey(target: string, name: string) {
+function direct(target: string, verb: string, args: any[] = []) {
+  const id = crypto.randomUUID();
+  state.socket?.send(JSON.stringify({ op: "direct", id, target, verb, args }));
+}
+
+function liveKey(target: string, name: string) {
   return `${target}:${name}`;
 }
 
@@ -156,9 +166,9 @@ function effectiveDubspace() {
     ])
   );
   const now = Date.now();
-  for (const [key, item] of Object.entries(state.ephemeralControls)) {
+  for (const [key, item] of Object.entries(state.liveControls)) {
     if (now - item.at > 1600) {
-      delete state.ephemeralControls[key];
+      delete state.liveControls[key];
       continue;
     }
     const [target, name] = key.split(":");
@@ -167,34 +177,44 @@ function effectiveDubspace() {
   return copy;
 }
 
-function sendEphemeralControl(target: string, name: string, value: any) {
-  const key = ephemeralKey(target, name);
-  state.ephemeralControls[key] = { value, actor: state.actor ?? "", at: Date.now() };
+function sendPreviewControl(target: string, name: string, value: any) {
+  const key = liveKey(target, name);
+  state.liveControls[key] = { value, actor: state.actor ?? "", at: Date.now() };
   audio?.sync(effectiveDubspace(), state.clockOffset);
-  const last = ephemeralThrottle.get(key) ?? 0;
+  const last = directThrottle.get(key) ?? 0;
   if (Date.now() - last < 35) return;
-  ephemeralThrottle.set(key, Date.now());
-  state.socket?.send(JSON.stringify({ op: "ephemeral", kind: "property", space: "the_dubspace", target, name, value }));
+  directThrottle.set(key, Date.now());
+  direct("the_dubspace", "preview_control", [target, name, value]);
 }
 
-function receiveEphemeralControl(frame: any) {
-  const key = ephemeralKey(frame.target, frame.name);
-  state.ephemeralControls[key] = { value: frame.value, actor: frame.actor, at: Date.now() };
-  const input = document.querySelector<HTMLInputElement>(`[data-control="${frame.target}:${frame.name}"]`);
-  if (input && document.activeElement !== input) input.value = String(frame.value);
+function receiveLiveEvent(observation: any) {
+  if (observation?.type === "gesture_progress") {
+    receiveLiveControl(observation);
+    return;
+  }
+  state.observations.unshift({ live: true, observation });
+  state.observations = state.observations.slice(0, 30);
+  render();
+}
+
+function receiveLiveControl(observation: any) {
+  const key = liveKey(observation.target, observation.name);
+  state.liveControls[key] = { value: observation.value, actor: observation.actor, at: Date.now() };
+  const input = document.querySelector<HTMLInputElement>(`[data-control="${observation.target}:${observation.name}"]`);
+  if (input && document.activeElement !== input) input.value = String(observation.value);
   audio?.sync(effectiveDubspace(), state.clockOffset);
 }
 
-function forgetEphemeralControls(observations: any[]) {
+function forgetLiveControls(observations: any[]) {
   for (const obs of observations) {
-    if (obs.type === "control_changed" && obs.target && obs.name) delete state.ephemeralControls[ephemeralKey(String(obs.target), String(obs.name))];
+    if (obs.type === "control_changed" && obs.target && obs.name) delete state.liveControls[liveKey(String(obs.target), String(obs.name))];
   }
 }
 
-function pruneEphemeralControls() {
-  const before = Object.keys(state.ephemeralControls).length;
+function pruneLiveControls() {
+  const before = Object.keys(state.liveControls).length;
   void effectiveDubspace();
-  if (Object.keys(state.ephemeralControls).length === before) return;
+  if (Object.keys(state.liveControls).length === before) return;
   audio?.sync(effectiveDubspace(), state.clockOffset);
   if (state.tab === "dubspace") render();
 }
@@ -314,7 +334,7 @@ function bindDubspace() {
   document.querySelectorAll<HTMLInputElement>("[data-control]").forEach((input) => {
     input.addEventListener("input", () => {
       const [target, name] = input.dataset.control!.split(":");
-      sendEphemeralControl(target, name, Number(input.value));
+      sendPreviewControl(target, name, Number(input.value));
     });
     input.addEventListener("change", () => {
       const [target, name] = input.dataset.control!.split(":");
@@ -527,15 +547,42 @@ function defaultSource() {
 }`;
 }
 
+function clamp(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
 class DubAudio {
   private context = new AudioContext();
   private gains = new Map<string, GainNode>();
   private oscillators = new Map<string, OscillatorNode>();
+  private input = this.context.createGain();
+  private filter = this.context.createBiquadFilter();
+  private channel = this.context.createGain();
+  private dry = this.context.createGain();
+  private send = this.context.createGain();
+  private delay = this.context.createDelay(1.5);
+  private feedback = this.context.createGain();
+  private wet = this.context.createGain();
   private dubspace: any;
   private clockOffset = 0;
   private sequencer?: number;
   private lastStep = -1;
   private lastStartedAt = 0;
+
+  constructor() {
+    this.filter.type = "lowpass";
+    this.input.connect(this.filter).connect(this.channel);
+    this.channel.connect(this.dry).connect(this.context.destination);
+    this.channel.connect(this.send).connect(this.delay);
+    this.delay.connect(this.feedback).connect(this.delay);
+    this.delay.connect(this.wet).connect(this.context.destination);
+    this.dry.gain.value = 1;
+    this.send.gain.value = 0.3;
+    this.delay.delayTime.value = 0.25;
+    this.feedback.gain.value = 0.35;
+    this.wet.gain.value = 0.4;
+  }
 
   async start() {
     await this.context.resume();
@@ -546,6 +593,7 @@ class DubAudio {
     if (!dubspace) return;
     this.dubspace = dubspace;
     this.clockOffset = clockOffset;
+    this.syncEffects(dubspace);
     const freqs: Record<string, number> = { slot_1: 110, slot_2: 146.83, slot_3: 196, slot_4: 261.63 };
     for (const [id, freq] of Object.entries(freqs)) {
       const props = dubspace[id]?.props ?? {};
@@ -555,7 +603,7 @@ class DubAudio {
         osc.frequency.value = freq;
         osc.type = "sawtooth";
         gain.gain.value = (props.gain ?? 0.5) * 0.08;
-        osc.connect(gain).connect(this.context.destination);
+        osc.connect(gain).connect(this.input);
         osc.start();
         this.oscillators.set(id, osc);
         this.gains.set(id, gain);
@@ -568,6 +616,20 @@ class DubAudio {
       this.gains.get(id)?.gain.setTargetAtTime((props.gain ?? 0.5) * 0.08, this.context.currentTime, 0.02);
     }
     this.ensureSequencer();
+  }
+
+  private syncEffects(dubspace: any) {
+    const now = this.context.currentTime;
+    const delay = dubspace.delay_1?.props ?? {};
+    const filter = dubspace.filter_1?.props ?? {};
+    const channel = dubspace.channel_1?.props ?? {};
+    this.filter.frequency.setTargetAtTime(clamp(Number(filter.cutoff ?? 5000), 80, 5000), now, 0.02);
+    this.filter.Q.setTargetAtTime(0.8, now, 0.02);
+    this.channel.gain.setTargetAtTime(clamp(Number(channel.gain ?? 0.8), 0, 1.2), now, 0.02);
+    this.send.gain.setTargetAtTime(clamp(Number(delay.send ?? 0.3), 0, 1), now, 0.02);
+    this.delay.delayTime.setTargetAtTime(clamp(Number(delay.time ?? 0.25), 0.03, 1.2), now, 0.02);
+    this.feedback.gain.setTargetAtTime(clamp(Number(delay.feedback ?? 0.35), 0, 0.88), now, 0.02);
+    this.wet.gain.setTargetAtTime(clamp(Number(delay.wet ?? 0.4), 0, 0.9), now, 0.02);
   }
 
   private ensureSequencer() {
@@ -616,7 +678,7 @@ class DubAudio {
     osc.frequency.exponentialRampToValueAtTime(42, t + 0.16);
     gain.gain.setValueAtTime(0.22, t);
     gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
-    osc.connect(gain).connect(this.context.destination);
+    osc.connect(gain).connect(this.input);
     osc.start(t);
     osc.stop(t + 0.19);
   }
@@ -635,7 +697,7 @@ class DubAudio {
     filter.frequency.value = cutoff;
     gain.gain.setValueAtTime(level, t);
     gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
-    source.connect(filter).connect(gain).connect(this.context.destination);
+    source.connect(filter).connect(gain).connect(this.input);
     source.start(t);
   }
 
@@ -647,7 +709,7 @@ class DubAudio {
     osc.frequency.value = freq;
     gain.gain.setValueAtTime(0.06, t);
     gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
-    osc.connect(gain).connect(this.context.destination);
+    osc.connect(gain).connect(this.input);
     osc.start(t);
     osc.stop(t + 0.13);
   }

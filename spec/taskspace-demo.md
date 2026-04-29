@@ -109,7 +109,9 @@ All observations include `type` and `source` (the taskspace itself). All are per
 - See the ordered activity timeline update for all connected actors.
 - Expand/collapse the task hierarchy in the UI.
 
-## Not In This Demo
+## Not In The Basic Demo
+
+(The Workflow Variant section below adds workflow-gated transitions and roles. These items are out of scope for *both* the basic demo and the variant unless noted.)
 
 - Calendar scheduling.
 - Priorities beyond status.
@@ -117,9 +119,9 @@ All observations include `type` and `source` (the taskspace itself). All are per
 - Cross-project linking.
 - Search.
 - Notifications.
-- Rich permissions.
+- Rich permissions beyond per-claimer / per-role gating.
 - External integrations.
-- Configurable workflows.
+- Configurable workflows beyond the design-review example in the variant.
 - Full project-management UI.
 
 ## Hierarchy Rule
@@ -327,6 +329,75 @@ work — a project that needs verifier-gated done adds a `verifier` property and
 a `task:verify` verb. A project that needs requestor-tracking-without-gating
 adds a `requestor` property and reads it in the UI. None of these add runtime
 machinery; they are all just object data and verb code.
+
+## Workflow Variant (useful taskspace)
+
+The basic demo above uses the open-policy `:set_status` (any actor, any transition). For a useful coordination platform, the same taskspace can declare a [workflow](operations/workflows.md) that gates transitions on roles and entrance conditions. This is the cut you'd actually use to coordinate work between agents (or people).
+
+### Example workflow
+
+A design-review pipeline:
+
+```
+states:      design → design-review → implementation → implementation-review → done
+
+transitions:
+  design                 → design-review            performer + min_artifacts:1
+  design-review          → design                   reviewer (reject)
+  design-review          → implementation           reviewer (approve)
+  implementation         → implementation-review    performer + min_artifacts:1
+  implementation-review  → implementation           reviewer (reject)
+  implementation-review  → done                     reviewer (approve)
+```
+
+The workflow-bearing taskspace class declares this as its default `workflow` property; tasks created in it inherit the gating.
+
+### Additional roles + verbs
+
+Each task carries `performer` and `reviewer` properties (alongside or replacing `assignee`). New verbs:
+
+- `:claim_role("performer" | "reviewer")` — set the role property; raises `E_CONFLICT` if filled by another actor, `E_CAPABILITY` if the claimer's tier is below the task's required tier.
+- `:release_role(role)` — clear; current role-holder or wizard only.
+- `:transition(to)` — workflow-gated transition; sugar for `:set_status(to)`.
+- `:submit(artifact)` — append artifact + transition to next state if entrance conditions are met.
+
+### Task properties for agent routing
+
+When the same taskspace coordinates AI agents at different capability tiers, two extra properties on each task make routing predictable (per [workflows.md §WF11](operations/workflows.md#wf11-capability-gating-for-agent-claims)):
+
+- `capability: "low" | "medium" | "high" | null` — minimum claimer tier. Defaults null (no constraint). Set per task at creation, or by a wizard later.
+- `token_budget: int | null` — advisory estimate of tokens to complete the work; surfaced in listings so agents can self-select.
+
+A `$ai_agent` is a `$player` subclass with `model` and `capability` fields. Concrete agent operators define their own mapping from model to tier; the runtime only enforces the scalar comparison at claim time.
+
+### Agent loops
+
+A **performer agent** at tier `medium` running model `claude-sonnet-4-6`:
+
+```
+1. tasks = $taskspace:items_unfilled("performer", $me.capability)
+2. pick one (consider task.token_budget against your per-call cap)
+3. #task:claim_role("performer")          // E_CAPABILITY if mis-tiered
+4. work; #task:add_artifact({ kind: "url", ref: "..." })
+5. #task:transition("design-review")
+```
+
+A **reviewer agent**:
+
+```
+1. tasks = $taskspace:items_in_state("design-review", $me.capability)
+2. filter to tasks where reviewer is null or $me
+3. #task:claim_role("reviewer")  (if not already)
+4. inspect via :describe()
+5. either #task:transition("implementation") (approve)
+       or #task:transition("design") with #task:add_message("rationale") (reject)
+```
+
+These flows compose with the [REST API](protocol/rest.md): the agent's runtime makes ordinary HTTP calls, no WebSocket required.
+
+### Why this is "useful"
+
+Two actors with different roles hand off through reviewable states; the platform enforces correctness on transitions and entrance conditions; the listing verbs make the agent loop predictable and discoverable. This is the smallest workflow that's recognizably real coordination — anything bigger (priorities, dependencies, sprints, calendars) layers on top.
 
 ## Why This Demo Exists
 

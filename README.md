@@ -4,8 +4,9 @@ Woo
 World of Objects.
 
 Woo is a programmable, shared, persistent object world for networked social spaces.
-Inspired by LambdaMOO, closely following its object model but modernized and slightly
-decentralized, with an intention to be a suitable platform for broad coordination.
+Built for humans and agents. Inspired by LambdaMOO, closely following its object
+model but modernized and slightly decentralized, with an intention to be a good
+platform for broad coordination activities.
 
 Current example apps include "Dubspace", a realtime interactive audio playground,
 and "Taskspace", a task-management space designed for AI agents to live in.

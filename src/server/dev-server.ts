@@ -4,12 +4,14 @@ import { createServer as createViteServer } from "vite";
 import { WebSocketServer, type WebSocket } from "ws";
 import { compileVerb, definePropertyVersioned, installVerb } from "../core/authoring";
 import { createWorld } from "../core/bootstrap";
-import { normalizeError } from "../core/world";
-import { wooError, type AppliedFrame, type Message, type ObjRef } from "../core/types";
+import { normalizeError, type ParkedTaskRun } from "../core/world";
+import { wooError, type AppliedFrame, type DirectResultFrame, type LiveEventFrame, type Message, type ObjRef } from "../core/types";
+import { SQLiteWorldRepository } from "./sqlite-repository";
 
-// Local dev server only: world state is in memory, and HTTP authoring endpoints
-// are intentionally unauthenticated for local poking. Do not deploy as-is.
-const world = createWorld();
+// Local dev server only: HTTP authoring endpoints are intentionally
+// unauthenticated for local poking. Do not deploy as-is.
+const repository = new SQLiteWorldRepository(process.env.WOO_DB ?? ".woo/dev.sqlite");
+const world = createWorld({ repository });
 const sockets = new Map<WebSocket, { sessionId: string; actor: string; socketId: string }>();
 let socketCounter = 1;
 
@@ -106,6 +108,22 @@ wss.on("connection", (ws) => {
         else ws.send(JSON.stringify(result));
         return;
       }
+      if (frame.op === "direct") {
+        const session = sockets.get(ws);
+        if (!session) {
+          ws.send(JSON.stringify({ op: "error", id: frame.id, error: { code: "E_NOSESSION", message: "authenticate first" } }));
+          return;
+        }
+        const args = Array.isArray(frame.args) ? frame.args : [];
+        const result = world.directCall(frame.id, session.actor, String(frame.target ?? "") as ObjRef, String(frame.verb ?? ""), args);
+        if (result.op === "result") {
+          ws.send(JSON.stringify({ op: "result", id: result.id, result: result.result }));
+          broadcastLiveEvents(result);
+        } else {
+          ws.send(JSON.stringify(result));
+        }
+        return;
+      }
       if (frame.op === "replay") {
         const session = sockets.get(ws);
         if (!session) {
@@ -119,24 +137,23 @@ wss.on("connection", (ws) => {
         ws.send(JSON.stringify({ op: "replay", id: frame.id, space, from, entries: world.replay(space, from, limit) }));
         return;
       }
-      if (frame.op === "ephemeral" && frame.kind === "property") {
+      if (frame.op === "input") {
         const session = sockets.get(ws);
         if (!session) {
           ws.send(JSON.stringify({ op: "error", id: frame.id, error: { code: "E_NOSESSION", message: "authenticate first" } }));
           return;
         }
-        const space = String(frame.space ?? "") as ObjRef;
-        if (!world.hasPresence(session.actor, space)) throw wooError("E_PERM", `${session.actor} is not present in ${space}`);
-        broadcastEphemeral({
-          op: "ephemeral",
-          kind: "property",
-          space,
-          actor: session.actor,
-          target: String(frame.target ?? ""),
-          name: String(frame.name ?? ""),
-          value: frame.value,
-          sent_at: Date.now()
-        });
+        const input = Object.prototype.hasOwnProperty.call(frame, "value") ? frame.value : frame.text ?? "";
+        const result = world.deliverInput(session.actor, input);
+        if (!result) {
+          ws.send(JSON.stringify({ op: "input", id: frame.id, accepted: false }));
+          return;
+        }
+        if (result.frame?.op === "applied") broadcastApplied(result.frame, ws);
+        else {
+          ws.send(JSON.stringify({ op: "input", id: frame.id, accepted: true, task: result.task.id, observations: result.observations }));
+          broadcastTaskResult(result);
+        }
         return;
       }
       ws.send(JSON.stringify({ op: "error", error: { code: "E_INVARG", message: `unknown op ${frame.op}` } }));
@@ -156,7 +173,11 @@ server.listen(port, () => {
   console.log(`woo dev server http://localhost:${port}`);
 });
 
-function broadcastApplied(frame: AppliedFrame, originator: WebSocket): void {
+setInterval(() => {
+  for (const result of world.runDueTasks()) broadcastTaskResult(result);
+}, 250).unref();
+
+function broadcastApplied(frame: AppliedFrame, originator?: WebSocket): void {
   for (const [ws, session] of sockets) {
     if (ws.readyState !== ws.OPEN || !world.hasPresence(session.actor, frame.space)) continue;
     const visibleFrame = ws === originator ? frame : { ...frame, id: undefined };
@@ -164,12 +185,36 @@ function broadcastApplied(frame: AppliedFrame, originator: WebSocket): void {
   }
 }
 
-function broadcastEphemeral(frame: { op: "ephemeral"; kind: "property"; space: ObjRef; actor: string; target: string; name: string; value: unknown; sent_at: number }): void {
-  const data = JSON.stringify(frame);
+function broadcastTaskResult(result: ParkedTaskRun): void {
+  if (result.frame?.op === "applied") {
+    broadcastApplied(result.frame);
+    return;
+  }
+  const space = taskResultSpace(result);
+  const data = JSON.stringify({ op: "task", task: result.task.id, space, observations: result.observations });
   for (const [ws, session] of sockets) {
-    if (ws.readyState !== ws.OPEN || !world.hasPresence(session.actor, frame.space)) continue;
+    if (ws.readyState !== ws.OPEN || !world.hasPresence(session.actor, space)) continue;
     ws.send(data);
   }
+}
+
+function broadcastLiveEvents(result: DirectResultFrame): void {
+  if (!result.audience) return;
+  for (const observation of result.observations) broadcastLiveEvent({ op: "event", observation }, result.audience);
+}
+
+function broadcastLiveEvent(frame: LiveEventFrame, audience: ObjRef): void {
+  const data = JSON.stringify(frame);
+  for (const [ws, session] of sockets) {
+    if (ws.readyState !== ws.OPEN || !world.hasPresence(session.actor, audience)) continue;
+    ws.send(data);
+  }
+}
+
+function taskResultSpace(result: ParkedTaskRun): ObjRef {
+  const serialized = result.task.serialized;
+  if (serialized && typeof serialized === "object" && !Array.isArray(serialized) && typeof serialized.space === "string") return serialized.space;
+  return result.task.parked_on;
 }
 
 async function readJson(req: http.IncomingMessage): Promise<Record<string, any>> {

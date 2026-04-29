@@ -10,8 +10,8 @@ The spec describes four progressive **profiles**. An implementation targets one 
 
 | Profile | Scope | What it proves | Status |
 |---|---|---|---|
-| **first-light** | T0 VM, dubspace + taskspace demos, minimal IDE, in-memory state | The runtime model is real; the demos are alive | reference impl in `src/` |
-| **v1-core** | Full normative semantics: values, objects, $space, identity (lite), VM (full), permissions, events, tasks, builtins, failures, plus protocol and Cloudflare reference | Durable, multi-actor, recoverable; passes the core conformance suite | spec ready; impl pending |
+| **first-light** | Runnable dubspace + taskspace demos, minimal IDE, local dev runtime; T0 fixtures plus v0.5 VM/persistence slices | The runtime model is real; the demos are alive; richer runtime pressure has concrete code | reference impl in `src/` (v0.5 local; not a v1-core claim) |
+| **v1-core** | Full normative semantics: values, objects, $space, identity (lite), VM (full), permissions, events, tasks, builtins, failures, plus protocol and Cloudflare reference | Durable, multi-actor, recoverable; passes the core conformance suite | spec ready; impl partial |
 | **v1-ops** | Worktrees, migrations, backups, deployments, observability, debugging, teams, credentialed auth, catalogs, conformance suite | Multi-developer platform: ship changes, recover, audit, trust between authors | spec ready; impl pending |
 | **v2-federation** | Cross-world calls (mTLS), peer trust, federated identity, cross-world catalogs | Worlds interoperate across operators | reserved; design in `spec/deferred/` |
 
@@ -27,22 +27,24 @@ Source of truth for which profile each spec doc belongs to. Per-doc `Profile:` f
 
 - `spec/dubspace-demo.md`
 - `spec/taskspace-demo.md`
+- `spec/chat-demo.md` (planned extension; not in the current reference implementation)
 - `spec/authoring/minimal-ide.md`
 - (Reference implementation in `src/`; not a spec doc.)
 
 ### v1-core
 
 - `spec/semantics/`: core, values, objects, space (§S1–§S7 with snapshots optional in this profile), identity (guest auth only), language, vm, tiny-vm, permissions, events, tasks, builtins, failures, bootstrap, introspection
-- `spec/protocol/`: hosts, wire, browser-host
+- `spec/protocol/`: hosts, wire, rest (v1-core token vocabulary; v1-ops extends), browser-host
 - `spec/reference/`: cloudflare, persistence, quotas
 
 ### v1-ops
 
-- `spec/operations/`: worktrees, migrations, backups, deployments, observability
+- `spec/operations/`: worktrees, migrations, backups, deployments, observability, workflows
 - `spec/identity/`: auth (credentialed; guest-only piece is in v1-core), teams
 - `spec/discovery/`: catalogs
 - `spec/tooling/`: debugging, conformance
 - `spec/semantics/space.md §S7.1` raises snapshots from optional to required for this profile.
+- `spec/protocol/rest.md §R3` extends the REST token vocabulary with v1-ops tokens (bearer/oauth/apikey).
 
 ### v2-federation
 
@@ -58,7 +60,7 @@ Some docs carry rules that *escalate* between profiles:
 - **`semantics/space.md §S7` snapshots** — optional in v1-core; required in v1-ops.
 - **`semantics/identity.md` auth tokens** — guest-only in v1-core; credentialed (bearer/OAuth) added in v1-ops via `identity/auth.md`.
 - **`semantics/bootstrap.md` seed graph** — universal classes in v1-core; demo classes (`$dubspace`, `$taskspace`) are first-light artifacts.
-- **`semantics/failures.md` storage failure rows** — all profiles agree, but storage-failure modes are only fully exercised in v1-core+ (first-light is in-memory).
+- **`semantics/failures.md` storage failure rows** — all profiles agree, but storage-failure modes are only fully exercised in v1-core+ (first-light/local v0.5 has SQLite and JSON persistence slices, but not the production host failure model).
 
 Where escalation happens, the section explicitly notes it with the higher profile's name.
 

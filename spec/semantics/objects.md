@@ -73,6 +73,17 @@ Within source code on a host, the bare form `~nnn` resolves to the local host. C
 
 `$foo` is shorthand for `#0.foo` (the `foo` property of `$system`). A typical bootstrap world has `$root_object`, `$player`, `$room`, `$thing`, `$wiz`, etc. Resolution is at compile time when possible (statically known property), falls back to runtime lookup otherwise.
 
+### 5.3.1 Dynamic corenames
+
+Most corenames are *static*: `$wiz`, `$root`, `$dubspace` are defined at boot and resolve to a fixed ULID via `$system.<name>` lookup. The resolver looks up the corename in a flat map and returns the same answer regardless of context.
+
+A small reserved set of corenames are *dynamic*: their resolution depends on the calling context.
+
+- **`$me`** — the actor making the current call. Resolves to the bearer's actor in REST requests ([rest.md §R9](../protocol/rest.md#r9-me-resolution)), to the frame's `actor` field in verb bodies, and is unset (raises `E_VARNF`) outside any call context. Equivalent to writing `actor` in a verb body; the dynamic corename gives the same identity a name in REST and tooling contexts.
+- **`$peer`** — reserved for the calling peer in cross-world contexts ([federation-early.md](../deferred/federation-early.md)). Not active in v1-core.
+
+Dynamic corenames may not be assigned via `set_corename`; the runtime owns their resolution. A wizard with the `impersonate` capability may override `$me` for a single call (REST: `X-Woo-Impersonate-Actor: <ref>` header; verb code: `wiz:as_actor(...)`); the impersonation is logged as a wizard action.
+
 ### 5.4 Federated origins (reserved)
 
 In federated contexts, refs are qualified by origin: `#42@world-a.example`. The unqualified form `#42` is shorthand for "the local world's origin." See [../deferred/federation.md §24.3](../deferred/federation.md#243-qualified-identity). v1 ships single-world; non-local origins raise `E_FED_DISABLED` at runtime, but the qualifier syntax is parsed and stored in the AST so v2 federation is a non-breaking change.
@@ -111,9 +122,32 @@ Given `obj:name(args)`:
 
 1. Start at `obj`. If verb `name` is defined locally, use it.
 2. Else recurse to `obj.parent`, repeat.
-3. If no ancestor defines `name`, raise `E_VERBNF`.
+3. If no ancestor defines `name` and `obj` is `$actor`- or `$space`-descended, search `obj.features` per [features.md §FT2](features.md#ft2-verb-lookup-with-features).
+4. If still no match, raise `E_VERBNF`.
 
-Aliases: a verb's `aliases` field is a list of patterns (`look l@ examine`) where `@` matches any suffix. Patterns are compiled at `setVerb` time; lookup matches against the union of `name` and patterns.
+Aliases: a verb's `aliases` field is a list of patterns. Lookup matches the invocation name against the union of the verb's canonical `name` and its alias patterns. Patterns are compiled at `setVerb` time and cached.
+
+**Pattern grammar:**
+
+```
+pattern  := segment ( '|' segment )*
+segment  := literal | literal '*' | literal '@'
+literal  := one or more characters from [a-zA-Z0-9_-], min length 1
+```
+
+- A bare `literal` matches the literal exactly: `look` matches only `"look"`.
+- `literal*` matches `literal` followed by zero or more characters from `[a-zA-Z0-9_-]`: `ex*` matches `ex`, `exa`, `examine`, `extra`. Useful for "abbreviation acceptable past this prefix."
+- `literal@` matches the literal exactly *or* any prefix of it down to the literal's first character: `l@ook` matches `l`, `lo`, `loo`, `look` — i.e., `l@ook` is shorthand for "any prefix of `look` of length ≥ 1." (Same as `l@ook` in LambdaCore convention.) The `@` must immediately follow a literal segment.
+- `|` is segment union within one pattern: `look|l@ook` permits both `look` and any prefix.
+- Patterns are case-sensitive. A space-separated string of patterns (`"look l@ examine"`) is parsed as a list of three patterns; do not confuse this with a single pattern containing spaces (which is invalid).
+
+**Resolution order.** When multiple patterns from different ancestors match the invocation name:
+
+1. Walk ancestor chain from `this` upward (per §9.1 step 1–2).
+2. The first ancestor with *any* matching pattern (canonical `name` or alias) wins.
+3. Within that ancestor, ties between `name` and an alias prefer `name`.
+
+**Forbidden.** Patterns with no literal characters (e.g., `*` alone, `@` alone), patterns containing whitespace or special shell characters, and patterns longer than 64 characters all raise `E_INVARG` at `setVerb` time.
 
 ### 9.2 Cache
 
