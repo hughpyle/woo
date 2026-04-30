@@ -130,7 +130,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
       const insertDef = this.db.prepare("INSERT INTO property_def(object_id, name, default_val, type_hint, owner, perms, version) VALUES (?, ?, ?, ?, ?, ?, ?)");
       const insertValue = this.db.prepare("INSERT INTO property_value(object_id, name, value) VALUES (?, ?, ?)");
       const insertVersion = this.db.prepare("INSERT INTO property_version(object_id, name, version) VALUES (?, ?, ?)");
-      const insertVerb = this.db.prepare("INSERT INTO verb(object_id, name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      const insertVerb = this.db.prepare("INSERT INTO verb(object_id, name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode, flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const insertChild = this.db.prepare("INSERT INTO child(object_id, child_ref) VALUES (?, ?)");
       const insertContent = this.db.prepare("INSERT INTO content(object_id, content_ref) VALUES (?, ?)");
       const insertSchema = this.db.prepare("INSERT INTO event_schema(object_id, type, schema) VALUES (?, ?, ?)");
@@ -140,7 +140,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
         for (const def of obj.propertyDefs) insertDef.run(obj.id, def.name, stringifyValue(def.defaultValue), def.typeHint ?? null, def.owner, def.perms, def.version);
         for (const [name, value] of obj.properties) insertValue.run(obj.id, name, stringifyValue(value));
         for (const [name, version] of obj.propertyVersions) insertVersion.run(obj.id, name, version);
-        for (const verb of obj.verbs) insertVerb.run(obj.id, verb.name, verb.kind, stringifyValue(verb.aliases), verb.owner, verb.perms, stringifyValue(verb.arg_spec), verb.source, verb.source_hash, verb.version, stringifyValue(verb.line_map), verb.kind === "native" ? verb.native : null, verb.kind === "bytecode" ? stringifyValue(verb.bytecode as unknown as WooValue) : null);
+        for (const verb of obj.verbs) insertVerb.run(obj.id, verb.name, verb.kind, stringifyValue(verb.aliases), verb.owner, verb.perms, stringifyValue(verb.arg_spec), verb.source, verb.source_hash, verb.version, stringifyValue(verb.line_map), verb.kind === "native" ? verb.native : null, verb.kind === "bytecode" ? stringifyValue(verb.bytecode as unknown as WooValue) : null, verbFlagsJson(verb));
         for (const child of obj.children) insertChild.run(obj.id, child);
         for (const content of obj.contents) insertContent.run(obj.id, content);
         for (const [type, schema] of obj.eventSchemas) insertSchema.run(obj.id, type, stringifyValue(schema as WooValue));
@@ -301,8 +301,8 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
   saveVerb(id: ObjRef, verb: SerializedVerb): void {
     this.ensureHostedObject(id);
     this.db
-      .prepare("INSERT OR REPLACE INTO verb(object_id, name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(id, verb.name, verb.kind, stringifyValue(verb.aliases), verb.owner, verb.perms, stringifyValue(verb.arg_spec), verb.source, verb.source_hash, verb.version, stringifyValue(verb.line_map), verb.kind === "native" ? verb.native : null, verb.kind === "bytecode" ? stringifyValue(verb.bytecode as unknown as WooValue) : null);
+      .prepare("INSERT OR REPLACE INTO verb(object_id, name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode, flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(id, verb.name, verb.kind, stringifyValue(verb.aliases), verb.owner, verb.perms, stringifyValue(verb.arg_spec), verb.source, verb.source_hash, verb.version, stringifyValue(verb.line_map), verb.kind === "native" ? verb.native : null, verb.kind === "bytecode" ? stringifyValue(verb.bytecode as unknown as WooValue) : null, verbFlagsJson(verb));
   }
 
   deleteVerb(id: ObjRef, name: string): void {
@@ -530,6 +530,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
         line_map TEXT NOT NULL,
         native TEXT,
         bytecode TEXT,
+        flags TEXT NOT NULL DEFAULT '{}',
         PRIMARY KEY (object_id, name)
       );
       CREATE TABLE IF NOT EXISTS child (
@@ -598,6 +599,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
     this.ensureColumn("session", "last_detach_at", "INTEGER");
     this.ensureColumn("session", "token_class", "TEXT NOT NULL DEFAULT 'guest'");
     this.ensureColumn("space_message", "observations", "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn("verb", "flags", "TEXT NOT NULL DEFAULT '{}'");
     this.db.exec("DROP TABLE IF EXISTS session_socket");
   }
 
@@ -662,6 +664,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
 }
 
 function verbFromRow(row: Row): VerbDef {
+  const flags = row.flags ? (parseValue(row.flags) as Record<string, unknown>) : {};
   const base = {
     name: row.name,
     aliases: parseValue(row.aliases) as string[],
@@ -671,10 +674,19 @@ function verbFromRow(row: Row): VerbDef {
     source: row.source,
     source_hash: row.source_hash,
     version: Number(row.version),
-    line_map: parseValue(row.line_map) as Record<string, WooValue>
+    line_map: parseValue(row.line_map) as Record<string, WooValue>,
+    direct_callable: flags.direct_callable === true ? true : undefined,
+    skip_presence_check: flags.skip_presence_check === true ? true : undefined
   };
   if (row.kind === "native") return { ...base, kind: "native", native: row.native };
   return { ...base, kind: "bytecode", bytecode: parseValue(row.bytecode) as any };
+}
+
+function verbFlagsJson(verb: VerbDef): string {
+  const flags: Record<string, true> = {};
+  if (verb.direct_callable === true) flags.direct_callable = true;
+  if (verb.skip_presence_check === true) flags.skip_presence_check = true;
+  return JSON.stringify(flags);
 }
 
 function snapshotFromRow(row: Row): SpaceSnapshotRecord {

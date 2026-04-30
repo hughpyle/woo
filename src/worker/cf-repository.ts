@@ -353,11 +353,12 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
   saveVerb(id: ObjRef, verb: SerializedVerb): void {
     this.ensureHostedObject(id);
     this.sql.exec(
-      "INSERT OR REPLACE INTO verb(object_id, name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO verb(object_id, name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode, flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       id, verb.name, verb.kind, stringifyValue(verb.aliases), verb.owner, verb.perms,
       stringifyValue(verb.arg_spec), verb.source, verb.source_hash, verb.version, stringifyValue(verb.line_map),
       verb.kind === "native" ? verb.native : null,
-      verb.kind === "bytecode" ? stringifyValue(verb.bytecode as unknown as WooValue) : null
+      verb.kind === "bytecode" ? stringifyValue(verb.bytecode as unknown as WooValue) : null,
+      verbFlagsJson(verb)
     );
   }
 
@@ -609,6 +610,24 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
   }
 
   private migrate(): void {
+    // v0.5 schema upgrade: the verb table gained a `flags` column to persist
+    // direct_callable / skip_presence_check. If we find an old verb table
+    // without that column, drop everything and rebuild — the runtime cannot
+    // fix flag-less verb rows without re-running catalog install. The next
+    // request runs createWorld() against empty storage → fresh bootstrap.
+    // Operator re-claims the wizard token after this one-time reset.
+    const verbCols = this.tableColumns("verb");
+    if (verbCols.size > 0 && !verbCols.has("flags")) {
+      for (const table of [
+        "world_meta", "task", "space_snapshot", "space_message",
+        "session", "event_schema", "content", "child", "verb",
+        "property_version", "property_value", "property_def", "object",
+        "ancestor_verb_cache", "ancestor_prop_cache", "ancestor_chain"
+      ]) {
+        this.sql.exec(`DROP TABLE IF EXISTS ${table}`);
+      }
+    }
+
     // Schema mirrors src/server/sqlite-repository.ts migrate() exactly.
     // CF Workers SQL doesn't support multi-statement exec in one call, so each
     // CREATE TABLE / CREATE INDEX runs separately.
@@ -660,6 +679,7 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
         line_map TEXT NOT NULL,
         native TEXT,
         bytecode TEXT,
+        flags TEXT NOT NULL DEFAULT '{}',
         PRIMARY KEY (object_id, name)
       )`,
       `CREATE TABLE IF NOT EXISTS child (
@@ -726,6 +746,7 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
     ];
     for (const stmt of stmts) this.sql.exec(stmt);
     this.ensureColumn("space_message", "observations", "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn("verb", "flags", "TEXT NOT NULL DEFAULT '{}'");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -744,6 +765,7 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
 // add friction without payoff). Worth extracting if a third backend appears. ----
 
 function verbFromRow(row: Row): VerbDef {
+  const flags = row.flags ? (parseValue(String(row.flags)) as Record<string, unknown>) : {};
   const base = {
     name: String(row.name),
     aliases: parseValue(String(row.aliases)) as string[],
@@ -753,10 +775,19 @@ function verbFromRow(row: Row): VerbDef {
     source: String(row.source),
     source_hash: String(row.source_hash),
     version: Number(row.version),
-    line_map: parseValue(String(row.line_map)) as Record<string, WooValue>
+    line_map: parseValue(String(row.line_map)) as Record<string, WooValue>,
+    direct_callable: flags.direct_callable === true ? true : undefined,
+    skip_presence_check: flags.skip_presence_check === true ? true : undefined
   };
   if (row.kind === "native") return { ...base, kind: "native", native: String(row.native) };
   return { ...base, kind: "bytecode", bytecode: parseValue(String(row.bytecode)) as VerbDef extends { bytecode: infer B } ? B : never };
+}
+
+function verbFlagsJson(verb: VerbDef): string {
+  const flags: Record<string, true> = {};
+  if (verb.direct_callable === true) flags.direct_callable = true;
+  if (verb.skip_presence_check === true) flags.skip_presence_check = true;
+  return JSON.stringify(flags);
 }
 
 function snapshotFromRow(row: Row): SpaceSnapshotRecord {

@@ -26,7 +26,8 @@ export default defineConfig({
     stderr: "pipe",
     env: {
       PORT: String(PORT),
-      WOO_DB: ".woo/e2e.sqlite"
+      WOO_DB: process.env.WOO_DB ?? ".woo/e2e.sqlite",
+      VITE_HMR_PORT: process.env.VITE_HMR_PORT ?? String(PORT + 10_000)
     }
   }
 });

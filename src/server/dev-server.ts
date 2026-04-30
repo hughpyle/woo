@@ -32,9 +32,11 @@ type RestStream = { id: string; res: http.ServerResponse; actor: ObjRef; target:
 const restStreams = new Set<RestStream>();
 let socketCounter = 1;
 let streamCounter = 1;
+const port = Number(process.env.PORT ?? 5173);
+const hmrPort = Number(process.env.VITE_HMR_PORT ?? port + 10_000);
 
 const vite = await createViteServer({
-  server: { middlewareMode: true },
+  server: { middlewareMode: true, hmr: { port: hmrPort } },
   appType: "spa"
 });
 
@@ -178,7 +180,6 @@ wss.on("connection", (ws) => {
   });
 });
 
-const port = Number(process.env.PORT ?? 5173);
 server.listen(port, () => {
   console.log(`woo dev server http://localhost:${port}`);
 });
