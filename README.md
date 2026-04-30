@@ -19,8 +19,8 @@ the design work rather than precede it.
 ## Current Status
 
 Early implementation.  Run locally, backed by in-memory or SQLite persistence.
-Next steps include finishing the core VM and DSL compiler, then backing with
-Cloudflare Durable Objects.
+Next steps include finishing the [spec/discovery/catalogs.md](plugin catalog),
+then backing with Cloudflare Durable Objects.
 
 ## Specification
 
