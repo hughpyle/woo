@@ -102,30 +102,35 @@ Phase 0 (toolchain smoke test) — landed:
 
 Phase 1 (CF backend `ObjectRepository`) — landed:
 
-- `src/worker/cf-repository.ts` (~620 lines). Mirrors `LocalSQLiteRepository`. Schema and SQL strings byte-identical (both target SQLite); the wrapping changes:
+- `src/worker/cf-repository.ts` (~700 lines). Mirrors `LocalSQLiteRepository`. Schema and SQL strings byte-identical (both target SQLite); the wrapping changes:
   - `state.storage.sql.exec(...)` cursor API instead of better-sqlite3 prepared statements.
   - `state.storage.transactionSync(fn)` for atomicity (raw `BEGIN`/`COMMIT`/`ROLLBACK` aren't allowed via `sql.exec` on CF).
   - **`savepoint(fn)` also uses `state.storage.transactionSync(fn)`** — when called inside an outer transaction it nests as an implicit savepoint. Raw SQL `SAVEPOINT`/`ROLLBACK TO`/`RELEASE` are forbidden through `sql.exec` per CF docs and have been removed.
-- `CFObjectRepository implements ObjectRepository, WorldRepository` — adds stub `load(): null`, `save(): throw E_NOT_SUPPORTED`, `latestSpaceSnapshot` so it plugs into `WooWorld`'s constructor without a type refactor.
+- `CFObjectRepository implements ObjectRepository, WorldRepository`. `load()` walks per-object tables to reconstruct a `SerializedWorld` for cross-hibernation hydration. `save()` clears the tables and re-inserts via per-object methods inside one transaction, matching `LocalSQLiteRepository.save()` so `createWorld()`'s post-bootstrap whole-world flush works on CF.
 - Pending-log-outcome assertion at outer-only commit boundary (matches local backend).
 - No CF-storage variant in conformance harness yet (Miniflare integration is the gating piece).
+
+Phase 2 (Worker entry + DO class) — landed:
+
+- `src/worker/persistent-object-do.ts` (~330 lines). `PersistentObjectDO` class wrapping `WooWorld`+`CFObjectRepository`. Lazy-init via `state.blockConcurrencyWhile` on first request: `createWorld({ repository: cfRepo, catalogs })` runs bootstrap on a fresh DO or imports the SerializedWorld on a hydrated one. REST routes ported from `dev-server.ts`: `/healthz`, `/api/auth` (with `wizard:<WOO_INITIAL_WIZARD_TOKEN>` claim flow), `/api/state`, `/api/objects/{id}` describe, `/api/objects/{id}/properties/{name}`, `/api/objects/{id}/calls/{verb}` (sequenced + direct), `/api/objects/{id}/log`, `/api/taps`. Fail-loud 503s for missing `WOO_INITIAL_WIZARD_TOKEN` and `WOO_SEED_PHRASE` per §R14.7. SSE streams (`/stream`), WebSocket upgrade, and tap-install GitHub fetch return 501 `E_NOT_IMPLEMENTED` placeholders for later phases.
+- `src/worker/index.ts`. Worker entry: forwards every request to a single DO via `env.WOO.idFromName("world")`. Cross-DO routing per `cloudflare.md §R1.1` is a v1.1 refactor; v1 collapses to one DO.
+- `wrangler.toml`. `[[durable_objects.bindings]] name = "WOO" class_name = "PersistentObjectDO"`. `[[migrations]] tag = "v1" new_sqlite_classes = ["PersistentObjectDO"]`. `compatibility_flags = ["nodejs_compat"]` (needed by `node:crypto` in `src/core/source-hash.ts`).
+- `tsconfig.worker.json` adds `node` to `types` so the worker tsconfig sees `node:crypto` types.
+- **Live deploy**: `https://woo.hughpyle.workers.dev/`. `WOO_INITIAL_WIZARD_TOKEN` and `WOO_SEED_PHRASE` set via `wrangler secret put`. Smoke-tested end to end: 50 objects bootstrapped (universal classes + chat/dubspace/taskspace local catalogs auto-installed), wizard claim returns `$wiz` session, second claim returns `E_TOKEN_CONSUMED`, describe + REST routing work, `the_chatroom` (parent `$chatroom`) has 17 verbs and 10 properties matching the local manifest. Permission gates (`E_DIRECT_DENIED` for non-`direct_callable` verbs) enforced.
 
 ## Still open
 
 In dependency order:
 
-- **`PersistentObjectDO`** class wrapping `WooWorld`. Delegates RPC methods to `world.directCall` / `world.applyCall` / equivalents. Replaces the stub `src/worker/index.ts` once it exists.
-- **`DirectoryDO`** singleton. Trivial; ~80 lines.
-- **Worker entry** (full): route parsing, ID resolution, sessions, DO stub fetch. ~150 lines. Adds DO bindings + `[[migrations]] tag = "v1"` to `wrangler.toml`.
-- **First-request bootstrap** with `WOO_INITIAL_WIZARD_TOKEN` consumption and `WOO_AUTO_INSTALL_CATALOGS` auto-install.
-- **`wiz:rotate_bootstrap_token` verb** on `$system`. Spec'd in §R14.4; impl pending.
+- **`DirectoryDO`** singleton. Deferred until cross-DO routing exists; v1 collapses corename lookup into the single world DO.
 - **Alarms** for parked tasks. Replaces the 250ms `setInterval` only on the CF target; local dev keeps the poll.
-- **WS hibernation** with attachment shape `{session_id, actor, socket_id}`.
+- **WS hibernation** with attachment shape `{session_id, actor, socket_id}`. The Worker-side `acceptWebSocket` path is unwired; SSE stream `/stream` returns 501 placeholder.
+- **`wiz:rotate_bootstrap_token` verb** on `$system`. Spec'd in §R14.4; impl pending.
 - **Cross-DO RPC layer**: `RemoteHost.rpc(target, method, args)` stub used by `world.dispatch` when target is on a different anchor cluster. Currently `world.ts` assumes single-process; needs an "is target hosted here?" check before dispatch.
 - **Verb-lookup cache** (`ancestor_verb_cache`, `ancestor_prop_cache`). Schema exists in `persistence.md §14.1`; population on cross-DO miss is unimplemented.
 - **`src/instrument.ts`** with AE writes, structured logs, per-DO `:metrics()`.
 - **CF storage variant in conformance harness** via Miniflare. Optional; the unit-level transaction/savepoint guarantees are covered by the SQLite + in-memory backends.
-- **Worker-side catalog tap install**: import `src/server/github-taps.ts` helpers into the Worker fetch handler. Local Node already has `POST /api/tap/install` and `GET /api/taps`.
+- **Worker-side catalog tap install**: port `src/server/github-taps.ts` helpers into the Worker fetch handler. Currently the Worker route returns 501 `E_NOT_IMPLEMENTED`; local catalogs cover the demos.
 
 ## Known acceptable shortcuts
 

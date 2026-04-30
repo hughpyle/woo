@@ -147,6 +147,7 @@ export type SpaceLogEntry = {
   ts: number;
   actor: ObjRef;
   message: Message;
+  observations: Observation[];
   applied_ok: boolean;
   error?: ErrorValue;
 };

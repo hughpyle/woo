@@ -47,22 +47,136 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
 
   // ---- WorldRepository compatibility (so WooWorld's constructor can accept us) ----
   //
-  // CF doesn't do whole-world hydration; live state lives in DO storage and is
-  // read incrementally via the ObjectRepository methods below. createWorld()
-  // calls `repository?.load()` once at startup and treats null as "fresh
-  // bootstrap"; since the DO's storage either contains state from prior
-  // requests (already loaded by the runtime via per-object reads) or is empty
-  // (and bootstrap runs), returning null here is the correct shape.
+  // load() walks per-object tables and reconstructs a SerializedWorld so
+  // createWorld() can hydrate after DO hibernation/restart. Same shape as
+  // LocalSQLiteRepository.load() — schema is identical SQLite, only the
+  // cursor wrapping differs. Returns null on a fresh DO (no `object` rows yet)
+  // so createWorld() runs bootstrap + auto-install for first-light boot.
+  //
+  // save() is unsupported: the runtime uses per-object methods inside
+  // transaction()/savepoint() blocks. If something calls save() on the CF
+  // backend that's a bug in the routing — we fail loudly to surface it.
 
   load(): SerializedWorld | null {
-    return null;
+    const objectRows = this.all("SELECT * FROM object ORDER BY id");
+    if (objectRows.length === 0) return null;
+
+    const propertyDefs = groupBy(this.all("SELECT * FROM property_def ORDER BY object_id, name"), "object_id");
+    const propertyValues = groupBy(this.all("SELECT * FROM property_value ORDER BY object_id, name"), "object_id");
+    const propertyVersions = groupBy(this.all("SELECT * FROM property_version ORDER BY object_id, name"), "object_id");
+    const verbs = groupBy(this.all("SELECT * FROM verb ORDER BY object_id, name"), "object_id");
+    const children = groupBy(this.all("SELECT * FROM child ORDER BY object_id, child_ref"), "object_id");
+    const contents = groupBy(this.all("SELECT * FROM content ORDER BY object_id, content_ref"), "object_id");
+    const eventSchemas = groupBy(this.all("SELECT * FROM event_schema ORDER BY object_id, type"), "object_id");
+
+    const objects: SerializedObject[] = objectRows.map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      parent: row.parent === null ? null : String(row.parent),
+      owner: String(row.owner),
+      location: row.location === null ? null : String(row.location),
+      anchor: row.anchor === null ? null : String(row.anchor),
+      flags: flagsFromInt(Number(row.flags)),
+      created: Number(row.created),
+      modified: Number(row.modified),
+      propertyDefs: (propertyDefs.get(String(row.id)) ?? []).map((def) => ({
+        name: String(def.name),
+        defaultValue: parseValue(String(def.default_val)),
+        typeHint: def.type_hint == null ? undefined : String(def.type_hint),
+        owner: String(def.owner),
+        perms: String(def.perms),
+        version: Number(def.version)
+      })),
+      properties: (propertyValues.get(String(row.id)) ?? []).map(
+        (value) => [String(value.name), parseValue(String(value.value))] as [string, WooValue]
+      ),
+      propertyVersions: (propertyVersions.get(String(row.id)) ?? []).map(
+        (version) => [String(version.name), Number(version.version)] as [string, number]
+      ),
+      verbs: (verbs.get(String(row.id)) ?? []).map(verbFromRow),
+      children: (children.get(String(row.id)) ?? []).map((child) => String(child.child_ref)),
+      contents: (contents.get(String(row.id)) ?? []).map((content) => String(content.content_ref)),
+      eventSchemas: (eventSchemas.get(String(row.id)) ?? []).map(
+        (schema) => [String(schema.type), parseValue(String(schema.schema)) as Record<string, WooValue>] as [string, Record<string, WooValue>]
+      )
+    }));
+
+    const sessions = this.all("SELECT * FROM session ORDER BY id").map(sessionFromRow);
+
+    const logRows = this.all("SELECT * FROM space_message ORDER BY space_id, seq");
+    const logs = Array.from(groupBy(logRows, "space_id").entries()).map(([space, entries]) => [
+      space,
+      entries.map(logEntryFromRow) as SpaceLogEntry[]
+    ]) as [ObjRef, SpaceLogEntry[]][];
+
+    const snapshots = this.all("SELECT * FROM space_snapshot ORDER BY space_id, seq").map(snapshotFromRow);
+    const parkedTasks = this.all("SELECT * FROM task ORDER BY id").map(taskFromRow);
+    const meta = Object.fromEntries(this.all("SELECT key, value FROM world_meta").map((row) => [String(row.key), String(row.value ?? "")]));
+
+    return {
+      version: 1,
+      taskCounter: Number(meta.taskCounter ?? 1),
+      parkedTaskCounter: Number(meta.parkedTaskCounter ?? 1),
+      sessionCounter: Number(meta.sessionCounter ?? 1),
+      objects,
+      sessions,
+      logs,
+      snapshots,
+      parkedTasks
+    };
   }
 
-  save(_world: SerializedWorld): void {
-    // Whole-world save is intentionally unsupported on CF. The runtime uses
-    // per-object methods inside transaction()/savepoint() blocks. If something
-    // calls this, that's a bug in the routing — fail loudly so it surfaces.
-    throw wooError("E_NOT_SUPPORTED", "CF backend uses incremental ObjectRepository; whole-world save() is not implemented");
+  save(world: SerializedWorld): void {
+    // createWorld() calls world.persist() once after bootstrap, BEFORE it
+    // calls enableIncrementalPersistence(). At that moment the runtime takes
+    // the WorldRepository.save() path, not the per-object path — so CF must
+    // actually persist the bootstrap state here. We do it by clearing the
+    // tables and re-inserting via the per-object methods, all in one
+    // transaction. After this, enableIncrementalPersistence() takes over and
+    // subsequent writes go through per-object methods directly.
+    this.transaction(() => {
+      // Drop everything; we're about to replace it.
+      for (const table of [
+        "world_meta",
+        "task",
+        "space_snapshot",
+        "space_message",
+        "session",
+        "event_schema",
+        "content",
+        "child",
+        "verb",
+        "property_version",
+        "property_value",
+        "property_def",
+        "object"
+      ]) {
+        this.sql.exec(`DELETE FROM ${table}`);
+      }
+
+      this.saveMeta("version", String(world.version));
+      this.saveMeta("taskCounter", String(world.taskCounter));
+      this.saveMeta("parkedTaskCounter", String(world.parkedTaskCounter));
+      this.saveMeta("sessionCounter", String(world.sessionCounter));
+
+      for (const obj of world.objects) this.saveObject(obj);
+      for (const session of world.sessions) this.saveSession(session);
+
+      for (const [, entries] of world.logs) {
+        for (const entry of entries) {
+          this.sql.exec(
+            "INSERT INTO space_message(space_id, seq, ts, actor, message, applied_ok, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            entry.space, entry.seq, entry.ts, entry.actor,
+            stringifyValue(entry.message as unknown as WooValue),
+            entry.applied_ok ? 1 : 0,
+            entry.error ? stringifyValue(entry.error as unknown as WooValue) : null
+          );
+        }
+      }
+
+      for (const snapshot of world.snapshots) this.saveSpaceSnapshot(snapshot);
+      for (const task of world.parkedTasks) this.saveTask(task);
+    });
   }
 
   latestSpaceSnapshot(space: ObjRef): SpaceSnapshotRecord | null {
@@ -679,6 +793,15 @@ function logEntryFromRow(row: Row): SpaceLogEntry {
     applied_ok: Boolean(row.applied_ok),
     error: row.error ? (parseValue(String(row.error)) as unknown as ErrorValue) : undefined
   };
+}
+
+function groupBy(rows: Row[], key: string): Map<string, Row[]> {
+  const groups = new Map<string, Row[]>();
+  for (const row of rows) {
+    const value = String(row[key]);
+    groups.set(value, [...(groups.get(value) ?? []), row]);
+  }
+  return groups;
 }
 
 function stringifyValue(value: WooValue): string {
