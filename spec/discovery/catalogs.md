@@ -253,12 +253,12 @@ Implementation rule: source code must not contain catalog-specific install polic
 The DSL source per verb is what enables the recompile-in-importing-world discipline. The first-party `@local` manifests in this repository may additionally include:
 
 ```jsonc
-"implementation": { "kind": "native", "handler": "chat_say" }
+"implementation": { "kind": "native", "handler": "save_scene" }
 // or
 "implementation": { "kind": "fixture", "name": "set_control" }
 ```
 
-Those implementation hints are trusted-local only. They are not part of the portable public catalog contract and exist so the first-light demos can be installed from manifests before the DSL can express every behavior.
+Those implementation hints are trusted-local only. They are not part of the portable public catalog contract and exist so first-light demos can be installed from manifests before the DSL can express every behavior. The chat catalog is the first demo to remove those hints from its user-facing verbs and install from source alone.
 
 ---
 

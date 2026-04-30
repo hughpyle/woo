@@ -89,7 +89,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
 
     return {
       version: 1,
-      taskCounter: Number(meta.taskCounter ?? 1),
+      objectCounter: Number(meta.objectCounter ?? meta.taskCounter ?? 1),
       parkedTaskCounter: Number(meta.parkedTaskCounter ?? 1),
       sessionCounter: Number(meta.sessionCounter ?? 1),
       objects,
@@ -122,7 +122,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
 
       const insertMeta = this.db.prepare("INSERT INTO world_meta(key, value) VALUES (?, ?)");
       insertMeta.run("version", String(world.version));
-      insertMeta.run("taskCounter", String(world.taskCounter));
+      insertMeta.run("objectCounter", String(world.objectCounter));
       insertMeta.run("parkedTaskCounter", String(world.parkedTaskCounter));
       insertMeta.run("sessionCounter", String(world.sessionCounter));
 

@@ -31,6 +31,7 @@ Builtins are functions, not verbs. They are registered with stable indices for t
 ### 19.4 Object
 
 `create(parent, owner)`, `recycle(obj)`, `chparent(obj, new_parent)`,  
+`has_flag(obj, name)`,  
 `compile_verb(obj, name, source, options)`,  
 `set_verb_code(obj, name, source, expected_version, options)`,  
 `set_verb_info(obj, name, expected_version, info)`, `verb_info`, `verb_args`,  
@@ -42,7 +43,23 @@ Builtins are functions, not verbs. They are registered with stable indices for t
 The authoring-facing contract for compile/install, expected-version conflicts,
 and diagnostics is in [../authoring/minimal-ide.md](../authoring/minimal-ide.md).
 
-`create()` is subject to a per-task creation budget (default 100 per verb invocation, raises `E_QUOTA`) and the per-owner storage quotas in [permissions.md §11.7](permissions.md#117-storage-quotas-and-accounting). It costs 50 ticks per call (host instantiation is not free). The owner's `created` list (a property convention on `$root_object`) is appended automatically; ops can iterate it for per-owner inventory.
+`create(parent, owner)` creates a new persistent object with the supplied parent
+and owner. In a sequenced call, the new object's anchor is the current space; in
+a direct/off-space call, the anchor is null unless a later profile adds an
+explicit placement argument. It costs 50 ticks per call (host instantiation is
+not free).
+
+Full v1 `create()` is subject to a per-task creation budget (default 100 per
+verb invocation, raises `E_QUOTA`) and the per-owner storage quotas in
+[permissions.md §11.7](permissions.md#117-storage-quotas-and-accounting). The
+owner's `created` list (a property convention on `$root_object`) is appended
+automatically; ops can iterate it for per-owner inventory. The v0.5
+implementation enforces the parent/owner/anchor/tick-cost semantics; quota
+accounting and the `created` list are still pending.
+
+`has_flag(obj, name)` returns whether an object metadata flag is true. It is for
+ordinary behavior checks such as wizard bypasses; it is not a substitute for the
+permission system.
 
 There is intentionally no "list all objects in the world" builtin. Instance enumeration is by class via recursive `children($class)`; per-owner enumeration is by convention (creator maintains a list). Ops-level host enumeration uses the runtime's management plane, not the runtime API.
 

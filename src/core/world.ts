@@ -81,7 +81,7 @@ type BehaviorSavepoint = {
   sessions: Map<string, Session>;
   snapshots: SpaceSnapshotRecord[];
   parkedTasks: Map<string, ParkedTaskRecord>;
-  taskCounter: number;
+  objectCounter: number;
   parkedTaskCounter: number;
   sessionCounter: number;
   guestFreePool: Set<ObjRef>;
@@ -110,7 +110,7 @@ export class WooWorld {
   parkedTasks = new Map<string, ParkedTaskRecord>();
   private nativeHandlers = new Map<string, NativeHandler>();
   private idempotency = new Map<string, { at: number; frame: AppliedFrame | ErrorFrame }>();
-  private taskCounter = 1;
+  private objectCounter = 1;
   private parkedTaskCounter = 1;
   private sessionCounter = 1;
   private persistencePaused = 0;
@@ -867,20 +867,16 @@ export class WooWorld {
     };
   }
 
-  createTask(space: ObjRef, title: string, description: string, parentTask: ObjRef | null): ObjRef {
-    const id = `task_${this.taskCounter++}`;
+  createRuntimeObject(parent: ObjRef, owner: ObjRef, anchor: ObjRef | null = null): ObjRef {
+    this.object(parent);
+    this.object(owner);
+    if (anchor) this.object(anchor);
+    let id: ObjRef;
+    do {
+      id = `obj_${this.objectCounter++}`;
+    } while (this.objects.has(id));
+    this.createObject({ id, parent, owner, anchor });
     this.persistCounters();
-    this.createObject({ id, name: title, parent: "$task", owner: "$wiz", anchor: space });
-    this.setProp(id, "title", title);
-    this.setProp(id, "description", description);
-    this.setProp(id, "parent_task", parentTask);
-    this.setProp(id, "subtasks", []);
-    this.setProp(id, "status", "open");
-    this.setProp(id, "assignee", null);
-    this.setProp(id, "requirements", []);
-    this.setProp(id, "artifacts", []);
-    this.setProp(id, "messages", []);
-    this.setProp(id, "space", space);
     return id;
   }
 
@@ -1006,7 +1002,7 @@ export class WooWorld {
   exportWorld(): SerializedWorld {
     return {
       version: 1,
-      taskCounter: this.taskCounter,
+      objectCounter: this.objectCounter,
       parkedTaskCounter: this.parkedTaskCounter,
       sessionCounter: this.sessionCounter,
       objects: Array.from(this.objects.values()).map((obj) => this.serializeObject(obj)),
@@ -1055,7 +1051,7 @@ export class WooWorld {
       for (const task of serialized.parkedTasks ?? []) {
         this.parkedTasks.set(task.id, cloneValue(task as unknown as WooValue) as unknown as ParkedTaskRecord);
       }
-      this.taskCounter = serialized.taskCounter;
+      this.objectCounter = serialized.objectCounter ?? serialized.taskCounter ?? 1;
       this.parkedTaskCounter = serialized.parkedTaskCounter ?? 1;
       this.sessionCounter = serialized.sessionCounter;
       this.rebuildGuestPool();
@@ -1206,7 +1202,7 @@ export class WooWorld {
       this.persistenceDirty = true;
       return;
     }
-    repo.saveMeta("taskCounter", String(this.taskCounter));
+    repo.saveMeta("objectCounter", String(this.objectCounter));
     repo.saveMeta("parkedTaskCounter", String(this.parkedTaskCounter));
     repo.saveMeta("sessionCounter", String(this.sessionCounter));
   }
@@ -1230,7 +1226,7 @@ export class WooWorld {
       for (const task of this.parkedTasks.values()) repo.saveTask(task);
       for (const snapshot of this.snapshots) repo.saveSpaceSnapshot(snapshot);
       repo.saveMeta("version", "1");
-      repo.saveMeta("taskCounter", String(this.taskCounter));
+      repo.saveMeta("objectCounter", String(this.objectCounter));
       repo.saveMeta("parkedTaskCounter", String(this.parkedTaskCounter));
       repo.saveMeta("sessionCounter", String(this.sessionCounter));
     });
@@ -1924,7 +1920,7 @@ export class WooWorld {
       sessions: new Map(Array.from(this.sessions.entries()).map(([id, session]) => [id, this.cloneSession(session)])),
       snapshots: cloneValue(this.snapshots as unknown as WooValue) as unknown as SpaceSnapshotRecord[],
       parkedTasks: new Map(Array.from(this.parkedTasks.entries()).map(([id, task]) => [id, cloneValue(task as unknown as WooValue) as unknown as ParkedTaskRecord])),
-      taskCounter: this.taskCounter,
+      objectCounter: this.objectCounter,
       parkedTaskCounter: this.parkedTaskCounter,
       sessionCounter: this.sessionCounter,
       guestFreePool: new Set(this.guestFreePool)
@@ -1936,7 +1932,7 @@ export class WooWorld {
     this.sessions = new Map(Array.from(savepoint.sessions.entries()).map(([id, session]) => [id, this.cloneSession(session)]));
     this.snapshots = cloneValue(savepoint.snapshots as unknown as WooValue) as unknown as SpaceSnapshotRecord[];
     this.parkedTasks = new Map(Array.from(savepoint.parkedTasks.entries()).map(([id, task]) => [id, cloneValue(task as unknown as WooValue) as unknown as ParkedTaskRecord]));
-    this.taskCounter = savepoint.taskCounter;
+    this.objectCounter = savepoint.objectCounter;
     this.parkedTaskCounter = savepoint.parkedTaskCounter;
     this.sessionCounter = savepoint.sessionCounter;
     this.guestFreePool = new Set(savepoint.guestFreePool);
@@ -1995,7 +1991,6 @@ export class WooWorld {
       const actor = assertObj(args[0] ?? ctx.actor);
       return actor === this.object(ctx.thisObj).owner;
     });
-    this.nativeHandlers.set("conversational_can_be_attached_by", () => true);
     this.nativeHandlers.set("add_feature", (ctx, args) => this.addFeature(ctx.thisObj, assertObj(args[0]), ctx.actor, ctx.observations));
     this.nativeHandlers.set("remove_feature", (ctx, args) => this.removeFeature(ctx.thisObj, assertObj(args[0]), ctx.actor, ctx.observations));
     this.nativeHandlers.set("has_feature", (ctx, args) => this.featureList(ctx.thisObj).includes(assertObj(args[0])));
@@ -2046,7 +2041,6 @@ export class WooWorld {
         return this.objects.has("$failed_match") ? "$failed_match" : null;
       }
     });
-    this.nativeHandlers.set("parse_chat_command", (_ctx, args) => ({ text: assertString(args[0] ?? ""), actor: assertObj(args[1] ?? "#-1") }));
     this.nativeHandlers.set("preview_control", (ctx, args) => {
       const target = assertObj(args[0]);
       const name = assertString(args[1]);
@@ -2062,44 +2056,6 @@ export class WooWorld {
       ctx.observe({ type: "cursor", source: ctx.thisObj, actor: ctx.actor, x, y, sent_at: Date.now() });
       return true;
     });
-    this.nativeHandlers.set("chat_say", (ctx, args) => {
-      const text = assertString(args[0] ?? "");
-      if (!text.trim()) throw wooError("E_INVARG", "say requires text");
-      ctx.observe({ type: "said", source: ctx.thisObj, actor: ctx.actor, text, ts: Date.now() });
-      return true;
-    });
-    this.nativeHandlers.set("chat_emote", (ctx, args) => {
-      const text = assertString(args[0] ?? "");
-      if (!text.trim()) throw wooError("E_INVARG", "emote requires text");
-      ctx.observe({ type: "emoted", source: ctx.thisObj, actor: ctx.actor, text, ts: Date.now() });
-      return true;
-    });
-    this.nativeHandlers.set("chat_tell", (ctx, args) => {
-      const to = assertObj(args[0]);
-      const text = assertString(args[1] ?? "");
-      if (!text.trim()) throw wooError("E_INVARG", "tell requires text");
-      ctx.observe({ type: "told", source: ctx.thisObj, from: ctx.actor, to, text, ts: Date.now() });
-      return true;
-    });
-    this.nativeHandlers.set("chat_look", (ctx) => ({
-      description: this.getProp(ctx.thisObj, "description"),
-      present_actors: this.chatPresent(ctx.thisObj),
-      contents: Array.from(this.object(ctx.thisObj).contents)
-    }));
-    this.nativeHandlers.set("chat_who", (ctx) => this.chatPresent(ctx.thisObj));
-    this.nativeHandlers.set("chat_enter", (ctx) => {
-      const actor = ctx.actor;
-      const wasPresent = this.hasPresence(actor, ctx.thisObj);
-      this.ensurePresence(actor, ctx.thisObj);
-      if (!wasPresent) ctx.observe({ type: "entered", source: ctx.thisObj, actor, ts: Date.now() });
-      return this.chatPresent(ctx.thisObj);
-    });
-    this.nativeHandlers.set("chat_leave", (ctx) => {
-      const actor = ctx.actor;
-      if (this.removePresence(actor, ctx.thisObj)) ctx.observe({ type: "left", source: ctx.thisObj, actor, ts: Date.now() });
-      return this.chatPresent(ctx.thisObj);
-    });
-    this.nativeHandlers.set("chat_command", (ctx, args) => this.runChatCommand(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("start_loop", (ctx, args) => {
       const slot = assertObj(args[0]);
       this.setProp(slot, "playing", true);
@@ -2165,177 +2121,11 @@ export class WooWorld {
       ctx.observe({ type: "transport_stopped", source: ctx.space, target: "drum_1" });
       return true;
     });
-    this.nativeHandlers.set("create_task", (ctx, args) => {
-      const title = assertString(args[0]);
-      const description = assertString(args[1] ?? "");
-      const task = this.createTask(ctx.space, title, description, null);
-      const roots = this.getProp(ctx.space, "root_tasks");
-      if (Array.isArray(roots)) this.setProp(ctx.space, "root_tasks", [...roots, task]);
-      ctx.observe({ type: "task_created", source: ctx.space, task, parent: null, title });
-      return task;
-    });
-    this.nativeHandlers.set("add_subtask", (ctx, args) => {
-      const title = assertString(args[0]);
-      const description = assertString(args[1] ?? "");
-      const task = this.createTask(ctx.space, title, description, ctx.thisObj);
-      const subtasks = this.getProp(ctx.thisObj, "subtasks");
-      const next = Array.isArray(subtasks) ? [...subtasks, task] : [task];
-      this.setProp(ctx.thisObj, "subtasks", next);
-      ctx.observe({ type: "task_created", source: ctx.space, task, parent: ctx.thisObj, title });
-      ctx.observe({ type: "subtask_added", source: ctx.space, parent: ctx.thisObj, child: task, index: next.length - 1 });
-      return task;
-    });
-    this.nativeHandlers.set("move_task", (ctx, args) => this.moveTask(ctx, args));
-    this.nativeHandlers.set("claim_task", (ctx) => this.claimTask(ctx));
-    this.nativeHandlers.set("release_task", (ctx) => {
-      const assignee = this.getProp(ctx.thisObj, "assignee");
-      if (assignee !== ctx.actor && !this.object(ctx.actor).flags.wizard) throw wooError("E_PERM", "only assignee or wizard can release");
-      this.setProp(ctx.thisObj, "assignee", null);
-      if (this.getProp(ctx.thisObj, "status") !== "done") this.setProp(ctx.thisObj, "status", "open");
-      ctx.observe({ type: "task_released", source: ctx.space, task: ctx.thisObj });
-      return ctx.thisObj;
-    });
-    this.nativeHandlers.set("set_status_task", (ctx, args) => {
-      const status = assertString(args[0]);
-      const allowed = new Set(["open", "claimed", "in_progress", "blocked", "done"]);
-      if (!allowed.has(status)) throw wooError("E_INVARG", "invalid task status", status);
-      const assignee = this.getProp(ctx.thisObj, "assignee");
-      if (status !== "done" && assignee !== null && assignee !== ctx.actor && !this.object(ctx.actor).flags.wizard) {
-        throw wooError("E_PERM", "only assignee or wizard can set status");
-      }
-      const from = assertString(this.getProp(ctx.thisObj, "status"));
-      this.setProp(ctx.thisObj, "status", status);
-      ctx.observe({ type: "status_changed", source: ctx.space, task: ctx.thisObj, from, to: status });
-      if (status === "done") {
-        const requirements = this.getProp(ctx.thisObj, "requirements");
-        const unchecked = Array.isArray(requirements)
-          ? requirements
-              .map((item) => assertMap(item))
-              .filter((item) => item.checked !== true)
-              .map((item) => item.text as WooValue)
-          : [];
-        if (unchecked.length > 0) ctx.observe({ type: "done_premature", source: ctx.space, task: ctx.thisObj, unchecked });
-      }
-      return status;
-    });
-    this.nativeHandlers.set("add_requirement", (ctx, args) => {
-      const text = assertString(args[0]);
-      const requirements = this.getProp(ctx.thisObj, "requirements");
-      const next = Array.isArray(requirements) ? [...requirements, { text, checked: false }] : [{ text, checked: false }];
-      this.setProp(ctx.thisObj, "requirements", next);
-      ctx.observe({ type: "requirement_added", source: ctx.space, task: ctx.thisObj, index: next.length - 1, text });
-      return next.length - 1;
-    });
-    this.nativeHandlers.set("check_requirement", (ctx, args) => {
-      const index = Number(args[0]);
-      const checked = Boolean(args[1]);
-      const requirements = this.getProp(ctx.thisObj, "requirements");
-      if (!Array.isArray(requirements) || index < 0 || index >= requirements.length) throw wooError("E_RANGE", "requirement index out of range", index);
-      const next = requirements.map((item, i) => (i === index ? { ...assertMap(item), checked } : item));
-      this.setProp(ctx.thisObj, "requirements", next);
-      ctx.observe({ type: "requirement_checked", source: ctx.space, task: ctx.thisObj, index, checked });
-      return checked;
-    });
-    this.nativeHandlers.set("add_message", (ctx, args) => {
-      const body = assertString(args[0]);
-      const messages = this.getProp(ctx.thisObj, "messages");
-      const msg = { actor: ctx.actor, ts: Date.now(), body };
-      this.setProp(ctx.thisObj, "messages", Array.isArray(messages) ? [...messages, msg] : [msg]);
-      ctx.observe({ type: "message_added", source: ctx.space, task: ctx.thisObj, actor: ctx.actor, body, ts: msg.ts });
-      return msg as WooValue;
-    });
-    this.nativeHandlers.set("add_artifact", (ctx, args) => {
-      const ref = assertMap(args[0]);
-      if (typeof ref.kind !== "string" || typeof ref.ref !== "string") throw wooError("E_INVARG", "artifact needs kind and ref");
-      const artifact = { ...ref, added_by: ctx.actor, added_at: Date.now() };
-      const artifacts = this.getProp(ctx.thisObj, "artifacts");
-      this.setProp(ctx.thisObj, "artifacts", Array.isArray(artifacts) ? [...artifacts, artifact] : [artifact]);
-      ctx.observe({ type: "artifact_attached", source: ctx.space, task: ctx.thisObj, ref: artifact as WooValue });
-      return artifact as WooValue;
-    });
-  }
-
-  private claimTask(ctx: CallContext): WooValue {
-    const current = this.getProp(ctx.thisObj, "assignee");
-    if (current === ctx.actor) return ctx.thisObj;
-    if (current !== null) throw wooError("E_CONFLICT", "task already claimed", current);
-    this.setProp(ctx.thisObj, "assignee", ctx.actor);
-    this.setProp(ctx.thisObj, "status", "claimed");
-    ctx.observe({ type: "task_claimed", source: ctx.space, task: ctx.thisObj, actor: ctx.actor });
-    return ctx.thisObj;
-  }
-
-  private moveTask(ctx: CallContext, args: WooValue[]): WooValue {
-    const parent = args[0] === null ? null : assertObj(args[0]);
-    const index = Number(args[1]);
-    if (parent === ctx.thisObj || (parent && this.descendants(ctx.thisObj).has(parent))) throw wooError("E_RECMOVE", "recursive task move");
-    if (parent && this.getProp(parent, "space") !== ctx.space) throw wooError("E_INVARG", "cross-taskspace move is not supported");
-    const fromParent = this.getProp(ctx.thisObj, "parent_task") as ObjRef | null;
-    const sourceListRef = fromParent ?? ctx.space;
-    const sourceProp = fromParent ? "subtasks" : "root_tasks";
-    const targetListRef = parent ?? ctx.space;
-    const targetProp = parent ? "subtasks" : "root_tasks";
-    const sourceList = this.getProp(sourceListRef, sourceProp);
-    const targetList = sourceListRef === targetListRef ? sourceList : this.getProp(targetListRef, targetProp);
-    if (!Array.isArray(sourceList) || !Array.isArray(targetList)) throw wooError("E_INVARG", "invalid task hierarchy");
-    const without = sourceList.filter((id) => id !== ctx.thisObj);
-    const targetBase = sourceListRef === targetListRef ? without : targetList.filter((id) => id !== ctx.thisObj);
-    if (index < 0 || index > targetBase.length) throw wooError("E_RANGE", "task move index out of range", index);
-    const targetNext = [...targetBase.slice(0, index), ctx.thisObj, ...targetBase.slice(index)];
-    this.setProp(sourceListRef, sourceProp, without);
-    this.setProp(targetListRef, targetProp, targetNext);
-    this.setProp(ctx.thisObj, "parent_task", parent);
-    ctx.observe({ type: "task_moved", source: ctx.space, task: ctx.thisObj, from_parent: fromParent, to_parent: parent, index });
-    return ctx.thisObj;
   }
 
   private chatPresent(room: ObjRef): WooValue[] {
     const present = this.getProp(room, "subscribers");
     return Array.isArray(present) ? [...present] : [];
-  }
-
-  private runChatCommand(ctx: CallContext, rawText: string): WooValue {
-    const text = rawText.trim();
-    if (!text) throw wooError("E_INVARG", "empty chat command");
-    if (text === "/who" || text === "who") return this.chatPresent(ctx.thisObj);
-    if (text === "/look" || text === "look") {
-      return {
-        description: this.getProp(ctx.thisObj, "description"),
-        present_actors: this.chatPresent(ctx.thisObj),
-        contents: Array.from(this.object(ctx.thisObj).contents)
-      };
-    }
-    if (text.startsWith("/me ")) {
-      ctx.observe({ type: "emoted", source: ctx.thisObj, actor: ctx.actor, text: text.slice(4).trim(), ts: Date.now() });
-      return true;
-    }
-    if (text.startsWith(":")) {
-      ctx.observe({ type: "emoted", source: ctx.thisObj, actor: ctx.actor, text: text.slice(1).trim(), ts: Date.now() });
-      return true;
-    }
-    if (text.startsWith("/tell ")) {
-      const rest = text.slice("/tell ".length).trim();
-      const split = rest.indexOf(" ");
-      if (split <= 0) throw wooError("E_INVARG", "tell needs recipient and text");
-      const to = rest.slice(0, split) as ObjRef;
-      const body = rest.slice(split + 1).trim();
-      ctx.observe({ type: "told", source: ctx.thisObj, from: ctx.actor, to, text: body, ts: Date.now() });
-      return true;
-    }
-    ctx.observe({ type: "said", source: ctx.thisObj, actor: ctx.actor, text, ts: Date.now() });
-    return true;
-  }
-
-  private descendants(task: ObjRef): Set<ObjRef> {
-    const out = new Set<ObjRef>();
-    const stack = [...((this.getProp(task, "subtasks") as WooValue[]) ?? [])] as ObjRef[];
-    while (stack.length) {
-      const id = stack.pop()!;
-      out.add(id);
-      const subtasks = this.getProp(id, "subtasks");
-      if (Array.isArray(subtasks)) stack.push(...(subtasks as ObjRef[]));
-    }
-    return out;
   }
 
   private drumPattern(): Record<string, boolean[]> {

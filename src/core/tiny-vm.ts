@@ -103,7 +103,7 @@ const DEFAULT_TICKS = 100_000;
 const DEFAULT_MEMORY = 4 * 1024 * 1024;
 const DEFAULT_WALL_MS = 10_000;
 const MAX_VM_FRAMES = 128;
-const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs"];
+const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "has_flag"];
 
 export function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): WooValue {
   return runVmFrames([makeFrame(ctx, bytecode, args)]).result;
@@ -505,7 +505,7 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
         }
         case "BUILTIN": {
           const builtinArgs = popArgs(numeric(operand2, "builtin argc"));
-          push(callBuiltin(operand, builtinArgs));
+          push(callBuiltin(operand, builtinArgs, current));
           break;
         }
 
@@ -735,7 +735,7 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
     throw wooError("E_TYPE", "IN requires list or map haystack", haystack);
   }
 
-  function callBuiltin(nameOrIndex: WooValue | undefined, builtinArgs: WooValue[]): WooValue {
+  function callBuiltin(nameOrIndex: WooValue | undefined, builtinArgs: WooValue[], frame: VmFrame): WooValue {
     const name = typeof nameOrIndex === "number" ? BUILTIN_NAMES[nameOrIndex] : assertString(nameOrIndex ?? "");
     switch (name) {
       case "length": {
@@ -771,6 +771,21 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
         return Math.round(numeric(builtinArgs[0], "round argument"));
       case "abs":
         return Math.abs(numeric(builtinArgs[0], "abs argument"));
+      case "now":
+        return Date.now();
+      case "create": {
+        frame.ticksRemaining -= 45;
+        if (frame.ticksRemaining < 0) throw wooError("E_TICKS", "task exceeded tick budget");
+        const parent = assertObj(builtinArgs[0]);
+        const owner = builtinArgs[1] === undefined || builtinArgs[1] === null ? frame.ctx.actor : assertObj(builtinArgs[1]);
+        const anchor = frame.ctx.space === "#-1" ? null : frame.ctx.space;
+        return frame.ctx.world.createRuntimeObject(parent, owner, anchor);
+      }
+      case "has_flag": {
+        const obj = frame.ctx.world.object(assertObj(builtinArgs[0]));
+        const flag = assertString(builtinArgs[1]);
+        return (obj.flags as Record<string, boolean | undefined>)[flag] === true;
+      }
       default:
         throw wooError("E_INVARG", `unknown builtin: ${name}`);
     }
@@ -864,6 +879,7 @@ function hydrateVmFrame(world: CallContext["world"], frame: SerializedVmFrame, o
 }
 
 function tickWeight(op: string): number {
+  if (op === "BUILTIN") return 5;
   if (op === "GET_PROP" || op === "SET_PROP") return 5;
   if (op === "CALL_VERB" || op === "PASS" || op === "EMIT") return 10;
   if (op === "MAKE_LIST" || op === "MAKE_MAP" || op === "LIST_APPEND" || op === "MAP_SET" || op === "INDEX_SET" || op === "STR_CONCAT" || op === "STR_INTERP") return 5;

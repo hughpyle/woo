@@ -50,7 +50,9 @@ export type ParkedTaskRecord = {
 
 export type SerializedWorld = {
   version: 1;
-  taskCounter: number;
+  objectCounter: number;
+  /** Legacy v0.5 field; load paths accept it while older JSON/SQLite dumps exist. */
+  taskCounter?: number;
   parkedTaskCounter: number;
   sessionCounter: number;
   objects: SerializedObject[];
@@ -346,7 +348,7 @@ export class InMemoryObjectRepository implements ObjectRepository, WorldReposito
     if (this.objects.size === 0) return null;
     return {
       version: 1,
-      taskCounter: Number(this.meta.get("taskCounter") ?? 1),
+      objectCounter: Number(this.meta.get("objectCounter") ?? this.meta.get("taskCounter") ?? 1),
       parkedTaskCounter: Number(this.meta.get("parkedTaskCounter") ?? 1),
       sessionCounter: Number(this.meta.get("sessionCounter") ?? 1),
       objects: Array.from(this.objects.values()).map(cloneSerializedObject),
@@ -367,7 +369,7 @@ export class InMemoryObjectRepository implements ObjectRepository, WorldReposito
       this.counters.clear();
       this.meta.clear();
       this.meta.set("version", String(world.version));
-      this.meta.set("taskCounter", String(world.taskCounter));
+      this.meta.set("objectCounter", String(world.objectCounter));
       this.meta.set("parkedTaskCounter", String(world.parkedTaskCounter));
       this.meta.set("sessionCounter", String(world.sessionCounter));
       for (const obj of world.objects) this.objects.set(obj.id, cloneSerializedObject(obj));

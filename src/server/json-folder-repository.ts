@@ -7,7 +7,8 @@ type JsonFolderManifest = {
   format: "woo-json-folder";
   version: 1;
   partial: boolean;
-  taskCounter: number;
+  objectCounter: number;
+  taskCounter?: number;
   parkedTaskCounter?: number;
   sessionCounter: number;
   objects: Array<{ id: ObjRef; file: string }>;
@@ -39,7 +40,7 @@ export class JsonFolderWorldRepository implements WorldRepository {
 
     return {
       version: 1,
-      taskCounter: manifest.taskCounter,
+      objectCounter: manifest.objectCounter ?? manifest.taskCounter ?? 1,
       parkedTaskCounter: manifest.parkedTaskCounter ?? 1,
       sessionCounter: manifest.sessionCounter,
       objects: manifest.objects.map((item) => readJson<SerializedObject>(join(this.folder, item.file))),
@@ -89,7 +90,7 @@ export function dumpSerializedWorldToJsonFolder(world: SerializedWorld, folder: 
     format: "woo-json-folder",
     version: 1,
     partial: Boolean(objectIds),
-    taskCounter: world.taskCounter,
+    objectCounter: world.objectCounter,
     parkedTaskCounter: world.parkedTaskCounter,
     sessionCounter: world.sessionCounter,
     objects: [],

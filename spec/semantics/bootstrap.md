@@ -247,7 +247,10 @@ hints until the VM profile can express them directly.
 
 ### B4.3 `$taskspace` verbs
 
-`:create_task(title, description)` returning the new task ref. Body wraps `create($task, owner=actor)` and appends to `root_tasks`. Emits `task_created`.
+`:create_task(title, description)` returning the new task ref. Body is ordinary
+catalog source: `create($task, actor)`, set task properties, append to
+`root_tasks`, and emit `task_created`. Taskspace uses the generic `create`
+builtin; no task-specific native runtime handler is required.
 
 ### B4.4 `$task` verbs
 
@@ -256,8 +259,8 @@ hints until the VM profile can express them directly.
 | `:add_subtask(title, description)` | str, str | Creates a child task. Emits `subtask_added`. |
 | `:move(parent, index)` | obj \| null, int | Re-parent or reorder; emits `task_moved`. |
 | `:claim()` | — | Sets `assignee = actor`, status `claimed`. Emits `task_claimed`. |
-| `:release()` | — | Clears assignee, status `open`. Emits `task_released`. |
-| `:set_status(status)` | str | Sets status; on `done` with unchecked requirements, also emits `done_premature`. Emits `status_changed`. |
+| `:release()` | — | Clears assignee, status `open` unless already `done`. Emits `task_released`. |
+| `:set_status(status)` | str | Sets status; non-`done` changes on claimed tasks require assignee or wizard. On `done` with unchecked requirements, also emits `done_premature`. Emits `status_changed`. |
 | `:add_requirement(text)` | str | Appends to requirements. Emits `requirement_added`. |
 | `:check_requirement(index, checked)` | int, bool | Updates checked. Emits `requirement_checked`. |
 | `:add_message(body)` | str | Appends to messages. Emits `message_added`. |
@@ -294,11 +297,11 @@ All direct-callable (rxd). Observations are live-only by route per [chat DESIGN.
 | `:say(text)` | str | Emits `said`. |
 | `:emote(text)` | str | Emits `emoted`. |
 | `:tell(recipient, text)` | obj, str | Emits `told` to `recipient`. |
-| `:look()` | — | Returns `{description, contents, present_actors}`. |
+| `:look()` | — | Returns `{description, present_actors}` in the current installable chat catalog. Richer room contents are deferred to the full `$match`/room-surface pass. |
 | `:who()` | — | Returns the present-actor list. |
 | `:enter(actor?)` | obj? | Adds presence; emits `entered`. |
 | `:leave(actor?)` | obj? | Removes presence; emits `left`. |
-| `:command(text)` | str | Free-text dispatcher. Calls `$match:parse_command`, lowers per-verb, emits `huh` on parse failure. |
+| `:command(text)` | str | Current installable-source fallback calls `:say(text)`. Full free-text dispatch via `$match:parse_command` is the next parser milestone. |
 | `:can_be_attached_by(actor)` | obj | Default policy: `actor == this.owner || is_wizard(actor)`. Override to widen. |
 
 ### B5.3 `$conversational` schemas

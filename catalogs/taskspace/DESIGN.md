@@ -47,7 +47,7 @@ ordering.
 
 ## Calls
 
-- `task:create(title, description)`
+- `taskspace:create_task(title, description)`
 - `task:add_subtask(title, description)`
 - `task:move(parent, index)`
 - `task:claim()`
@@ -64,6 +64,10 @@ The exact verb names may change. The important requirements are:
 - breakdown into subtasks is a first-class operation
 - each structural or status change is represented as a sequenced call through
   the taskspace
+
+These verbs are catalog-authored source, not runtime-native handlers. The only
+new runtime primitive the app needs is generic `create(parent, owner)` for
+minting persistent objects.
 
 ## Observations
 
@@ -187,9 +191,11 @@ claiming is first-come, first-served.
 
 - `status` must be one of the enum values: `open`, `claimed`, `in_progress`,
   `blocked`, `done`. Other strings raise `E_INVARG`.
-- The runtime does not forbid any transition. Any-to-any is permitted.
-  `claimed` is normally set by `:claim`; setting it explicitly via
-  `:set_status` is permitted but unusual.
+- The runtime does not forbid any transition. Any-to-any is permitted, but
+  non-`done` changes on a claimed task require the assignee or a wizard. Marking
+  `done` is deliberately relaxed so anyone can close noisy test/demo tasks.
+  `claimed` is normally set by `:claim`; setting it explicitly via `:set_status`
+  is permitted but unusual.
 - Soft-DoD: on transition to `done` with unchecked requirements, emits
   `done_premature` *in addition to* `status_changed`. The status change still
   applies. (See "Definition of Done" above.)
@@ -269,7 +275,7 @@ and the UI falls back to displaying `ref` literally.
 | Verb                      | Who can call                         |
 |---|---|
 | `:create_task`, `:add_subtask` | Any actor with presence.        |
-| `:move`                   | Current assignee, or wizard.         |
+| `:move`                   | Any actor with presence in this demo. |
 | `:claim`                  | Any actor with presence (success depends on current assignee). |
 | `:release`                | Current assignee, or wizard.         |
 | `:set_assignee`           | Wizard-only.                         |

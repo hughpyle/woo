@@ -14,7 +14,7 @@ function authedWorld() {
   return { world, session, actor: session.actor };
 }
 
-function nativeVerb(name: string, native = "chat_who", owner = "$wiz"): VerbDef {
+function nativeVerb(name: string, native = "describe", owner = "$wiz"): VerbDef {
   return {
     kind: "native",
     name,

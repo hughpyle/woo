@@ -117,7 +117,7 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
 
     return {
       version: 1,
-      taskCounter: Number(meta.taskCounter ?? 1),
+      objectCounter: Number(meta.objectCounter ?? meta.taskCounter ?? 1),
       parkedTaskCounter: Number(meta.parkedTaskCounter ?? 1),
       sessionCounter: Number(meta.sessionCounter ?? 1),
       objects,
@@ -157,7 +157,7 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
       }
 
       this.saveMeta("version", String(world.version));
-      this.saveMeta("taskCounter", String(world.taskCounter));
+      this.saveMeta("objectCounter", String(world.objectCounter));
       this.saveMeta("parkedTaskCounter", String(world.parkedTaskCounter));
       this.saveMeta("sessionCounter", String(world.sessionCounter));
 

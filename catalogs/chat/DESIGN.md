@@ -13,7 +13,7 @@ This is the demo that retires the question "do feature objects pull their weight
 - Two or more actors connected to a shared room.
 - Free-text input bar; output is a chronological text feed.
 - Presence list visible.
-- `:say`, `:emote`, `:tell` (directed), `:look`, `:who` callable from the input via `$match:parse_command`.
+- `:say`, `:emote`, `:tell` (directed), `:look`, `:who` callable from the input. The first installable slice lowers slash commands client-side; the full `$match:parse_command` pipeline remains the text-command target.
 - Enter/exit notifications when actors join or leave.
 - A "join taskspace as room" mode where the same chat client renders against `the_taskspace` instead of a standalone `$chatroom`. Same verbs, same observations.
 
@@ -27,7 +27,7 @@ The chat verbs use the **direct live interaction** pattern from [core.md §C13](
 | `:tell` | direct | none — delivered only to recipient |
 | `:look` / `:who` | direct (read) | none |
 | `:enter` / `:leave` | direct | session/presence (persistent state on `$actor.presence_in` and `$space.subscribers`) |
-| `:command` | direct dispatcher | depends on parsed verb |
+| `:command` | direct dispatcher | currently lowers to `:say`; full `$match` dispatch is deferred |
 
 Because every row routes directly, every observation these verbs emit is live-only by [events.md §12.6](../../spec/semantics/events.md#126-observation-durability-follows-invocation-route): pushed to subscribers, never stored. A late-joining client sees no scrollback. This matches MOO's `notify()` semantics.
 
@@ -51,11 +51,13 @@ A feature object (per [features.md](../../spec/semantics/features.md)) carrying 
 | `:say(text)` | str | Public utterance. Emits `said {actor, text}` to subscribers (live; not stored). |
 | `:emote(text)` | str | Third-person action. Emits `emoted {actor, text}`. |
 | `:tell(recipient, text)` | obj, str | Directed message; emits `told {from: actor, to: recipient, text}` to recipient only. |
-| `:look()` rxd | — | Returns `{description, contents, present_actors}`. |
+| `:look()` rxd | — | Returns `{description, present_actors}`. |
 | `:who()` rxd | — | Returns the present-actor list. |
 | `:enter(actor?)` | obj? | Adds actor (defaults `actor`) to subscribers and to its `presence_in`. Emits `entered {actor}`. |
 | `:leave(actor?)` | obj? | Removes presence. Emits `left {actor}`. |
-| `:command(text)` | str | Free-text dispatch: calls `$match:parse_command(text, actor)`, then dispatches the parsed verb on the parsed dobj (or on `this` if no dobj). On failed parse, emits `huh {actor, text}`. |
+| `:command(text)` | str | Installable-source fallback: calls `this:say(text)`. The full free-text dispatcher remains the next `$match` milestone. |
+
+The current manifest intentionally keeps `$conversational` source-only: these verbs compile during catalog install without trusted native implementation hints. That is the first platform proof. `$match` is still present as a scaffold, but full command parsing and feature-aware verb matching are deferred until the DSL/runtime exposes the necessary matching primitives.
 
 Inside each verb body: `this` = the consumer space (the room being talked in), `definer` = the `$conversational` feature, `progr` = the feature's owner. Observations are emitted to `this.subscribers`, not to the feature's own subscribers (which would be empty).
 
