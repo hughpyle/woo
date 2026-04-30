@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { compileVerb, definePropertyVersioned, installVerb } from "../src/core/authoring";
-import { bootstrap, createWorld, createWorldFromSerialized, scopeSerializedWorldToHost } from "../src/core/bootstrap";
+import { bootstrap, createWorld, createWorldFromSerialized, nonEmptyHostScopedWorld, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
 import type { Message, VerbDef } from "../src/core/types";
 
@@ -138,6 +138,19 @@ describe("woo core", () => {
     expect(task).toMatch(/^obj_the_taskspace_/);
     expect(cluster.object(task).parent).toBe("$task");
     expect(cluster.objectRoutes()).toContainEqual({ id: task, host: "the_taskspace", anchor: "the_taskspace" });
+  });
+
+  it("treats stored worlds without a host slice as unusable for cluster boot", () => {
+    const full = createWorld().exportWorld();
+    const stale = {
+      ...full,
+      objects: full.objects.map((obj) => obj.id === "the_dubspace"
+        ? { ...obj, properties: obj.properties.filter(([name]) => name !== "host_placement") }
+        : obj)
+    };
+
+    expect(nonEmptyHostScopedWorld(stale, "the_dubspace")).toBeNull();
+    expect(nonEmptyHostScopedWorld(full, "the_dubspace")?.objects.map((obj) => obj.id)).toContain("the_dubspace");
   });
 
   it("can prune a full serialized world to one host slice", () => {

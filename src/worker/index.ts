@@ -102,7 +102,11 @@ async function forwardToHost(env: Env, host: string, request: Request): Promise<
   headers.set("x-woo-host-key", host);
   const routed = new Request(request, { headers });
   const id = env.WOO.idFromName(host);
-  return env.WOO.get(id).fetch(routed);
+  try {
+    return await env.WOO.get(id).fetch(routed);
+  } catch (err) {
+    return jsonResponse({ error: { code: "E_INTERNAL", message: `routed host ${host} failed: ${errorMessage(err)}` } }, 500);
+  }
 }
 
 async function withDirectorySession(env: Env, request: Request): Promise<Request> {
@@ -250,5 +254,22 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
   } catch {
     return {};
+  }
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" }
+  });
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
   }
 }

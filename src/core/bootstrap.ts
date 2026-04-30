@@ -41,6 +41,11 @@ export function scopeSerializedWorldToHost(serialized: SerializedWorld, host: Ob
   return world.exportHostScopedWorld(host);
 }
 
+export function nonEmptyHostScopedWorld(serialized: SerializedWorld, host: ObjRef): SerializedWorld | null {
+  const scoped = scopeSerializedWorldToHost(serialized, host);
+  return scoped.objects.length > 0 ? scoped : null;
+}
+
 export function bootstrap(world: WooWorld, options: BootstrapOptions = {}): WooWorld {
   seedUniversal(world);
   seedDemoScaffold(world);

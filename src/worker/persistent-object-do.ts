@@ -29,7 +29,7 @@
 // - Worker-side GitHub tap install (/api/tap/install) — local catalogs
 //   cover the demos; remote-tap install is local-Node only for now.
 
-import { createWorld, createWorldFromSerialized, scopeSerializedWorldToHost } from "../core/bootstrap";
+import { createWorld, createWorldFromSerialized, nonEmptyHostScopedWorld } from "../core/bootstrap";
 import { parseAutoInstallCatalogs } from "../core/local-catalogs";
 import {
   handleRestProtocolRequest,
@@ -93,28 +93,28 @@ export class PersistentObjectDO {
       return jsonResponse({ error: { code: "E_NOTAPPLICABLE", message: `${pathname} is only available on the world gateway host` } }, 404);
     }
 
-    const world = await this.getWorld(hostKey);
-
-    if (pathname.startsWith("/__internal/")) {
-      return this.handleInternal(request, world, pathname);
-    }
-
-    // WebSocket upgrade — accept via hibernation API. The connection survives
-    // DO hibernation; per-socket state is in serializeAttachment(). Per
-    // cloudflare.md §R8.
-    if (pathname === "/ws") {
-      const upgrade = request.headers.get("upgrade");
-      if (upgrade?.toLowerCase() !== "websocket") {
-        return jsonResponse({ error: { code: "E_INVARG", message: "expected Upgrade: websocket" } }, 400);
-      }
-      const pair = new WebSocketPair();
-      const client = pair[0];
-      const server = pair[1];
-      this.state.acceptWebSocket(server);
-      return new Response(null, { status: 101, webSocket: client });
-    }
-
     try {
+      const world = await this.getWorld(hostKey);
+
+      if (pathname.startsWith("/__internal/")) {
+        return await this.handleInternal(request, world, pathname);
+      }
+
+      // WebSocket upgrade — accept via hibernation API. The connection survives
+      // DO hibernation; per-socket state is in serializeAttachment(). Per
+      // cloudflare.md §R8.
+      if (pathname === "/ws") {
+        const upgrade = request.headers.get("upgrade");
+        if (upgrade?.toLowerCase() !== "websocket") {
+          return jsonResponse({ error: { code: "E_INVARG", message: "expected Upgrade: websocket" } }, 400);
+        }
+        const pair = new WebSocketPair();
+        const client = pair[0];
+        const server = pair[1];
+        this.state.acceptWebSocket(server);
+        return new Response(null, { status: 101, webSocket: client });
+      }
+
       if (request.method === "GET" && pathname === "/healthz") {
         return jsonResponse({ ok: true, ts: Date.now(), objects: world.objects.size });
       }
@@ -198,9 +198,18 @@ export class PersistentObjectDO {
 
   private async createHostScopedWorld(hostKey: ObjRef): Promise<WooWorld> {
     const stored = this.repo.load();
-    const source = stored ?? await this.fetchHostSeed(hostKey);
-    const scoped = scopeSerializedWorldToHost(source, hostKey);
-    if (scoped.objects.length === 0) throw wooError("E_OBJNF", `no host-scoped seed for ${hostKey}`, hostKey);
+    let scoped = stored ? nonEmptyHostScopedWorld(stored, hostKey) : null;
+    if (stored && !scoped) {
+      console.warn("woo.cluster_seed_fallback", {
+        host: hostKey,
+        reason: "stored_world_missing_host_slice",
+        stored_objects: stored.objects.length,
+        stored_logs: stored.logs.length,
+        stored_tasks: stored.parkedTasks.length
+      });
+    }
+    if (!scoped) scoped = nonEmptyHostScopedWorld(await this.fetchHostSeed(hostKey), hostKey);
+    if (!scoped) throw wooError("E_OBJNF", `no host-scoped seed for ${hostKey}`, hostKey);
     return createWorldFromSerialized(scoped, { repository: this.repo });
   }
 
