@@ -1,16 +1,19 @@
-// PersistentObjectDO — the v1 single-DO host for the entire world.
+// PersistentObjectDO — Cloudflare host for the world gateway or an anchor cluster.
 //
-// Per cloudflare.md §R5/§R11, the eventual model is one DO per anchor cluster.
-// For v1 we collapse this to a single DO that hosts the whole world (the
-// existing single-process model the runtime was built around). Cross-DO
-// routing becomes a v1.1 refactor; until then everything in the world lives
-// in this DO's storage.
+// The "world" instance is still the gateway for auth, WebSockets, global
+// catalog/admin surfaces, and bundled state aggregation. Directory-routed
+// anchor clusters (currently dubspace and taskspace) use the same class and
+// storage schema, but receive forwarded calls through the internal routes
+// below. The runtime is not fully host-scoped yet: cluster DOs still bootstrap
+// the seed graph locally for class/verb availability, so they contain shadow
+// copies of classes/global objects until remote definition lookup replaces that
+// compatibility path.
 //
 // What's wired through fetch() / the WS handlers:
 // - REST routing ported from src/server/dev-server.ts: auth, describe (with
 //   actor-permission filtering), property reads (filtered), sequenced and
 //   direct verb calls (with broadcast to connected WS clients), log paging,
-//   /api/state (wizard-only).
+//   /api/state (authenticated demo aggregate).
 // - WebSocket upgrade with the CF hibernation API: state.acceptWebSocket,
 //   serializeAttachment for per-socket {sessionId, actor, socketId}, and
 //   webSocketMessage/Close/Error handlers. After DO wake-from-hibernation
@@ -31,7 +34,7 @@ import type { CatalogManifest } from "../core/catalog-installer";
 import { createWorld } from "../core/bootstrap";
 import type { ObjRef, Session, WooValue } from "../core/types";
 import { wooError } from "../core/types";
-import type { AppliedFrame, DirectResultFrame, ErrorValue, LiveEventFrame, Message } from "../core/types";
+import type { AppliedFrame, DirectResultFrame, ErrorFrame, ErrorValue, LiveEventFrame, Message } from "../core/types";
 import { normalizeError, type ParkedTaskRun } from "../core/world";
 import { CFObjectRepository } from "./cf-repository";
 
@@ -45,6 +48,7 @@ import type { WooWorld } from "../core/world";
 
 export interface Env {
   WOO: DurableObjectNamespace;
+  DIRECTORY: DurableObjectNamespace;
   ASSETS?: Fetcher;
   WOO_INITIAL_WIZARD_TOKEN?: string;
   WOO_SEED_PHRASE?: string;
@@ -57,11 +61,14 @@ const LOCAL_CATALOGS: Record<string, CatalogManifest> = {
   dubspace: dubspaceManifest as unknown as CatalogManifest
 };
 
+const WORLD_HOST = "world";
+
 export class PersistentObjectDO {
   private state: DurableObjectState;
   private env: Env;
   private repo: CFObjectRepository;
   private world: WooWorld | null = null;
+  private routeCache = new Map<ObjRef, string>();
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -88,6 +95,10 @@ export class PersistentObjectDO {
     const url = new URL(request.url);
     const pathname = url.pathname;
 
+    if (pathname.startsWith("/__internal/")) {
+      return this.handleInternal(request, world, pathname);
+    }
+
     // WebSocket upgrade — accept via hibernation API. The connection survives
     // DO hibernation; per-socket state is in serializeAttachment(). Per
     // cloudflare.md §R8.
@@ -109,14 +120,11 @@ export class PersistentObjectDO {
       }
 
       if (request.method === "GET" && pathname === "/api/state") {
-        // Wizard-only: world.state() returns the full object graph including
-        // properties on every object. Public exposure leaks anything in the
-        // world (sessions, in-progress task data, internal state). Wizards
-        // see everything anyway; non-wizards must use the per-object
-        // describe/property routes which are actor-permission-filtered.
+        // Demo aggregate state. Object descriptions are actor-filtered, but
+        // the app payloads include raw demo state; production REST clients
+        // should use describe/property/log rather than this bundled-client API.
         const session = this.requireRestSession(world, request);
-        this.requireWizard(world, session.actor);
-        return jsonResponse(world.state());
+        return jsonResponse(await this.aggregateState(world, session.actor));
       }
 
       if (request.method === "POST" && pathname === "/api/auth") {
@@ -126,7 +134,7 @@ export class PersistentObjectDO {
           throw wooError("E_INVARG", "REST accepts guest:, session:, and wizard: tokens");
         }
         const session = this.authenticateToken(world, token);
-        return jsonResponse({ actor: session.actor, session: session.id });
+        return jsonResponse({ actor: session.actor, session: session.id, expires_at: session.expiresAt, token_class: session.tokenClass });
       }
 
       if (request.method === "POST" && pathname === "/api/tap/install") {
@@ -266,6 +274,146 @@ export class PersistentObjectDO {
     return initialized!;
   }
 
+  private async aggregateState(world: WooWorld, actor: ObjRef): Promise<Record<string, unknown>> {
+    const state = world.state(actor) as unknown as Record<string, unknown>;
+    for (const space of ["the_dubspace", "the_taskspace"] as const) {
+      const host = await this.resolveObjectHost(space, WORLD_HOST);
+      if (host === WORLD_HOST) continue;
+      const remote = await this.fetchHostState(host, actor);
+      if (!remote) continue;
+      const remoteSpaces = readMap(remote.spaces);
+      if (remoteSpaces[space]) {
+        const spaces = { ...readMap(state.spaces), [space]: remoteSpaces[space] };
+        state.spaces = spaces;
+      }
+      if (space === "the_dubspace" && remote.dubspace) state.dubspace = remote.dubspace;
+      if (space === "the_taskspace" && remote.taskspace) state.taskspace = remote.taskspace;
+      state.objects = { ...readMap(state.objects), ...readMap(remote.objects) };
+    }
+    return state;
+  }
+
+  private async fetchHostState(host: string, actor: ObjRef): Promise<Record<string, unknown> | null> {
+    try {
+      const id = this.env.WOO.idFromName(host);
+      const response = await this.env.WOO.get(id).fetch(new Request("https://woo.internal/__internal/state", {
+        headers: { "x-woo-host-key": host, "x-woo-internal-actor": actor }
+      }));
+      if (!response.ok) return null;
+      const body = await response.json();
+      return body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async handleInternal(request: Request, world: WooWorld, pathname: string): Promise<Response> {
+    try {
+      if (request.method === "GET" && pathname === "/__internal/state") {
+        const actor = request.headers.get("x-woo-internal-actor");
+        return jsonResponse(actor ? world.state(actor as ObjRef) : world.state());
+      }
+
+      const body = await readJsonBody(request);
+      if (request.method === "POST" && pathname === "/__internal/broadcast-applied") {
+        const frame = body.frame && typeof body.frame === "object" && !Array.isArray(body.frame)
+          ? body.frame as AppliedFrame
+          : null;
+        if (!frame || frame.op !== "applied") throw wooError("E_INVARG", "broadcast-applied requires an applied frame");
+        this.broadcastApplied(world, frame);
+        return jsonResponse({ ok: true });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/broadcast-live-events") {
+        const audience = String(body.audience ?? "") as ObjRef;
+        const observations = Array.isArray(body.observations)
+          ? body.observations.filter((item): item is Record<string, WooValue> & { type: string } => (
+              item !== null &&
+              typeof item === "object" &&
+              !Array.isArray(item) &&
+              typeof (item as Record<string, unknown>).type === "string"
+            ))
+          : [];
+        if (!audience) throw wooError("E_INVARG", "broadcast-live-events requires audience");
+        this.broadcastLiveEvents(world, { op: "result", result: null, observations, audience });
+        return jsonResponse({ ok: true });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/ws-call") {
+        const session = this.ensureInternalSession(
+          world,
+          String(body.session_id ?? ""),
+          String(body.actor ?? "") as ObjRef,
+          Number(body.expires_at ?? 0),
+          body.token_class
+        );
+        const raw = body.message && typeof body.message === "object" && !Array.isArray(body.message)
+          ? body.message as Record<string, unknown>
+          : {};
+        const message: Message = {
+          actor: session.actor,
+          target: String(raw.target ?? "") as ObjRef,
+          verb: String(raw.verb ?? ""),
+          args: Array.isArray(raw.args) ? raw.args as WooValue[] : [],
+          body: raw.body && typeof raw.body === "object" && !Array.isArray(raw.body)
+            ? raw.body as Record<string, WooValue>
+            : undefined
+        };
+        return jsonResponse(world.call(typeof body.frame_id === "string" ? body.frame_id : undefined, session.id, String(body.space ?? "") as ObjRef, message));
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/ws-direct") {
+        const session = this.ensureInternalSession(
+          world,
+          String(body.session_id ?? ""),
+          String(body.actor ?? "") as ObjRef,
+          Number(body.expires_at ?? 0),
+          body.token_class
+        );
+        const result = world.directCall(
+          typeof body.frame_id === "string" ? body.frame_id : undefined,
+          session.actor,
+          String(body.target ?? "") as ObjRef,
+          String(body.verb ?? ""),
+          Array.isArray(body.args) ? body.args as WooValue[] : []
+        );
+        return jsonResponse(result);
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/replay") {
+        const session = this.ensureInternalSession(
+          world,
+          String(body.session_id ?? ""),
+          String(body.actor ?? "") as ObjRef,
+          Number(body.expires_at ?? 0),
+          body.token_class
+        );
+        const space = String(body.space ?? "") as ObjRef;
+        if (!world.hasPresence(session.actor, space)) throw wooError("E_PERM", `${session.actor} is not present in ${space}`);
+        const from = Math.max(1, Number(body.from ?? 1));
+        const limit = Math.min(Math.max(1, Number(body.limit ?? 100)), 500);
+        return jsonResponse({ op: "replay", id: body.frame_id, space, from, entries: world.replay(space, from, limit) });
+      }
+
+      return jsonResponse({ error: { code: "E_OBJNF", message: `no internal route for ${request.method} ${pathname}` } }, 404);
+    } catch (err) {
+      const error = normalizeError(err);
+      return jsonResponse({ error }, statusForError(error));
+    }
+  }
+
+  private ensureInternalSession(
+    world: WooWorld,
+    sessionId: string,
+    actor: ObjRef,
+    expiresAt: number,
+    rawTokenClass: unknown
+  ): Session {
+    if (!sessionId || !actor) throw wooError("E_NOSESSION", "internal forwarded call requires session and actor");
+    const tokenClass: Session["tokenClass"] = rawTokenClass === "guest" || rawTokenClass === "apikey" ? rawTokenClass : "bearer";
+    return world.ensureSessionForActor(sessionId, actor, tokenClass, Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : undefined);
+  }
+
   // ---- auth helpers (port from dev-server.ts) ----
 
   private authenticateToken(world: WooWorld, token: string): Session {
@@ -275,11 +423,42 @@ export class PersistentObjectDO {
     return world.auth(token);
   }
 
+  private async registerSessionRoute(session: Session): Promise<void> {
+    try {
+      const id = this.env.DIRECTORY.idFromName("directory");
+      await this.env.DIRECTORY.get(id).fetch(new Request("https://directory.local/register-session", {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          session_id: session.id,
+          actor: session.actor,
+          expires_at: session.expiresAt,
+          token_class: session.tokenClass
+        })
+      }));
+    } catch {
+      // Directory registration accelerates cross-DO routing. The local auth
+      // result remains authoritative for this host; routed object calls fail
+      // closed if the Directory cannot resolve the session.
+    }
+  }
+
   private requireWizard(world: WooWorld, actor: ObjRef): void {
     if (!world.object(actor).flags.wizard) throw wooError("E_PERM", "wizard authority required", actor);
   }
 
   private requireRestSession(world: WooWorld, request: Request): Session {
+    const internalSession = request.headers.get("x-woo-internal-session");
+    const internalActor = request.headers.get("x-woo-internal-actor");
+    if (internalSession && internalActor) {
+      return this.ensureInternalSession(
+        world,
+        internalSession,
+        internalActor as ObjRef,
+        Number(request.headers.get("x-woo-internal-expires-at") ?? 0),
+        request.headers.get("x-woo-internal-token-class")
+      );
+    }
     const header = request.headers.get("authorization") ?? "";
     const match = /^Session\s+(.+)$/i.exec(header.trim());
     if (!match) throw wooError("E_NOSESSION", "Authorization: Session <id> required");
@@ -330,6 +509,7 @@ export class PersistentObjectDO {
 
       if (op === "auth") {
         const session = this.authenticateToken(world, String(frame.token ?? ""));
+        await this.registerSessionRoute(session);
         const previous = this.attachment(ws);
         if (previous) world.detachSocket(previous.sessionId, previous.socketId);
         const socketId = `ws-${session.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -358,7 +538,11 @@ export class PersistentObjectDO {
             ? (m.body as Record<string, WooValue>)
             : undefined
         };
-        const result = world.call(typeof frame.id === "string" ? frame.id : undefined, session.sessionId, String(frame.space ?? "") as ObjRef, message);
+        const space = String(frame.space ?? "") as ObjRef;
+        const host = await this.resolveObjectHost(space, WORLD_HOST);
+        const result = host === WORLD_HOST
+          ? world.call(typeof frame.id === "string" ? frame.id : undefined, session.sessionId, space, message)
+          : await this.forwardWsCall(world, host, typeof frame.id === "string" ? frame.id : undefined, session, space, message);
         if (result.op === "applied") this.broadcastApplied(world, result, ws);
         else ws.send(JSON.stringify(result));
         return;
@@ -366,13 +550,17 @@ export class PersistentObjectDO {
 
       if (op === "direct") {
         const args = Array.isArray(frame.args) ? (frame.args as WooValue[]) : [];
-        const result = world.directCall(
-          typeof frame.id === "string" ? frame.id : undefined,
-          session.actor,
-          String(frame.target ?? "") as ObjRef,
-          String(frame.verb ?? ""),
-          args
-        );
+        const target = String(frame.target ?? "") as ObjRef;
+        const host = await this.resolveObjectHost(target, WORLD_HOST);
+        const result = host === WORLD_HOST
+          ? world.directCall(
+              typeof frame.id === "string" ? frame.id : undefined,
+              session.actor,
+              target,
+              String(frame.verb ?? ""),
+              args
+            )
+          : await this.forwardWsDirect(world, host, typeof frame.id === "string" ? frame.id : undefined, session, target, String(frame.verb ?? ""), args);
         if (result.op === "result") {
           ws.send(JSON.stringify({ op: "result", id: result.id, result: result.result }));
           this.broadcastLiveEvents(world, result);
@@ -399,6 +587,11 @@ export class PersistentObjectDO {
 
       if (op === "replay") {
         const space = String(frame.space ?? "") as ObjRef;
+        const host = await this.resolveObjectHost(space, WORLD_HOST);
+        if (host !== WORLD_HOST) {
+          ws.send(JSON.stringify(await this.forwardWsReplay(world, host, typeof frame.id === "string" ? frame.id : undefined, session, space, frame.from, frame.limit)));
+          return;
+        }
         if (!world.hasPresence(session.actor, space)) throw wooError("E_PERM", `${session.actor} is not present in ${space}`);
         const from = Math.max(1, Number(frame.from ?? 1));
         const limit = Math.min(Math.max(1, Number(frame.limit ?? 100)), 500);
@@ -446,6 +639,91 @@ export class PersistentObjectDO {
       return null;
     }
     return att;
+  }
+
+  private async resolveObjectHost(id: ObjRef, fallbackHost: string): Promise<string> {
+    const cached = this.routeCache.get(id);
+    if (cached) return cached;
+    try {
+      const directoryId = this.env.DIRECTORY.idFromName("directory");
+      const response = await this.env.DIRECTORY.get(directoryId).fetch(new Request("https://directory.local/resolve-object", {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ id, fallback_host: fallbackHost })
+      }));
+      const body = await response.json() as Record<string, unknown>;
+      const host = typeof body.host === "string" ? body.host : fallbackHost;
+      this.routeCache.set(id, host);
+      return host;
+    } catch {
+      return fallbackHost;
+    }
+  }
+
+  private async forwardWsCall(
+    world: WooWorld,
+    host: string,
+    frameId: string | undefined,
+    session: { sessionId: string; actor: ObjRef },
+    space: ObjRef,
+    message: Message
+  ): Promise<AppliedFrame | ErrorFrame> {
+    const body = this.forwardBody(world, session, { frame_id: frameId, space, message });
+    return this.forwardInternal<AppliedFrame | ErrorFrame>(host, "/__internal/ws-call", body);
+  }
+
+  private async forwardWsDirect(
+    world: WooWorld,
+    host: string,
+    frameId: string | undefined,
+    session: { sessionId: string; actor: ObjRef },
+    target: ObjRef,
+    verb: string,
+    args: WooValue[]
+  ): Promise<DirectResultFrame | ErrorFrame> {
+    const body = this.forwardBody(world, session, { frame_id: frameId, target, verb, args });
+    return this.forwardInternal<DirectResultFrame | ErrorFrame>(host, "/__internal/ws-direct", body);
+  }
+
+  private async forwardWsReplay(
+    world: WooWorld,
+    host: string,
+    frameId: string | undefined,
+    session: { sessionId: string; actor: ObjRef },
+    space: ObjRef,
+    from: unknown,
+    limit: unknown
+  ): Promise<unknown> {
+    const body = this.forwardBody(world, session, { frame_id: frameId, space, from, limit });
+    return this.forwardInternal(host, "/__internal/replay", body);
+  }
+
+  private async forwardInternal<T>(host: string, path: string, body: Record<string, unknown>): Promise<T> {
+    const id = this.env.WOO.idFromName(host);
+    const response = await this.env.WOO.get(id).fetch(new Request(`https://woo.internal${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "x-woo-host-key": host
+      },
+      body: JSON.stringify(body)
+    }));
+    return await response.json() as T;
+  }
+
+  private forwardBody(
+    world: WooWorld,
+    session: { sessionId: string; actor: ObjRef },
+    extra: Record<string, unknown>
+  ): Record<string, unknown> {
+    const local = world.sessions.get(session.sessionId);
+    return {
+      session_id: session.sessionId,
+      actor: session.actor,
+      expires_at: local?.expiresAt ?? Date.now() + 5 * 60_000,
+      token_class: local?.tokenClass ?? "bearer",
+      ...extra
+    };
   }
 
   private broadcastApplied(world: WooWorld, frame: AppliedFrame, originator?: WebSocket): void {
@@ -595,4 +873,8 @@ function parseAutoInstallCatalogs(value: string | undefined): string[] {
   if (value === undefined) return ["chat", "taskspace", "dubspace"];
   if (value.trim() === "") return [];
   return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function readMap(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }

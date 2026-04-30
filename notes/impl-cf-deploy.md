@@ -41,11 +41,11 @@ Tests: extend `tests/conformance.test.ts` with a CF-storage backend variant if a
 
 ### Phase 2: Worker entry + DO classes
 
-`src/worker/index.ts`: route parsing per §R11.1, ID resolution per §R11.2, auth header per §R11.3, sessions placement per §R11.4 (lean Option A: embedded player ULID in session id).
+`src/worker/index.ts`: route parsing per §R11.1, ID resolution per §R11.2, auth header per §R11.3, sessions placement per §R11.4. Current slice uses Directory's `session_id -> actor` index; embedded-player session ids remain a later optimization.
 
-`src/worker/persistent-object-do.ts`: `PersistentObjectDO` class wrapping the existing `WooWorld` against `CFObjectRepository`. Implements the cross-DO RPC surface from §R5. Hosts WebSockets via `acceptWebSocket` (§R8).
+`src/worker/persistent-object-do.ts`: `PersistentObjectDO` class wrapping the existing `WooWorld` against `CFObjectRepository`. Hosts the world gateway and routed anchor-cluster DOs with the same class. Hosts WebSockets via `acceptWebSocket` (§R8).
 
-`src/worker/directory-do.ts`: `DirectoryDO` singleton. Read-mostly corename map. ~80 lines.
+`src/worker/directory-do.ts`: `DirectoryDO` singleton. Read-mostly routing table for seeded corenames/object refs, plus `session_id -> actor` routing for forwarded object calls.
 
 ### Phase 3: First-request bootstrap
 
@@ -71,7 +71,7 @@ Wizard-action audit on `X-Woo-Force-Direct`, `X-Woo-Impersonate-Actor`, `wiz:for
 
 ### Phase 6: Wrangler config + first deploy
 
-`wrangler.toml` per §R12 skeleton. `[[migrations]]` tag `v1` with `new_sqlite_classes = ["PersistentObjectDO", "DirectoryDO"]`. AE dataset binding optional. `[observability]` enabled.
+`wrangler.toml` per §R12 skeleton. `[[migrations]]` tag `v1` creates `PersistentObjectDO`; `tag = "v2"` creates `DirectoryDO` (append-only migration history). AE dataset binding optional. `[observability]` enabled.
 
 `DEPLOY.md` already exists; verify the operator path against the live deploy. End-to-end smoke: deploy → set secrets → first auth as wizard → install local catalogs → exercise dubspace/taskspace/chat from the bundled client.
 
@@ -95,7 +95,7 @@ Substrate landed (works in-process):
 
 Phase 0 (toolchain smoke test) — landed:
 
-- `wrangler.toml` skeleton (no DO bindings yet; reserved for `tag = "v1"` later).
+- `wrangler.toml` skeleton proved the Worker toolchain before DO bindings landed.
 - `src/worker/index.ts` stub Worker — JSON heartbeat for any path.
 - `tsconfig.worker.json` scopes `@cloudflare/workers-types` to the worker tree only.
 - Live at `https://woo.hughpyle.workers.dev/`. Token-mint flow proven (`woo` API token created with the six required permission groups; `wrangler whoami` succeeds).
@@ -112,16 +112,17 @@ Phase 1 (CF backend `ObjectRepository`) — landed:
 
 Phase 2 (Worker entry + DO class) — landed:
 
-- `src/worker/persistent-object-do.ts` (~330 lines). `PersistentObjectDO` class wrapping `WooWorld`+`CFObjectRepository`. Lazy-init via `state.blockConcurrencyWhile` on first request: `createWorld({ repository: cfRepo, catalogs })` runs bootstrap on a fresh DO or imports the SerializedWorld on a hydrated one. REST routes ported from `dev-server.ts`: `/healthz`, `/api/auth` (with `wizard:<WOO_INITIAL_WIZARD_TOKEN>` claim flow), `/api/state`, `/api/objects/{id}` describe, `/api/objects/{id}/properties/{name}`, `/api/objects/{id}/calls/{verb}` (sequenced + direct), `/api/objects/{id}/log`, `/api/taps`. Fail-loud 503s for missing `WOO_INITIAL_WIZARD_TOKEN` and `WOO_SEED_PHRASE` per §R14.7. SSE streams (`/stream`), WebSocket upgrade, and tap-install GitHub fetch return 501 `E_NOT_IMPLEMENTED` placeholders for later phases.
-- `src/worker/index.ts`. Worker entry: forwards every request to a single DO via `env.WOO.idFromName("world")`. Cross-DO routing per `cloudflare.md §R1.1` is a v1.1 refactor; v1 collapses to one DO.
-- `wrangler.toml`. `[[durable_objects.bindings]] name = "WOO" class_name = "PersistentObjectDO"`. `[[migrations]] tag = "v1" new_sqlite_classes = ["PersistentObjectDO"]`. `compatibility_flags = ["nodejs_compat"]` (needed by `node:crypto` in `src/core/source-hash.ts`).
+- `src/worker/persistent-object-do.ts` (~800 lines). `PersistentObjectDO` wraps `WooWorld`+`CFObjectRepository` for both the `world` gateway and Directory-routed anchor-cluster hosts. Lazy-init via `state.blockConcurrencyWhile`: `createWorld({ repository: cfRepo, catalogs })` runs bootstrap on a fresh DO or imports `SerializedWorld` on a hydrated one. REST routes ported from `dev-server.ts`: `/healthz`, `/api/auth` (with `wizard:<WOO_INITIAL_WIZARD_TOKEN>` claim flow), authenticated `/api/state` demo aggregate, `/api/objects/{id}` describe, `/api/objects/{id}/properties/{name}`, `/api/objects/{id}/calls/{verb}` (sequenced + direct), `/api/objects/{id}/log`, `/api/taps`. Fail-loud 503s for missing `WOO_INITIAL_WIZARD_TOKEN` and `WOO_SEED_PHRASE` per §R14.7. SSE streams (`/stream`) and tap-install GitHub fetch still return 501 `E_NOT_IMPLEMENTED`.
+- `src/worker/directory-do.ts`. `DirectoryDO` singleton with SQLite tables for seeded `objref -> host` routes and `session_id -> actor` session routing. Current seeded routing moves `the_dubspace` and its anchored controls to host `the_dubspace`, `the_taskspace` to host `the_taskspace`, and leaves chat on the gateway until player-DO fan-out/presence indexing exists.
+- `src/worker/index.ts`. Worker entry now routes global API/WS traffic to `env.WOO.idFromName("world")`, object REST routes through Directory, and best-effort broadcasts routed applied frames back through the gateway so WebSocket clients see REST-agent mutations live.
+- `wrangler.toml`. `[[durable_objects.bindings]] name = "WOO" class_name = "PersistentObjectDO"` and `name = "DIRECTORY" class_name = "DirectoryDO"`. `[[migrations]] tag = "v1" new_sqlite_classes = ["PersistentObjectDO"]`; `tag = "v2" new_sqlite_classes = ["DirectoryDO"]`. `compatibility_flags = ["nodejs_compat"]` (needed by `node:crypto` in `src/core/source-hash.ts`).
 - `tsconfig.worker.json` adds `node` to `types` so the worker tsconfig sees `node:crypto` types.
 - **Live deploy**: `https://woo.hughpyle.workers.dev/`. `WOO_INITIAL_WIZARD_TOKEN` and `WOO_SEED_PHRASE` set via `wrangler secret put`. Smoke-tested end to end: 50 objects bootstrapped (universal classes + chat/dubspace/taskspace local catalogs auto-installed), wizard claim returns `$wiz` session, second claim returns `E_TOKEN_CONSUMED`, describe + REST routing work, `the_chatroom` (parent `$chatroom`) has 17 verbs and 10 properties matching the local manifest. Permission gates (`E_DIRECT_DENIED` for non-`direct_callable` verbs) enforced.
 
 Phase 2.1 (bundled SPA via Workers Assets) — landed:
 
 - `wrangler.toml` `[assets] directory = "./dist", binding = "ASSETS", not_found_handling = "single-page-application"`. Deploy now requires `npm run build` first to populate `dist/` (Vite outputs ~50 KiB gzipped: index.html + assets/index-*.{js,css}).
-- `src/worker/index.ts` routes `/api/*`, `/healthz`, `/ws` to the DO; falls through to `env.ASSETS.fetch(request)` for everything else. 503 `E_NO_ASSETS` if the binding is missing (operator forgot to build).
+- `src/worker/index.ts` routes global API/WS traffic to the gateway DO, object REST routes through Directory, and falls through to `env.ASSETS.fetch(request)` for everything else. 503 `E_NO_ASSETS` if the binding is missing (operator forgot to build).
 - `Env` interface gains optional `ASSETS: Fetcher`.
 - Live verification: `https://woo.hughpyle.workers.dev/` serves the SPA shell; navigating the four tabs (chat / dubspace / taskspace / IDE) renders against the live world.
 
@@ -135,6 +136,19 @@ Phase 2.2 (WebSocket upgrade with hibernation) — landed:
 - Broadcast helpers (`broadcastApplied`, `broadcastTaskResult`, `broadcastLiveEvents`, `broadcastLiveEvent`) iterate `state.getWebSockets()` instead of the in-memory `Map` the local dev-server uses; presence-filtered fan-out for applied frames; directed-to/from filtering for live observations.
 - Live verification: chat works end-to-end. Two browser tabs see each other's `enter`/`leave`/`said`/`emoted` events broadcast correctly.
 
+Phase 2.3 (first multi-DO routing slice) — landed:
+
+- `DirectoryDO` now exists as a separate SQLite-backed Durable Object. It seeds routes for the universal/catalog/demo objects and tracks `session_id -> actor` for forwarded object calls.
+- Worker object routes resolve through Directory. Sequenced REST calls route by `body.space` when present, so `/api/objects/the_taskspace/calls/create_task` with `space: "the_taskspace"` lands on the `the_taskspace` DO. Direct calls and object/property/log reads route by the object id in the URL.
+- The `world` DO remains the gateway for `/api/auth`, `/ws`, `/healthz`, `/api/taps`, `/api/tap/install`, and bundled `/api/state` aggregation.
+- WebSocket clients still connect to the gateway DO. The gateway forwards `op: call`, `op: direct`, and `op: replay` to the Directory-selected host when needed, using internal routes on `PersistentObjectDO`.
+- Routed REST applied frames and direct-call live observations are best-effort broadcast back through the gateway so connected browser clients see REST-agent mutations live. Durability remains on the space host; clients can recover sequenced calls via replay/state aggregation if live fan-out fails.
+- `/api/state` is now authenticated and aggregates dubspace/taskspace state from their routed hosts. Object descriptions inside the payload are actor-filtered; demo app state maps are raw convenience data for the bundled client, not the production REST surface.
+- The gateway registers `task_created` observations with Directory so runtime-created task objects route back to the taskspace host. This is a narrow convention, not the final object-placement API.
+- Current routed hosts: `the_dubspace` and its anchored controls on `the_dubspace`; `the_taskspace` on `the_taskspace`; `the_chatroom` stays on `world` until player-DO fan-out / cross-host presence indexing exists.
+- Important caveat: routed cluster hosts still run `createWorld({ catalogs })`, so they have shadow copies of the full seed graph for class/verb availability. Public auth is gateway-pinned, but any code with the same CF binding could call a cluster DO directly. Long-term, cluster hosts should load only their owned anchor cluster and fetch/cache remote class/verb definitions through the cross-DO RPC layer.
+- Verification: `npm run typecheck`, `npm test` (98/98), `npm run build`, `npx wrangler deploy --dry-run`, and Playwright smoke against a fresh SQLite DB all pass.
+
 Verb-flag persistence fix (storage-layer bug, both backends) — landed:
 
 - Both `LocalSQLiteRepository` and `CFObjectRepository` had a pre-existing schema bug: the `verb` table had no `flags` column, so `direct_callable` and `skip_presence_check` were silently dropped on save and reset to undefined on load. Locally invisible because the in-memory state from initial bootstrap survived in the same process; on CF every fresh DO instance re-hydrated from storage and lost the flags, so calls to chat verbs returned `E_DIRECT_DENIED`.
@@ -146,12 +160,15 @@ Verb-flag persistence fix (storage-layer bug, both backends) — landed:
 
 In dependency order:
 
-- **`DirectoryDO`** singleton. Deferred until cross-DO routing exists; v1 collapses corename lookup into the single world DO.
 - **Alarms** for parked tasks. Replaces the 250ms `setInterval` only on the CF target; local dev keeps the poll. (WS hibernation landed in Phase 2.2; alarms are the remaining piece of original Phase 4.)
 - **SSE stream** (`/api/objects/{id}/stream`) on the Worker. Returns 501 placeholder; browser clients use the WebSocket path. SSE matters for HTTP-only agent integrations.
 - **Authoring REST endpoints** in the Worker: `/api/compile`, `/api/install`, `/api/property`. The IDE tab can read object descriptions but cannot author verbs against the deployed world. dev-server has the Node implementations; needs Web-standard ports.
 - **`wiz:rotate_bootstrap_token` verb** on `$system`. Spec'd in §R14.4; impl pending.
-- **Cross-DO RPC layer**: `RemoteHost.rpc(target, method, args)` stub used by `world.dispatch` when target is on a different anchor cluster. Currently `world.ts` assumes single-process; needs an "is target hosted here?" check before dispatch.
+- **True host-scoped runtime decomposition**: routed host DOs still bootstrap the seed graph locally for class/verb availability. The next real split is dynamic object registration plus class/verb/property fetching across hosts, so each host loads only its owned anchor cluster and cached remote definitions.
+- **General cross-DO RPC layer**: `RemoteHost.rpc(target, method, args)` stub used by `world.dispatch` when target is on a different anchor cluster. The first routing slice forwards top-level REST/WS calls, but verb bodies still assume local dispatch inside a host.
+- **Authenticated internal forwarding headers**: the public Worker strips inbound `x-woo-internal-*` headers before forwarding, but cluster DOs currently trust headers from any caller with the same DO binding. Add an HMAC over the forwarded tuple (`session, actor, expires_at, token_class`) with a `WOO_INTERNAL_SECRET` before treating cluster DOs as an independently callable surface.
+- **General object-route registration**: Directory has `/register-objects`, and task creation is wired via `task_created` observations. General `createObject` paths still need a placement callback so new rooms/objects register their intended host at creation time.
+- **Aggregate health**: `/healthz` is gateway-local. Add a Directory/host fan-out health endpoint when routed-host liveness needs to be operator-visible.
 - **Verb-lookup cache** (`ancestor_verb_cache`, `ancestor_prop_cache`). Schema exists in `persistence.md §14.1`; population on cross-DO miss is unimplemented.
 - **`src/instrument.ts`** with AE writes, structured logs, per-DO `:metrics()`.
 - **CF storage variant in conformance harness** via Miniflare. Optional; the unit-level transaction/savepoint guarantees are covered by the SQLite + in-memory backends.
@@ -161,7 +178,7 @@ In dependency order:
 
 - **Mid-call SUSPEND across DOs raises `E_CROSSDO_PARKING_UNSUPPORTED`** per §R6.2. v1.1 may relax.
 - **No tap caching.** Every install/update fetches fresh from GitHub. §CT4.
-- **Local-catalog install only** at first; GitHub-tap install lands in Phase 7.
+- **Bundled local-catalog auto-install only on the Worker**; GitHub-tap install lands in Phase 7.
 - **Quota accounting is hard-cap-on-write only.** Daily-alarm pass deferred. §R5.4.
 - **No multi-region tuning.** CF picks the closest region per DO automatically.
 - **No distributed tracing.** Structured logs + `request_id` propagation across cross-DO RPCs cover the audit trail.
@@ -171,11 +188,10 @@ In dependency order:
 
 ## Open questions
 
-1. **Sessions placement.** Lean from §R11.4: Option A with `session_id = <player_ulid>:<random>` so the Worker decodes routing without a singleton SessionsDO. Confirm before implementing.
-2. **`world.ts` decomposition.** 2200-line god-file. Not strictly required for CF (the DO wraps it), but the dispatch logic needs an "is target on this DO?" check. Light refactor (extract `dispatch()` cluster awareness) vs. full decomposition along TECH_DEBT_AUDIT F001 lines — pick when starting Phase 2.
-3. **Storage transaction boundaries** at CF: confirm `state.storage.transactionSync` semantics match local SQLite `BEGIN IMMEDIATE`. Likely yes, but worth a one-shot probe before Phase 1 lands.
-4. **Bundle size of the bundled client** under `wrangler deploy`. The hand-rolled SPA (`src/client/main.ts` ~950 lines) plus CSS plus catalogs fit easily under Workers limits but worth checking.
-5. **Demo catalogs at boot**: should `WOO_AUTO_INSTALL_CATALOGS=chat,dubspace,taskspace` be the default for fresh dev deploys (current intent) or empty for CF deploys (clean world per §R14.5 note about `dev-seed` warning)? Probably default in dev, empty in production.
+1. **Sessions placement.** Current slice uses Directory's `session_id -> actor` table. Lean from §R11.4 still points toward embedded player ids for long-term removal of a session lookup hop; decide before player-DO routing.
+2. **`world.ts` decomposition.** The Worker can route top-level calls now, but `WooWorld` still assumes local class/verb availability and local dispatch within a host. Light refactor (cluster-aware dispatch + remote definition cache) vs. full decomposition along TECH_DEBT_AUDIT F001 lines remains open.
+3. **Storage transaction boundaries** at CF: `state.storage.transactionSync` compiles and dry-runs; still needs a Miniflare/DO storage probe for nested savepoint behavior under real CF storage.
+4. **Demo catalogs at boot**: should `WOO_AUTO_INSTALL_CATALOGS=chat,dubspace,taskspace` be the default for fresh dev deploys (current intent) or empty for CF deploys (clean world per §R14.5 note about `dev-seed` warning)? Probably default in dev, empty in production.
 
 ## Reference
 

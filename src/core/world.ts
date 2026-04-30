@@ -447,6 +447,35 @@ export class WooWorld {
     return session;
   }
 
+  ensureSessionForActor(
+    id: string,
+    actor: ObjRef,
+    tokenClass: Session["tokenClass"] = "bearer",
+    expiresAt?: number
+  ): Session {
+    const existing = this.sessions.get(id);
+    if (existing) return existing;
+    this.object(actor);
+    const now = Date.now();
+    const session: Session = {
+      id,
+      actor,
+      started: now,
+      expiresAt: expiresAt ?? now + this.sessionTtl(tokenClass),
+      lastDetachAt: null,
+      tokenClass,
+      attachedSockets: new Set()
+    };
+    this.withPersistenceDeferred(() => {
+      this.sessions.set(id, session);
+      this.persistSession(session);
+      this.setProp(actor, "session_id", id);
+      if (this.objects.has("the_dubspace")) this.ensurePresence(actor, "the_dubspace");
+      if (this.objects.has("the_taskspace")) this.ensurePresence(actor, "the_taskspace");
+    });
+    return session;
+  }
+
   claimWizardBootstrapSession(presentedToken: string, expectedToken: string | undefined): Session {
     if (!expectedToken) throw wooError("E_BOOTSTRAP_TOKEN_MISSING", "WOO_INITIAL_WIZARD_TOKEN is not set");
     const claim = () => {
@@ -774,11 +803,14 @@ export class WooWorld {
     }
   }
 
-  state(): WorldSnapshot {
+  state(actor?: ObjRef): WorldSnapshot {
     const spaces: WorldSnapshot["spaces"] = {};
     for (const id of ["the_dubspace", "the_taskspace", "the_chatroom"]) {
       if (this.objects.has(id)) spaces[id] = { next_seq: Number(this.getProp(id, "next_seq")), log_count: this.logs.get(id)?.length ?? 0 };
     }
+    const describeOne = actor
+      ? (id: ObjRef) => this.describeForActor(id, actor)
+      : (id: ObjRef) => this.describe(id);
     return {
       server_time: Date.now(),
       actorCount: Array.from(this.objects.values()).filter((obj) => this.inheritsFrom(obj.id, "$player")).length,
@@ -786,7 +818,7 @@ export class WooWorld {
       dubspace: this.dubspaceState(),
       taskspace: this.taskspaceState(),
       chat: this.chatState(),
-      objects: Object.fromEntries(Array.from(this.objects.keys()).map((id) => [id, this.describe(id)]))
+      objects: Object.fromEntries(Array.from(this.objects.keys()).map((id) => [id, describeOne(id)]))
     };
   }
 

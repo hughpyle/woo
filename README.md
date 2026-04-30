@@ -18,9 +18,10 @@ the design work rather than precede it.
 
 ## Current Status
 
-Early implementation.  Run locally, backed by in-memory or SQLite persistence.
-Next steps include finishing the [plugin catalog](spec/discovery/catalogs.md),
-then backing with Cloudflare Durable Objects.
+Early implementation. Run locally with SQLite persistence, or deploy the current
+Cloudflare Workers + Durable Objects slice. The Cloudflare target now has a
+gateway DO, a Directory DO, and routed demo-space hosts for dubspace/taskspace;
+full host-scoped runtime decomposition is still in progress.
 
 ## Specification
 

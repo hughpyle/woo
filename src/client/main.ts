@@ -63,7 +63,6 @@ const directThrottle = new Map<string, number>();
 const pendingDirect = new Map<string, (result: any) => void>();
 
 connect();
-void refresh();
 window.setInterval(pruneLiveControls, 700);
 
 function connect() {
@@ -78,7 +77,7 @@ function connect() {
       state.session = frame.session;
       storeSession(frame.session);
       requestReplay(socket);
-      render();
+      await refresh();
     }
     if (frame.op === "applied") {
       forgetLiveControls(frame.observations ?? []);
@@ -171,7 +170,9 @@ function writeStorage(key: string, value: string) {
 }
 
 async function refresh() {
-  const response = await fetch("/api/state");
+  const headers = state.session ? { authorization: `Session ${state.session}` } : undefined;
+  const response = await fetch("/api/state", { headers });
+  if (!response.ok) return;
   state.world = await response.json();
   state.clockOffset = Number(state.world.server_time ?? Date.now()) - Date.now();
   state.chatPresent = Array.isArray(state.world?.chat?.present) ? state.world.chat.present : state.chatPresent;

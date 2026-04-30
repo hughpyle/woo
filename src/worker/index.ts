@@ -1,16 +1,16 @@
-// Worker entry — splits routing between the DO (API) and Workers Assets (SPA).
+// Worker entry — splits routing between Durable Objects and Workers Assets.
 //
-// /api/*, /healthz, /ws  → forwarded to the world DO.
-// Everything else        → env.ASSETS.fetch (the bundled SPA from ./dist).
-//
-// v1 routes everything to a single DO via env.WOO.idFromName("world"). When
-// the codebase grows cross-DO routing per cloudflare.md §R1.1, this module
-// becomes the dispatch point that picks an anchor cluster's DO based on the
-// path's object id.
+// Global API, /healthz, /ws → world/gateway DO.
+// Object REST routes        → Directory-resolved host DO.
+// Everything else           → env.ASSETS.fetch (the bundled SPA from ./dist).
 
 import type { Env } from "./persistent-object-do";
 
 export { PersistentObjectDO } from "./persistent-object-do";
+export { DirectoryDO } from "./directory-do";
+
+const WORLD_HOST = "world";
+const DIRECTORY_HOST = "directory";
 
 function isApiPath(pathname: string): boolean {
   return (
@@ -24,10 +24,25 @@ export default {
   async fetch(request: Request, env: Env, _ctx: unknown): Promise<Response> {
     const url = new URL(request.url);
 
+    if (request.method === "POST" && url.pathname === "/api/auth") {
+      const response = await forwardToHost(env, WORLD_HOST, request);
+      await registerAuthResponse(env, response.clone());
+      return response;
+    }
+
+    const objectRoute = parseObjectRoute(url.pathname);
+    if (objectRoute) {
+      const host = await resolveHostForObjectRoute(env, request, objectRoute);
+      const routed = await withDirectorySession(env, request);
+      const response = await forwardToHost(env, host, routed);
+      if (host !== WORLD_HOST && request.method === "POST" && objectRoute.rest[0] === "calls") {
+        await broadcastRoutedCall(env, response.clone(), host);
+      }
+      return response;
+    }
+
     if (isApiPath(url.pathname)) {
-      const id = env.WOO.idFromName("world");
-      const stub = env.WOO.get(id);
-      return stub.fetch(request);
+      return forwardToHost(env, WORLD_HOST, request);
     }
 
     if (env.ASSETS) {
@@ -42,3 +57,180 @@ export default {
     );
   }
 };
+
+async function resolveHostForObjectRoute(
+  env: Env,
+  request: Request,
+  route: { id: string; rest: string[] }
+): Promise<string> {
+  let id = route.id;
+  let fallback = WORLD_HOST;
+
+  if (request.method === "POST" && route.rest.length === 2 && route.rest[0] === "calls") {
+    // We only peek at a cloned body here. The original Request is still
+    // forwarded below, and later header-wrapping uses `new Request(request, …)`
+    // without consuming the stream. If this path grows more body readers,
+    // buffer once explicitly instead of adding another clone.
+    const body = await readJson(request.clone());
+    if (typeof body.space === "string" && body.space) {
+      const spaceRoute = await resolveDirectoryObject(env, body.space, WORLD_HOST);
+      id = body.space;
+      fallback = spaceRoute.host;
+    }
+  }
+
+  if (id === "$me") {
+    const session = await resolveRequestSession(env, request);
+    if (session?.actor) id = session.actor;
+  }
+
+  const routeInfo = await resolveDirectoryObject(env, id, fallback);
+  return routeInfo.host || fallback;
+}
+
+async function forwardToHost(env: Env, host: string, request: Request): Promise<Response> {
+  const headers = cleanInternalHeaders(request.headers);
+  headers.set("x-woo-host-key", host);
+  const routed = new Request(request, { headers });
+  const id = env.WOO.idFromName(host);
+  return env.WOO.get(id).fetch(routed);
+}
+
+async function withDirectorySession(env: Env, request: Request): Promise<Request> {
+  const session = await resolveRequestSession(env, request);
+  if (!session) return request;
+  const headers = cleanInternalHeaders(request.headers);
+  headers.set("x-woo-internal-session", session.session_id);
+  headers.set("x-woo-internal-actor", session.actor);
+  headers.set("x-woo-internal-expires-at", String(session.expires_at));
+  headers.set("x-woo-internal-token-class", session.token_class);
+  return new Request(request, { headers });
+}
+
+async function registerAuthResponse(env: Env, response: Response): Promise<void> {
+  if (!response.ok) return;
+  try {
+    const body = await response.json() as Record<string, unknown>;
+    if (typeof body.session !== "string" || typeof body.actor !== "string") return;
+    await directoryPost(env, "/register-session", {
+      session_id: body.session,
+      actor: body.actor,
+      expires_at: Number(body.expires_at ?? Date.now() + 5 * 60_000),
+      token_class: body.token_class === "guest" || body.token_class === "apikey" ? body.token_class : "bearer"
+    });
+  } catch {
+    // Auth succeeded; Directory registration is best-effort for this response.
+    // Subsequent object routes without a Directory session will fail closed on
+    // the target host rather than silently impersonating.
+  }
+}
+
+async function broadcastRoutedCall(env: Env, response: Response, host: string): Promise<void> {
+  if (!response.ok) return;
+  try {
+    const body = await response.json() as Record<string, unknown>;
+    if (body.op === "applied") {
+      await registerObjectsFromApplied(env, body, host);
+      await forwardToHost(env, WORLD_HOST, new Request("https://woo.internal/__internal/broadcast-applied", {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ frame: body })
+      }));
+      return;
+    }
+    if (Array.isArray(body.observations)) {
+      await forwardToHost(env, WORLD_HOST, new Request("https://woo.internal/__internal/broadcast-live-events", {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ audience: host, observations: body.observations })
+      }));
+    }
+  } catch {
+    // Best-effort live fan-out only. The sequenced frame is already durable on
+    // the routed host; clients can recover via replay/state aggregation.
+  }
+}
+
+async function registerObjectsFromApplied(env: Env, frame: Record<string, unknown>, host: string): Promise<void> {
+  const observations = Array.isArray(frame.observations) ? frame.observations : [];
+  const routes: Array<{ id: string; host: string; anchor: string | null }> = [];
+  for (const observation of observations) {
+    if (!observation || typeof observation !== "object" || Array.isArray(observation)) continue;
+    const record = observation as Record<string, unknown>;
+    if (record.type === "task_created" && typeof record.task === "string") {
+      routes.push({ id: record.task, host, anchor: host });
+    }
+  }
+  if (routes.length === 0) return;
+  await directoryPost(env, "/register-objects", { routes });
+}
+
+async function resolveRequestSession(env: Env, request: Request): Promise<{ session_id: string; actor: string; expires_at: number; token_class: string } | null> {
+  const header = request.headers.get("authorization") ?? "";
+  const match = /^Session\s+(.+)$/i.exec(header.trim());
+  if (!match) return null;
+  try {
+    const body = await directoryPost(env, "/resolve-session", { session_id: match[1] }) as Record<string, unknown>;
+    const session = body.session;
+    if (!session || typeof session !== "object") return null;
+    const record = session as Record<string, unknown>;
+    if (typeof record.session_id !== "string" || typeof record.actor !== "string") return null;
+    return {
+      session_id: record.session_id,
+      actor: record.actor,
+      expires_at: Number(record.expires_at ?? 0),
+      token_class: typeof record.token_class === "string" ? record.token_class : "bearer"
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function resolveDirectoryObject(env: Env, id: string, fallbackHost: string): Promise<{ id: string; host: string; anchor: string | null }> {
+  const body = await directoryPost(env, "/resolve-object", { id, fallback_host: fallbackHost }) as Record<string, unknown>;
+  return {
+    id: typeof body.id === "string" ? body.id : id,
+    host: typeof body.host === "string" ? body.host : fallbackHost,
+    anchor: typeof body.anchor === "string" ? body.anchor : null
+  };
+}
+
+async function directoryPost(env: Env, path: string, body: Record<string, unknown>): Promise<unknown> {
+  const id = env.DIRECTORY.idFromName(DIRECTORY_HOST);
+  const response = await env.DIRECTORY.get(id).fetch(new Request(`https://directory.local${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify(body)
+  }));
+  const parsed = await response.json();
+  if (!response.ok) throw new Error(JSON.stringify(parsed));
+  return parsed;
+}
+
+function cleanInternalHeaders(input: Headers): Headers {
+  const headers = new Headers(input);
+  for (const name of Array.from(headers.keys())) {
+    if (name.toLowerCase().startsWith("x-woo-internal-") || name.toLowerCase() === "x-woo-host-key") {
+      headers.delete(name);
+    }
+  }
+  return headers;
+}
+
+function parseObjectRoute(pathname: string): { id: string; rest: string[] } | null {
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts[0] !== "api" || parts[1] !== "objects" || !parts[2]) return null;
+  return {
+    id: decodeURIComponent(parts[2]),
+    rest: parts.slice(3).map((part) => decodeURIComponent(part))
+  };
+}
+
+async function readJson(request: Request): Promise<Record<string, unknown>> {
+  try {
+    const parsed = await request.json();
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}

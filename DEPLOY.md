@@ -30,7 +30,7 @@ npx wrangler deploy
 #    The token is single-use; store it somewhere safe in case you need to recover.
 ```
 
-After step 5, you have a running world with you bound to `$wiz`. From there you can mint players, install verbs, and configure the world via the IDE or REST API.
+After step 5, you have a running world with you bound to `$wiz`. From there you can inspect the bundled chat, dubspace, taskspace, and IDE surfaces. Runtime authoring endpoints and GitHub tap install are still local-server-only on the Cloudflare target.
 
 ---
 
@@ -156,9 +156,11 @@ Response: `{ "actor": "$wiz", "session": "<session-id>" }`. Use `Authorization: 
 
 **Via WebSocket**: connect, then send `{ "op": "auth", "token": "wizard:YOUR_INITIAL_WIZARD_TOKEN" }`. Receive `{ "op": "session", "actor": "$wiz" }`.
 
-Either path consumes the token. The world records `bootstrap_token_used = true` in the Directory's `world_meta` table; presenting the token again fails.
+Either path consumes the token. The world records `bootstrap_token_used = true` in `$system` metadata on the gateway host; presenting the token again fails.
 
-With that session, install a public GitHub catalog tap:
+The deployed Worker currently auto-installs the bundled local catalogs. Public GitHub tap install is available on the local Node dev server but not yet on the Cloudflare Worker; the Worker route returns `501 E_NOT_IMPLEMENTED` until the GitHub helper is ported.
+
+When Worker-side tap install lands, it will use the same shape as local dev:
 
 ```sh
 curl -X POST https://your-world.example.com/api/tap/install \

@@ -14,9 +14,9 @@
 
 ### R1.1 Routing
 
-A persistent ULID is also a Durable Object name. `env.MOO.idFromName("#01HXYZ...")` deterministically routes to the same DO globally. There is no intermediate lookup; the ID *is* the address.
+A persistent ULID is also a Durable Object name. `env.WOO.idFromName("#01HXYZ...")` deterministically routes to the same DO globally. There is no intermediate lookup for unanchored objects; the ID *is* the address.
 
-For anchored objects ([semantics/objects.md §4.1](../semantics/objects.md#41-anchor-and-atomicity-scope)), the routing key is the anchor's id (followed transitively to the root of the anchor tree). `idFromName(root_anchor_ulid)` resolves to the same DO that hosts the entire anchor cluster. Multiple object rows then coexist in that DO's `object` table.
+For anchored objects ([semantics/objects.md §4.1](../semantics/objects.md#41-anchor-and-atomicity-scope)), the routing key is the anchor's id (followed transitively to the root of the anchor tree). `idFromName(root_anchor_ulid)` resolves to the same DO that hosts the entire anchor cluster. Multiple object rows then coexist in that DO's `object` table. Inbound routes for non-root anchored objects consult Directory for `objref -> host` placement.
 
 Cross-DO RPC uses the DO stub returned from `idFromName`. The stub's methods are the inter-host RPC surface (verb dispatch migration, property read/write, version-checked artifact fetch).
 
@@ -48,7 +48,7 @@ Each WebSocket connects to its player's DO directly (singleton-per-player). The 
 
 | DO | Purpose |
 |---|---|
-| `Directory` | Holds the corename map and world metadata. Read-mostly, off the hot path. Does **not** mint IDs. |
+| `Directory` | Holds the corename map, `objref -> host` routing table, session routing index, and small world metadata. Read-mostly, off the hot path. Does **not** mint IDs. |
 | `QuotaAccountant` | Periodic eventually-consistent accounting. See [quotas.md](quotas.md). |
 | `$system` (`#0`) | Bootstrap object. Holds corename properties. |
 
@@ -450,15 +450,15 @@ POST /api/objects/<id>/calls/<verb>     → DO RPC (call or directCall)
 GET  /api/objects/<id>/log              → DO RPC (readLog)
 GET  /api/objects/<id>/stream           → DO RPC + SSE upgrade
 POST /api/auth                          → Sessions handler (mints/resumes session)
-GET  /connect                           → WS upgrade → forward to player DO
+GET  /ws                                → WS upgrade → gateway/player host
 ```
 
 ### R11.2 ID resolution
 
 The Worker resolves `<id-or-name>` to a DO id:
 
-- `#<ulid>` → `env.WOO.idFromName(ulid)`.
-- `$<corename>` → fetch from Directory DO, then `env.WOO.idFromName(target_ulid)`.
+- `#<ulid>` → Directory route lookup; unanchored fallback is `env.WOO.idFromName(ulid)`.
+- `$<corename>` → fetch from Directory DO, then `env.WOO.idFromName(host_key)`.
 - `$me` → resolve from `Authorization: Session <id>` → session.actor → `idFromName(actor)`.
 - `~<tref>` → not on this hop; transient refs route to the carrying player's DO.
 
@@ -502,7 +502,11 @@ class_name = "DirectoryDO"
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["PersistentObjectDO", "DirectoryDO"]
+new_sqlite_classes = ["PersistentObjectDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["DirectoryDO"]
 
 [[analytics_engine_datasets]]
 binding = "METRICS"
@@ -574,7 +578,7 @@ The first auth into a freshly-deployed world establishes the operator as `$wiz`.
 
 1. Operator deploys with `WOO_INITIAL_WIZARD_TOKEN = <random-string>` set.
 2. Operator connects (websocket or REST) presenting `auth { token: "wizard:<random-string>" }`.
-3. Worker validates the token against the secret. If match: bind the connecting actor to the seeded `$wiz` objref, mint a session, mark the token consumed in the Directory's `world_meta` table (`bootstrap_token_used = true`).
+3. Worker validates the token against the secret. If match: bind the connecting actor to the seeded `$wiz` objref, mint a session, mark the token consumed in `$system` metadata (`bootstrap_token_used = true`), and register the session route in Directory.
 4. Subsequent presentations of the same token return `401 E_TOKEN_CONSUMED`.
 
 After this exchange, the operator has wizard authority and can mint additional players, install verbs, and configure the world. The wizard token is single-use; rotating it requires a wizard verb (`wiz:rotate_bootstrap_token(new_token)`) so the operator can recover from a token compromise without redeploying.
