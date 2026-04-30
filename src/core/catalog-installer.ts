@@ -1,7 +1,7 @@
 import { compileVerb } from "./authoring";
 import { fixtureByName } from "./fixtures";
 import { hashSource } from "./source-hash";
-import { wooError, type ObjRef, type TinyBytecode, type WooValue } from "./types";
+import { wooError, type ObjRef, type TinyBytecode, type VerbDef, type WooValue } from "./types";
 import type { WooWorld } from "./world";
 
 export type CatalogManifest = {
@@ -87,6 +87,10 @@ export type InstallCatalogOptions = {
   allowImplementationHints?: boolean;
 };
 
+export type RepairCatalogOptions = {
+  actor?: ObjRef;
+};
+
 export function installCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: InstallCatalogOptions = {}): InstalledCatalogRecord {
   const actor = options.actor ?? "$wiz";
   const tap = options.tap ?? "@local";
@@ -113,7 +117,7 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
     world.createObject({ id, name: id, parent, owner: actor });
     setDescriptionIfEmpty(world, id, catalogDescription(def.description, id, manifest.name));
     for (const property of def.properties ?? []) installProperty(world, id, property, actor);
-    for (const verb of def.verbs ?? []) installVerbDef(world, id, verb, actor, allowImplementationHints);
+    for (const verb of def.verbs ?? []) installVerbDef(world, id, verb, actor, allowImplementationHints, false);
   }
 
   for (const schema of manifest.schemas ?? []) {
@@ -153,6 +157,19 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
   return record;
 }
 
+export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: RepairCatalogOptions = {}): void {
+  const actor = options.actor ?? "$wiz";
+  for (const def of [...(manifest.classes ?? []), ...(manifest.features ?? [])]) {
+    if (!world.objects.has(def.local_name)) continue;
+    setDescriptionIfEmpty(world, def.local_name, catalogDescription(def.description, def.local_name, manifest.name));
+    for (const property of def.properties ?? []) installProperty(world, def.local_name, property, actor);
+    for (const verb of def.verbs ?? []) installVerbDef(world, def.local_name, verb, actor, false, true);
+  }
+  for (const schema of manifest.schemas ?? []) {
+    if (world.objects.has(schema.on)) world.defineEventSchema(schema.on, schema.type, schema.shape);
+  }
+}
+
 function installProperty(world: WooWorld, obj: ObjRef, property: CatalogPropertyDef, owner: ObjRef): void {
   const target = world.object(obj);
   if (target.propertyDefs.has(property.name)) return;
@@ -165,16 +182,30 @@ function installProperty(world: WooWorld, obj: ObjRef, property: CatalogProperty
   });
 }
 
-function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, allowImplementationHints: boolean): void {
+function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, allowImplementationHints: boolean, repairExisting: boolean): void {
   const target = world.object(obj);
   const existing = target.verbs.get(def.name);
   if (existing) {
-    const next = {
-      ...existing,
-      direct_callable: existing.direct_callable || def.direct_callable === true,
-      skip_presence_check: existing.skip_presence_check || def.skip_presence_check === true
-    };
-    if (next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
+    if (!repairExisting) {
+      const next = {
+        ...existing,
+        direct_callable: existing.direct_callable || def.direct_callable === true,
+        skip_presence_check: existing.skip_presence_check || def.skip_presence_check === true
+      };
+      if (next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
+      return;
+    }
+    const repaired = compileCatalogVerb(obj, def, owner, existing.version + 1);
+    const changed =
+      existing.kind !== "bytecode" ||
+      existing.source !== repaired.source ||
+      existing.source_hash !== repaired.source_hash ||
+      existing.perms !== repaired.perms ||
+      JSON.stringify(existing.arg_spec ?? {}) !== JSON.stringify(repaired.arg_spec ?? {}) ||
+      existing.direct_callable !== repaired.direct_callable ||
+      existing.skip_presence_check !== repaired.skip_presence_check ||
+      Object.keys(existing.line_map ?? {}).length === 0;
+    if (changed) world.addVerb(obj, repaired);
     return;
   }
 
@@ -204,21 +235,31 @@ function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner
     return;
   }
 
+  world.addVerb(obj, compileCatalogVerb(obj, def, owner, 1));
+}
+
+function compileCatalogVerb(obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, version: number): VerbDef {
   const compiled = compileVerb(def.source);
   if (!compiled.ok || !compiled.bytecode) {
     throw wooError("E_CATALOG", `catalog verb failed to compile: ${obj}:${def.name}`, {
       diagnostics: compiled.diagnostics as unknown as WooValue
     });
   }
-  world.addVerb(obj, {
-    ...base,
+  return {
     kind: "bytecode",
+    name: def.name,
+    aliases: def.aliases ?? [],
+    owner,
     perms: def.perms ?? compiled.metadata?.perms ?? "rxd",
     arg_spec: def.arg_spec ?? compiled.metadata?.arg_spec ?? {},
+    source: def.source,
     source_hash: compiled.source_hash ?? hashSource(def.source),
-    bytecode: { ...compiled.bytecode, version: 1 },
-    line_map: compiled.line_map ?? {}
-  });
+    version,
+    bytecode: { ...compiled.bytecode, version },
+    line_map: compiled.line_map ?? {},
+    direct_callable: def.direct_callable === true,
+    skip_presence_check: def.skip_presence_check === true
+  };
 }
 
 function resolveObjectRef(

@@ -1,11 +1,12 @@
 import { BUNDLED_CATALOGS } from "../generated/bundled-catalogs";
-import { installCatalogManifest, type CatalogManifest } from "./catalog-installer";
+import { installCatalogManifest, repairCatalogManifest, type CatalogManifest } from "./catalog-installer";
 import { wooError, type Message, type WooValue } from "./types";
 import type { WooWorld } from "./world";
 
 export type LocalCatalogName = string;
 
 const LOCAL_CATALOGS = new Map(BUNDLED_CATALOGS.map((entry) => [entry.manifest.name, entry.manifest] as const));
+const LOCAL_CATALOG_SOURCE_MIGRATION = "2026-04-30-source-catalog-verbs";
 
 export const DEFAULT_LOCAL_CATALOGS = bundledCatalogAliases();
 
@@ -23,7 +24,9 @@ export function parseAutoInstallCatalogs(value: string | undefined): string[] {
 }
 
 export function installLocalCatalogs(world: WooWorld, names: readonly string[] = DEFAULT_LOCAL_CATALOGS): void {
-  for (const name of sortCatalogNames(names)) installLocalCatalog(world, name);
+  const sorted = sortCatalogNames(names);
+  for (const name of sorted) installLocalCatalog(world, name);
+  runLocalCatalogMigrations(world, sorted);
 }
 
 export function installLocalCatalog(world: WooWorld, name: string): void {
@@ -54,6 +57,15 @@ export function installLocalCatalog(world: WooWorld, name: string): void {
   if (errorObservation) {
     throw wooError(String(errorObservation.code ?? "E_CATALOG"), String(errorObservation.message ?? "catalog install failed"), errorObservation as unknown as WooValue);
   }
+}
+
+function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): void {
+  if (migrationApplied(world, LOCAL_CATALOG_SOURCE_MIGRATION)) return;
+  for (const name of names) {
+    if (!localCatalogInstalled(world, name)) continue;
+    repairCatalogManifest(world, LOCAL_CATALOGS.get(name)!, { actor: "$wiz" });
+  }
+  markMigrationApplied(world, LOCAL_CATALOG_SOURCE_MIGRATION);
 }
 
 function isLocalCatalogName(name: string): name is LocalCatalogName {
@@ -97,4 +109,17 @@ function localCatalogInstalled(world: WooWorld, name: string): boolean {
     const item = record as Record<string, WooValue>;
     return item.alias === name || item.catalog === name;
   });
+}
+
+function migrationApplied(world: WooWorld, id: string): boolean {
+  if (!world.objects.has("$system")) return false;
+  const raw = world.propOrNull("$system", "applied_migrations");
+  return Array.isArray(raw) && raw.includes(id);
+}
+
+function markMigrationApplied(world: WooWorld, id: string): void {
+  if (!world.objects.has("$system")) return;
+  const raw = world.propOrNull("$system", "applied_migrations");
+  const migrations = Array.isArray(raw) ? raw.map(String) : [];
+  if (!migrations.includes(id)) world.setProp("$system", "applied_migrations", [...migrations, id]);
 }

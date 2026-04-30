@@ -31,7 +31,12 @@ A **catalog** is a directory in a public GitHub repository (or in the deployment
 
 Spec ships **source**, not bytecode. The manifest carries DSL source for every verb; the importing world recompiles in its own spec version. This avoids cross-spec-version bytecode portability problems entirely.
 
-**First-light local implementation hints.** The bundled `@local` catalogs may also carry a non-portable `implementation` field on a verb (`native` handler or named bytecode fixture). This is a v0.5 bridge for demo behavior the current DSL cannot yet express. Public v1 catalogs must treat source as normative; implementation hints are ignored outside trusted local catalogs.
+**First-light local implementation hints.** The manifest format still permits a
+non-portable `implementation` field on a verb (`native` handler or named
+bytecode fixture) for trusted `@local` bootstrap experiments. First-party demo
+catalogs should not rely on it; chat, taskspace, and dubspace install from
+source alone. Public v1 catalogs must treat source as normative; implementation
+hints are ignored outside trusted local catalogs.
 
 In-world, installed catalogs are objects descended from `$catalog`; the world's `$catalog_registry` lists them. Each installed class records its source catalog so introspection can answer "where did this come from?"
 
@@ -215,6 +220,26 @@ Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the 
 
 Implementation rule: source code must not contain catalog-specific install policy. Adding, removing, or renaming a bundled catalog is a filesystem/catalog operation: place or remove a manifest directory under `catalogs/`, regenerate the bundled catalog index for non-filesystem deployment targets, and let install ordering follow declared dependencies. Runtime code that branches on demo object names or catalog names is a bug unless it is explicitly part of a temporary demo UI adapter.
 
+### CT5.4.1 Local boot migrations
+
+Local catalog auto-install may also run **deployment-local boot migrations**.
+These are not public catalog update migrations (§CT14). They are one-off repair
+steps for worlds created by an earlier build of the same deployment, such as
+recompiling bundled catalog verbs after a DSL/compiler capability lands.
+
+Boot migrations are idempotent and recorded in `$system.applied_migrations`.
+They run after the local catalog install pass, so a fresh world installs the
+current manifests first and then records the migration as applied; an existing
+world repairs only catalogs already present in `$catalog_registry`. A migration
+must not special-case a demo application's object names or semantics. It may
+operate over the discovered bundled catalog manifests as a set, because that set
+is defined by the deployment's catalog tap location.
+
+The first boot migration is `2026-04-30-source-catalog-verbs`: it recompiles
+already-installed local catalog verbs from their manifest source and replaces
+stale trusted-local native/fixture rows. This repairs worlds that still contain
+old `native` handler names after the demo catalogs moved to source-only verbs.
+
 ### CT5.5 Manifest shape
 
 ```jsonc
@@ -250,15 +275,19 @@ Implementation rule: source code must not contain catalog-specific install polic
 }
 ```
 
-The DSL source per verb is what enables the recompile-in-importing-world discipline. The first-party `@local` manifests in this repository may additionally include:
+The DSL source per verb is what enables the recompile-in-importing-world
+discipline. Trusted local experiments may additionally include:
 
 ```jsonc
-"implementation": { "kind": "native", "handler": "save_scene" }
+"implementation": { "kind": "native", "handler": "temporary_local_handler" }
 // or
-"implementation": { "kind": "fixture", "name": "set_control" }
+"implementation": { "kind": "fixture", "name": "temporary_fixture" }
 ```
 
-Those implementation hints are trusted-local only. They are not part of the portable public catalog contract and exist so first-light demos can be installed from manifests before the DSL can express every behavior. The chat catalog is the first demo to remove those hints from its user-facing verbs and install from source alone.
+Those implementation hints are trusted-local only. They are not part of the
+portable public catalog contract. They exist for temporary bootstrap experiments,
+not as the normal demo-app path; first-party chat, taskspace, and dubspace verbs
+install from source alone.
 
 ---
 

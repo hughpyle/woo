@@ -47,6 +47,10 @@ Slider motion has two layers — two routes for the same control surface:
 
 The preview layer exists so continuous gestures feel live without filling the `$space` log with every pointer sample. It is the same control surface called via a different route, not a second source of truth.
 
+All Dubspace verbs are catalog-authored Woo source. `:set_control` uses dynamic
+property access (`target.(name) = value`); scenes snapshot the demo's seeded
+controls explicitly from the catalog rather than through core-native handlers.
+
 ## Observation Schemas
 
 Each observation the dubspace emits has a defined payload shape. UI and agents consume these as the canonical contract.

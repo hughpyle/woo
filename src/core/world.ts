@@ -25,7 +25,6 @@ import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializ
 import { installCatalogManifest, type CatalogManifest } from "./catalog-installer";
 
 type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue;
-const DRUM_VOICES = ["kick", "snare", "hat", "tone"] as const;
 const GUEST_SESSION_GRACE_MS = 60_000;
 const GUEST_SESSION_TTL_MS = 5 * 60_000;
 const CREDENTIAL_SESSION_GRACE_MS = 5 * 60_000;
@@ -2041,102 +2040,11 @@ export class WooWorld {
         return this.objects.has("$failed_match") ? "$failed_match" : null;
       }
     });
-    this.nativeHandlers.set("preview_control", (ctx, args) => {
-      const target = assertObj(args[0]);
-      const name = assertString(args[1]);
-      const value = args[2] ?? null;
-      this.object(target);
-      ctx.observe({ type: "gesture_progress", source: ctx.thisObj, actor: ctx.actor, target, name, value, sent_at: Date.now() });
-      return value;
-    });
-    this.nativeHandlers.set("cursor", (ctx, args) => {
-      const x = Number(args[0]);
-      const y = Number(args[1]);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) throw wooError("E_TYPE", "cursor coordinates must be numeric", { x: args[0] ?? null, y: args[1] ?? null });
-      ctx.observe({ type: "cursor", source: ctx.thisObj, actor: ctx.actor, x, y, sent_at: Date.now() });
-      return true;
-    });
-    this.nativeHandlers.set("start_loop", (ctx, args) => {
-      const slot = assertObj(args[0]);
-      this.setProp(slot, "playing", true);
-      ctx.observe({ type: "loop_started", slot, loop_id: this.getProp(slot, "loop_id") });
-      return true;
-    });
-    this.nativeHandlers.set("stop_loop", (ctx, args) => {
-      const slot = assertObj(args[0]);
-      this.setProp(slot, "playing", false);
-      ctx.observe({ type: "loop_stopped", slot });
-      return true;
-    });
-    this.nativeHandlers.set("save_scene", (ctx, args) => {
-      const name = assertString(args[0] ?? "Scene");
-      const controls: Record<string, WooValue> = {};
-      for (const id of ["slot_1", "slot_2", "slot_3", "slot_4", "channel_1", "filter_1", "delay_1", "drum_1"]) {
-        controls[id] = Object.fromEntries(this.object(id).properties) as WooValue;
-      }
-      this.setProp("default_scene", "name", name);
-      this.setProp("default_scene", "controls", controls);
-      ctx.observe({ type: "scene_saved", scene: "default_scene", name });
-      return "default_scene";
-    });
-    this.nativeHandlers.set("recall_scene", (ctx) => {
-      const controls = assertMap(this.getProp("default_scene", "controls"));
-      for (const [id, props] of Object.entries(controls)) {
-        const propMap = assertMap(props);
-        for (const [name, value] of Object.entries(propMap)) this.setProp(id, name, value);
-      }
-      ctx.observe({ type: "scene_recalled", scene: "default_scene" });
-      return true;
-    });
-    this.nativeHandlers.set("set_drum_step", (ctx, args) => {
-      const voice = assertString(args[0]);
-      if (!DRUM_VOICES.includes(voice as (typeof DRUM_VOICES)[number])) throw wooError("E_INVARG", "unknown drum voice", voice);
-      const step = Number(args[1]);
-      if (!Number.isInteger(step) || step < 0 || step >= 8) throw wooError("E_RANGE", "drum step out of range", step);
-      if (typeof args[2] !== "boolean") throw wooError("E_TYPE", "enabled must be boolean", args[2]);
-      const enabled = args[2];
-      const pattern = this.drumPattern();
-      pattern[voice][step] = enabled;
-      this.setProp("drum_1", "pattern", pattern as unknown as WooValue);
-      ctx.observe({ type: "drum_step_changed", source: ctx.space, target: "drum_1", voice, step, enabled });
-      return enabled;
-    });
-    this.nativeHandlers.set("set_tempo", (ctx, args) => {
-      const rawBpm = Number(args[0]);
-      if (!Number.isFinite(rawBpm)) throw wooError("E_TYPE", "tempo must be numeric", args[0]);
-      const bpm = Math.max(60, Math.min(200, Math.round(rawBpm)));
-      this.setProp("drum_1", "bpm", bpm);
-      ctx.observe({ type: "tempo_changed", source: ctx.space, target: "drum_1", bpm });
-      return bpm;
-    });
-    this.nativeHandlers.set("start_transport", (ctx) => {
-      const startedAt = Date.now();
-      this.setProp("drum_1", "playing", true);
-      this.setProp("drum_1", "started_at", startedAt);
-      ctx.observe({ type: "transport_started", source: ctx.space, target: "drum_1", started_at: startedAt, bpm: this.getProp("drum_1", "bpm") });
-      return startedAt;
-    });
-    this.nativeHandlers.set("stop_transport", (ctx) => {
-      this.setProp("drum_1", "playing", false);
-      ctx.observe({ type: "transport_stopped", source: ctx.space, target: "drum_1" });
-      return true;
-    });
   }
 
   private chatPresent(room: ObjRef): WooValue[] {
     const present = this.getProp(room, "subscribers");
     return Array.isArray(present) ? [...present] : [];
-  }
-
-  private drumPattern(): Record<string, boolean[]> {
-    const raw = this.propOrNull("drum_1", "pattern");
-    const map = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-    const pattern: Record<string, boolean[]> = {};
-    for (const voice of DRUM_VOICES) {
-      const row = (map as Record<string, WooValue>)[voice];
-      pattern[voice] = Array.from({ length: 8 }, (_, index) => (Array.isArray(row) ? Boolean(row[index]) : false));
-    }
-    return pattern;
   }
 
   private sweepIdempotency(): void {

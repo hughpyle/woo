@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createWorld } from "../src/core/bootstrap";
 import { installCatalogManifest, type CatalogManifest as RuntimeCatalogManifest } from "../src/core/catalog-installer";
-import { bundledCatalogAliases } from "../src/core/local-catalogs";
+import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
 
 type CatalogManifest = {
   name: string;
@@ -147,6 +147,109 @@ describe("local catalogs", () => {
     const done = world.call("done", session.id, "the_taskspace", { actor: session.actor, target: task, verb: "set_status", args: ["done"] });
     expect(world.getProp(task, "status")).toBe("done");
     if (done.op === "applied") expect(done.observations.map((obs) => obs.type)).toContain("done_premature");
+  });
+
+  it("installs dubspace from source without trusted implementation hints", () => {
+    const world = createWorld({ catalogs: false });
+    installCatalogManifest(world, readManifest("dubspace") as unknown as RuntimeCatalogManifest, {
+      tap: "github:hugh/woo",
+      alias: "dubspace",
+      allowImplementationHints: false
+    });
+
+    expect(world.object("$dubspace").verbs.get("set_control")?.kind).toBe("bytecode");
+    expect(world.object("$dubspace").verbs.get("set_drum_step")?.kind).toBe("bytecode");
+    expect(world.object("$dubspace").verbs.get("save_scene")?.kind).toBe("bytecode");
+
+    const session = world.auth("guest:catalog-dubspace");
+    const actor = session.actor;
+    const applied = world.call("set-control", session.id, "the_dubspace", {
+      actor,
+      target: "the_dubspace",
+      verb: "set_control",
+      args: ["delay_1", "feedback", 0.44]
+    });
+    expect(applied.op).toBe("applied");
+    expect(world.getProp("delay_1", "feedback")).toBe(0.44);
+
+    const preview = world.directCall("preview", actor, "the_dubspace", "preview_control", ["delay_1", "feedback", 0.5]);
+    expect(preview.op).toBe("result");
+    if (preview.op === "result") {
+      expect(preview.observations[0]).toMatchObject({ type: "gesture_progress", source: "the_dubspace", actor, target: "delay_1", name: "feedback", value: 0.5 });
+    }
+    expect(world.getProp("delay_1", "feedback")).toBe(0.44);
+
+    world.call("drum", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_drum_step", args: ["tone", 3, true] });
+    world.call("tempo", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_tempo", args: [250] });
+    const pattern = world.getProp("drum_1", "pattern") as Record<string, boolean[]>;
+    expect(pattern.tone[3]).toBe(true);
+    expect(world.getProp("drum_1", "bpm")).toBe(200);
+
+    world.call("save", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "save_scene", args: ["Source Scene"] });
+    world.call("mutate", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_control", args: ["delay_1", "feedback", 0.11] });
+    expect(world.getProp("delay_1", "feedback")).toBe(0.11);
+    world.call("recall", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "recall_scene", args: ["default_scene"] });
+    expect(world.getProp("delay_1", "feedback")).toBe(0.44);
+  });
+
+  it("migrates stale local catalog native verbs to source bytecode", () => {
+    const world = createWorld();
+    world.setProp("$system", "applied_migrations", []);
+    const enter = world.object("$conversational").verbs.get("enter")!;
+    world.addVerb("$conversational", {
+      kind: "native",
+      name: enter.name,
+      aliases: enter.aliases,
+      owner: enter.owner,
+      perms: enter.perms,
+      arg_spec: enter.arg_spec,
+      source: enter.source,
+      source_hash: enter.source_hash,
+      version: enter.version + 1,
+      line_map: enter.line_map,
+      native: "chat_enter",
+      direct_callable: enter.direct_callable,
+      skip_presence_check: enter.skip_presence_check
+    });
+    const addSubtask = world.object("$task").verbs.get("add_subtask")!;
+    world.addVerb("$task", {
+      kind: "native",
+      name: addSubtask.name,
+      aliases: addSubtask.aliases,
+      owner: addSubtask.owner,
+      perms: addSubtask.perms,
+      arg_spec: addSubtask.arg_spec,
+      source: addSubtask.source,
+      source_hash: addSubtask.source_hash,
+      version: addSubtask.version + 1,
+      line_map: addSubtask.line_map,
+      native: "add_subtask",
+      direct_callable: addSubtask.direct_callable,
+      skip_presence_check: addSubtask.skip_presence_check
+    });
+
+    installLocalCatalogs(world, ["chat", "taskspace"]);
+
+    expect(world.object("$conversational").verbs.get("enter")?.kind).toBe("bytecode");
+    expect(world.object("$task").verbs.get("add_subtask")?.kind).toBe("bytecode");
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-source-catalog-verbs");
+
+    const session = world.auth("guest:migrated-catalog");
+    expect(world.directCall("enter", session.actor, "the_chatroom", "enter", []).op).toBe("result");
+    const created = world.call("create-task", session.id, "the_taskspace", {
+      actor: session.actor,
+      target: "the_taskspace",
+      verb: "create_task",
+      args: ["Migrated task", ""]
+    });
+    const task = created.op === "applied" ? String(created.observations[0].task) : "";
+    const subtask = world.call("add-subtask", session.id, "the_taskspace", {
+      actor: session.actor,
+      target: task,
+      verb: "add_subtask",
+      args: ["Migrated subtask", ""]
+    });
+    expect(subtask.op).toBe("applied");
   });
 
   it("declares source for every catalog verb", () => {

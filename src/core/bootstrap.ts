@@ -65,6 +65,7 @@ function seedUniversal(world: WooWorld): void {
   describeSeed(world, "$catalog_registry", "Sequenced registry space for catalog operations. It records which catalogs are installed, their aliases and provenance, and the object refs each catalog introduced.");
   seedProp(world, "$system", "wizard_actions", []);
   seedProp(world, "$system", "bootstrap_token_used", false);
+  seedProp(world, "$system", "applied_migrations", []);
   define(world, "$actor", "presence_in", [], "list<obj>");
   define(world, "$actor", "features", [], "list<obj>");
   define(world, "$actor", "features_version", 0, "int");

@@ -67,6 +67,7 @@ type Expr =
   | BinaryExpr
   | LogicalExpr
   | PropertyExpr
+  | DynamicPropertyExpr
   | IndexExpr
   | InterpExpr
   | CallExpr
@@ -81,6 +82,7 @@ type UnaryExpr = { kind: "UnaryExpr"; op: "!" | "-"; expr: Expr; span: Span };
 type BinaryExpr = { kind: "BinaryExpr"; op: string; left: Expr; right: Expr; span: Span };
 type LogicalExpr = { kind: "LogicalExpr"; op: "&&" | "||"; left: Expr; right: Expr; span: Span };
 type PropertyExpr = { kind: "PropertyExpr"; object: Expr; name: string; span: Span };
+type DynamicPropertyExpr = { kind: "DynamicPropertyExpr"; object: Expr; name: Expr; span: Span };
 type IndexExpr = { kind: "IndexExpr"; object: Expr; index: Expr; span: Span };
 type InterpExpr = { kind: "InterpExpr"; parts: (string | Expr)[]; span: Span };
 type CallExpr = { kind: "CallExpr"; callee: Expr; args: Expr[]; span: Span };
@@ -565,8 +567,14 @@ class Parser {
     let expr = this.parsePrimary();
     while (true) {
       if (this.matchValue(".")) {
-        const name = this.expectIdentifier("expected property name after '.'").value;
-        expr = { kind: "PropertyExpr", object: expr, name, span: mergeSpan(expr.span, this.previous().span) };
+        if (this.matchValue("(")) {
+          const name = this.parseExpression();
+          const end = this.expectValue(")", "expected ')' after dynamic property name");
+          expr = { kind: "DynamicPropertyExpr", object: expr, name, span: mergeSpan(expr.span, end.span) };
+        } else {
+          const name = this.expectIdentifier("expected property name after '.'").value;
+          expr = { kind: "PropertyExpr", object: expr, name, span: mergeSpan(expr.span, this.previous().span) };
+        }
       } else if (this.matchValue(":")) {
         const name = this.expectIdentifier("expected verb name after ':'").value;
         this.expectValue("(", "expected '(' after verb name");
@@ -809,6 +817,13 @@ class Codegen {
       this.emit("SET_PROP");
       return;
     }
+    if (target.kind === "DynamicPropertyExpr") {
+      this.compileExpr(target.object);
+      this.compileExpr(target.name);
+      this.compileExpr(statement.value);
+      this.emit("SET_PROP");
+      return;
+    }
     if (target.kind === "IndexExpr" && target.object.kind === "IdentifierExpr") {
       const local = this.requireLocal(target.object.name, target.object.span);
       this.emit("PUSH_LOCAL", local);
@@ -974,6 +989,11 @@ class Codegen {
         case "PropertyExpr":
           this.compileExpr(expr.object);
           this.emit("PUSH_LIT", this.literal(expr.name));
+          this.emit("GET_PROP");
+          break;
+        case "DynamicPropertyExpr":
+          this.compileExpr(expr.object);
+          this.compileExpr(expr.name);
           this.emit("GET_PROP");
           break;
         case "IndexExpr":

@@ -88,6 +88,7 @@ target.
 
 ```
 this.location.name           // chained property access; each `.` may yield
+target.(name)                // dynamic property access; name expression yields str
 this:verb(arg1, arg2)        // verb call; may migrate task
 $wiz:announce("hello")       // corename; resolves through $system
 pass(arg1, arg2)             // call this verb's parent-chain version
@@ -111,6 +112,10 @@ Operators (precedence high to low):
 ```
 
 `.` and `:` are syntactically distinct: `.` is property access (data), `:` is verb call (dispatch). Both may yield.
+
+`obj.(expr)` is dynamic property access. `expr` must evaluate to a string. It
+uses the same `GET_PROP` / `SET_PROP` semantics as `obj.name`, but the property
+name is supplied at runtime.
 
 `a[i]` indexes lists (1-based) and maps (by key). It is sugar for `index(a, i)`.
 

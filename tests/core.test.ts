@@ -519,19 +519,21 @@ describe("authoring", () => {
     const source = `verb :index_and_interp(name, value) rx {
   let controls = { feedback: 1 };
   controls[name] = value;
+  this.(name) = value;
   let text = "set \${name}=\${controls[name]}";
-  observe({ type: "index_interp", text: text, value: controls[name] });
+  observe({ type: "index_interp", text: text, value: controls[name], prop_value: this.(name) });
   return text;
 }`;
     const compiled = compileVerb(source);
     expect(compiled.ok).toBe(true);
-    expect(compiled.bytecode?.ops.map(([op]) => op)).toEqual(expect.arrayContaining(["INDEX_SET", "INDEX_GET", "STR_INTERP"]));
+    expect(compiled.bytecode?.ops.map(([op]) => op)).toEqual(expect.arrayContaining(["INDEX_SET", "INDEX_GET", "SET_PROP", "GET_PROP", "STR_INTERP"]));
     expect(installVerb(world, "delay_1", "index_and_interp", source, null).ok).toBe(true);
 
     const applied = world.call("index", session.id, "the_dubspace", message(actor, "delay_1", "index_and_interp", ["feedback", 0.7]));
     expect(applied.op).toBe("applied");
+    expect(world.getProp("delay_1", "feedback")).toBe(0.7);
     if (applied.op === "applied") {
-      expect(applied.observations[0]).toMatchObject({ type: "index_interp", text: "set feedback=0.7", value: 0.7 });
+      expect(applied.observations[0]).toMatchObject({ type: "index_interp", text: "set feedback=0.7", value: 0.7, prop_value: 0.7 });
     }
   });
 

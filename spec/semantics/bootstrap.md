@@ -41,6 +41,14 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 
 (The "ULID alias" column shows the conventional short form. Seeded deterministic ULID allocation is the target for runtime-created objects, but the current v1 implementation uses the stable IDs declared by seed data and preserves existing IDs on reboot.)
 
+### B2.0 `$system` properties
+
+| Property | Type | Default | Notes |
+|---|---|---|---|
+| `wizard_actions` | list<map> | `[]` | Audit trail for privileged bootstrap and operational actions. |
+| `bootstrap_token_used` | bool | false | Records consumption of the initial wizard bootstrap token. |
+| `applied_migrations` | list<str> | `[]` | Idempotency ledger for deployment-local boot migrations, including local catalog repair migrations. See [catalogs.md §CT5.4.1](../discovery/catalogs.md#ct541-local-boot-migrations). |
+
 ### B2.1 `$root` properties
 
 | Property | Type | Default | Notes |
