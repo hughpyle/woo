@@ -1,5 +1,9 @@
 import { test, expect } from "@playwright/test";
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 test("loads shell and renders nav", async ({ page }) => {
   const consoleErrors: string[] = [];
   page.on("pageerror", (err) => consoleErrors.push(err.message));
@@ -168,6 +172,8 @@ test("taskspace supports hierarchical task workflow", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
   const actor = (await page.locator(".actor").textContent())?.trim() ?? "";
+  const actorName = actor.replace(/^guest_(\d+)$/, "Guest $1");
+  const actorText = new RegExp(`${escapeRegex(actor)}|${escapeRegex(actorName)}`);
   const suffix = Date.now();
   const rootTitle = `E2E root ${suffix}`;
   const subTitle = `E2E sub ${suffix}`;
@@ -185,7 +191,7 @@ test("taskspace supports hierarchical task workflow", async ({ page }) => {
 
   const inspector = page.locator(".inspector");
   await inspector.getByRole("button", { name: "Claim" }).click();
-  await expect(inspector).toContainText(actor);
+  await expect(inspector).toContainText(actorText);
   await inspector.getByRole("button", { name: "In Progress" }).click();
   await expect(inspector.locator(".status-pill").first()).toContainText("in progress");
 

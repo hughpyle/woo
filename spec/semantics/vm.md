@@ -185,7 +185,10 @@ Logical `&&` and `||` are compiled to short-circuit jumps; no dedicated opcode.
 | `LIST_APPEND` | — | list val → list' | N | Functional append. |
 | `MAP_GET` | — | map key → val | N | `E_PROPNF` if missing. |
 | `MAP_SET` | — | map key val → map' | N | Functional. |
+| `INDEX_GET` | — | collection key → val | N | Runtime-dispatched list/map index. Lists use 1-indexed numeric keys; maps use string keys. |
+| `INDEX_SET` | — | collection key val → collection' | N | Runtime-dispatched functional list/map update. |
 | `STR_CONCAT` | n | s₁..sₙ → str | N | Concat n strings. Template strings lower to this. |
+| `STR_INTERP` | n | s₁..sₙ → str | N | Join already-stringified interpolation parts. |
 | `SPLAT` | — | list → val₁..valₙ | N | Used in `f(@args)` and `[1, 2, @rest]`. |
 
 Cold-path operations (`length`, `slice`, `delete`, `has`, `keys`, type coercions, string interpolation patterns beyond simple concat) are builtins (§19), invoked via `BUILTIN`. Hot-path opcodes are limited to what's worth specializing in the dispatch loop.

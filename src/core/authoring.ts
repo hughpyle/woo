@@ -1,10 +1,11 @@
-import { hashSource } from "./bootstrap";
+import { compileWooSource } from "./dsl-compiler";
+import { hashSource } from "./source-hash";
 import type { CompileResult, InstallResult, ObjRef, TinyBytecode, WooValue } from "./types";
 import { isErrorValue, wooError } from "./types";
 import type { WooWorld } from "./world";
 
 type AuthoringOptions = {
-  format?: "t0-source" | "t0-json-bytecode";
+  format?: "t0-source" | "woo-source" | "t0-json-bytecode";
 };
 
 export function compileVerb(source: string, options: AuthoringOptions = {}): CompileResult {
@@ -21,7 +22,14 @@ export function compileVerb(source: string, options: AuthoringOptions = {}): Com
       };
     }
   }
-  return compileT0Source(source);
+  const compiled = compileWooSource(source);
+  if (!compiled.ok || !compiled.bytecode) return compiled;
+  try {
+    verifyBytecode(compiled.bytecode);
+    return compiled;
+  } catch (err) {
+    return { ok: false, diagnostics: [compileDiagnostic(err)] };
+  }
 }
 
 export function installVerb(world: WooWorld, obj: ObjRef, name: string, source: string, expectedVersion: number | null, options: AuthoringOptions = {}): InstallResult {
@@ -32,19 +40,26 @@ export function installVerb(world: WooWorld, obj: ObjRef, name: string, source: 
   }
   const compiled = compileVerb(source, options);
   if (!compiled.ok || !compiled.bytecode) return { ok: false, version: current?.version ?? 0, diagnostics: compiled.diagnostics };
+  if (compiled.metadata?.name && compiled.metadata.name !== name) {
+    return {
+      ok: false,
+      version: current?.version ?? 0,
+      diagnostics: [{ severity: "error", code: "E_COMPILE", message: `verb header names :${compiled.metadata.name}, but install target is :${name}` }]
+    };
+  }
   const version = (current?.version ?? 0) + 1;
   world.addVerb(obj, {
     kind: "bytecode",
     name,
     aliases: [],
     owner: target.owner,
-    perms: "rxd",
-    arg_spec: {},
+    perms: compiled.metadata?.perms ?? current?.perms ?? "rxd",
+    arg_spec: compiled.metadata?.arg_spec ?? current?.arg_spec ?? {},
     source,
     source_hash: compiled.source_hash ?? hashSource(source),
     bytecode: { ...compiled.bytecode, version },
     version,
-    line_map: {}
+    line_map: compiled.line_map ?? {}
   });
   return { ok: true, version };
 }
@@ -75,76 +90,6 @@ function verifyBytecode(bytecode: TinyBytecode): void {
   }
   for (const [op] of bytecode.ops) {
     if (!VALID_OPS.has(op)) throw wooError("E_COMPILE", `unknown opcode ${op}`);
-  }
-}
-
-function compileT0Source(source: string): CompileResult {
-  // First-light parser: intentionally matches the demo verb pattern
-  // (simple this.prop assignments, one observe map, one return).
-  // The full T0 source parser belongs with the next compiler milestone.
-  try {
-    const header = source.match(/verb\s+:?([A-Za-z_][\w]*)\s*\(([^)]*)\)/);
-    if (!header) throw wooError("E_COMPILE", "expected `verb :name(args) { ... }` header");
-    const args = header[2].split(",").map((arg) => arg.trim()).filter(Boolean);
-    const ops: TinyBytecode["ops"] = [];
-    const literals: WooValue[] = [];
-    const lit = (value: WooValue) => {
-      const idx = literals.findIndex((item) => JSON.stringify(item) === JSON.stringify(value));
-      if (idx >= 0) return idx;
-      literals.push(value);
-      return literals.length - 1;
-    };
-    const pushExpr = (expr: string) => {
-      const trimmed = expr.trim();
-      const argIndex = args.indexOf(trimmed);
-      if (argIndex >= 0) ops.push(["PUSH_ARG", argIndex]);
-      else if (trimmed === "this") ops.push(["PUSH_THIS"]);
-      else if (trimmed === "actor") ops.push(["PUSH_ACTOR"]);
-      else if (trimmed === "space") ops.push(["PUSH_SPACE"]);
-      else if (trimmed === "seq") ops.push(["PUSH_SEQ"]);
-      else if (trimmed === "message") ops.push(["PUSH_MESSAGE"]);
-      else if (/^".*"$/.test(trimmed)) ops.push(["PUSH_LIT", lit(JSON.parse(trimmed))]);
-      else if (/^-?\d+(\.\d+)?$/.test(trimmed)) ops.push(["PUSH_LIT", lit(Number(trimmed))]);
-      else if (trimmed === "true" || trimmed === "false") ops.push(["PUSH_LIT", lit(trimmed === "true")]);
-      else if (trimmed === "null") ops.push(["PUSH_LIT", lit(null)]);
-      else throw wooError("E_COMPILE", `unsupported expression: ${trimmed}`);
-    };
-
-    const assignmentRe = /this\.([A-Za-z_][\w]*)\s*=\s*([^;]+);/g;
-    for (const match of source.matchAll(assignmentRe)) {
-      ops.push(["PUSH_THIS"], ["PUSH_LIT", lit(match[1])]);
-      pushExpr(match[2]);
-      ops.push(["SET_PROP"]);
-    }
-
-    const observe = source.match(/observe\s*\(\s*\{([\s\S]*?)\}\s*\)\s*;/);
-    if (observe) {
-      const pairs = observe[1]
-        .split(",")
-        .map((part) => part.trim())
-        .filter(Boolean)
-        .map((part) => part.match(/^"([^"]+)"\s*:\s*(.+)$/))
-        .filter((match): match is RegExpMatchArray => Boolean(match));
-      for (const pair of pairs) {
-        ops.push(["PUSH_LIT", lit(pair[1])]);
-        pushExpr(pair[2]);
-      }
-      ops.push(["MAKE_MAP", pairs.length], ["OBSERVE"]);
-    }
-
-    const ret = source.match(/return\s+([^;]+);/);
-    if (ret) pushExpr(ret[1]);
-    else ops.push(["PUSH_LIT", lit(null)]);
-    ops.push(["RETURN"]);
-
-    const bytecode: TinyBytecode = { ops, literals, num_locals: 0, max_stack: 8, version: 1 };
-    verifyBytecode(bytecode);
-    return { ok: true, diagnostics: [], bytecode, source_hash: hashSource(source) };
-  } catch (err) {
-    return {
-      ok: false,
-      diagnostics: [{ ...compileDiagnostic(err), span: { line: 1, column: 0 } }]
-    };
   }
 }
 
@@ -215,6 +160,8 @@ const VALID_OPS = new Set([
   "LIST_APPEND",
   "MAP_GET",
   "MAP_SET",
+  "INDEX_GET",
+  "INDEX_SET",
   "MAKE_MAP",
   "MAKE_LIST",
   "STR_CONCAT",

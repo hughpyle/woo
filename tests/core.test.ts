@@ -430,12 +430,155 @@ describe("authoring", () => {
 }`;
     const compiled = compileVerb(source);
     expect(compiled.ok).toBe(true);
+    expect(compiled.metadata).toMatchObject({ name: "set_feedback", perms: "rx", arg_spec: { params: ["value"] } });
+    expect(Object.keys(compiled.line_map ?? {}).length).toBeGreaterThan(0);
     const installed = installVerb(world, "delay_1", "set_feedback", source, null);
     expect(installed.ok).toBe(true);
+    const info = world.verbInfo("delay_1", "set_feedback");
+    expect(info.perms).toBe("rx");
+    expect(info.arg_spec).toEqual({ params: ["value"] });
+    expect(Object.keys(info.line_map as Record<string, unknown>).length).toBeGreaterThan(0);
     const applied = world.call("test", session.id, "the_dubspace", message(actor, "delay_1", "set_feedback", [0.62]));
     expect(world.getProp("delay_1", "feedback")).toBe(0.62);
     if (applied.op === "applied") expect(applied.observations[0].type).toBe("control_changed");
     expect(() => installVerb(world, "delay_1", "set_feedback", source, null)).toThrow();
+  });
+
+  it("compiles string interpolation and dynamic index get/set", () => {
+    const { world, session, actor } = authedWorld();
+    const source = `verb :index_and_interp(name, value) rx {
+  let controls = { feedback: 1 };
+  controls[name] = value;
+  let text = "set \${name}=\${controls[name]}";
+  observe({ type: "index_interp", text: text, value: controls[name] });
+  return text;
+}`;
+    const compiled = compileVerb(source);
+    expect(compiled.ok).toBe(true);
+    expect(compiled.bytecode?.ops.map(([op]) => op)).toEqual(expect.arrayContaining(["INDEX_SET", "INDEX_GET", "STR_INTERP"]));
+    expect(installVerb(world, "delay_1", "index_and_interp", source, null).ok).toBe(true);
+
+    const applied = world.call("index", session.id, "the_dubspace", message(actor, "delay_1", "index_and_interp", ["feedback", 0.7]));
+    expect(applied.op).toBe("applied");
+    if (applied.op === "applied") {
+      expect(applied.observations[0]).toMatchObject({ type: "index_interp", text: "set feedback=0.7", value: 0.7 });
+    }
+  });
+
+  it("adds line-mapped runtime traces to VM error observations", () => {
+    const { world, session, actor } = authedWorld();
+    const source = `verb :explode() rx {
+  let denom = 0;
+  return 1 / denom;
+}`;
+    expect(installVerb(world, "delay_1", "explode", source, null).ok).toBe(true);
+    const applied = world.call("explode", session.id, "the_dubspace", message(actor, "delay_1", "explode", []));
+    expect(applied.op).toBe("applied");
+    if (applied.op === "applied") {
+      expect(applied.observations[0].type).toBe("$error");
+      expect(applied.observations[0].code).toBe("E_DIV");
+      const trace = applied.observations[0].trace as Record<string, unknown>[];
+      expect(trace[0]).toMatchObject({ obj: "delay_1", verb: "explode", definer: "delay_1", line: 3 });
+    }
+  });
+
+  it("seeds dubspace loop transport verbs as authored source", () => {
+    const { world, session, actor } = authedWorld();
+    const info = world.verbInfo("the_dubspace", "start_loop");
+    expect(info.source).toContain("slot.playing = true");
+    expect(info.bytecode_version).toBeGreaterThan(0);
+
+    const started = world.call("start-loop", session.id, "the_dubspace", message(actor, "the_dubspace", "start_loop", ["slot_1"]));
+    expect(world.getProp("slot_1", "playing")).toBe(true);
+    if (started.op === "applied") expect(started.observations[0]).toMatchObject({ type: "loop_started", slot: "slot_1", loop_id: "loop-1" });
+    const stopped = world.call("stop-loop", session.id, "the_dubspace", message(actor, "the_dubspace", "stop_loop", ["slot_1"]));
+    expect(world.getProp("slot_1", "playing")).toBe(false);
+    if (stopped.op === "applied") expect(stopped.observations[0]).toMatchObject({ type: "loop_stopped", slot: "slot_1" });
+  });
+
+  it("compiles M1 source with locals, loops, conditionals, and observations", () => {
+    const { world, session, actor } = authedWorld();
+    const source = `verb :sum_to(limit) rx {
+  let total = 0;
+  for i in [1..limit] {
+    total = total + i;
+  }
+  if (total > 10) {
+    this.feedback = total;
+  } else {
+    this.feedback = 0;
+  }
+  observe({
+    type: "compiled_sum",
+    value: total,
+    large: total > 10,
+    has_feedback: "feedback" in { feedback: true }
+  });
+  return total;
+}`;
+
+    const compiled = compileVerb(source);
+    expect(compiled.ok).toBe(true);
+    expect(compiled.bytecode?.ops.some(([op]) => op === "FOR_RANGE_NEXT")).toBe(true);
+    const installed = installVerb(world, "delay_1", "sum_to", source, null);
+    expect(installed.ok).toBe(true);
+
+    const applied = world.call("compiled-sum", session.id, "the_dubspace", message(actor, "delay_1", "sum_to", [5]));
+    expect(applied.op).toBe("applied");
+    expect(world.getProp("delay_1", "feedback")).toBe(15);
+    if (applied.op === "applied") {
+      expect(applied.observations[0]).toMatchObject({ type: "compiled_sum", value: 15, large: true, has_feedback: true });
+    }
+  });
+
+  it("compiles source verb calls, pass, and try/except", () => {
+    const { world, actor } = authedWorld();
+    world.createObject({ id: "compiler_base", name: "Compiler Base", parent: "$thing", owner: "$wiz" });
+    world.createObject({ id: "compiler_child", name: "Compiler Child", parent: "compiler_base", owner: "$wiz" });
+    expect(installVerb(world, "compiler_base", "value", `verb :value() rx {
+  return 10;
+}`, null).ok).toBe(true);
+    expect(installVerb(world, "compiler_child", "value", `verb :value() rx {
+  return pass() + 5;
+}`, null).ok).toBe(true);
+    expect(installVerb(world, "delay_1", "call_child", `verb :call_child() rx {
+  return "compiler_child":value();
+}`, null).ok).toBe(true);
+    expect(installVerb(world, "delay_1", "catcher", `verb :catcher() rx {
+  try {
+    raise "E_BOOM";
+  } except err in (E_BOOM) {
+    return err["code"];
+  }
+  return "miss";
+}`, null).ok).toBe(true);
+
+    const ctx = {
+      world,
+      space: "the_dubspace",
+      seq: 110,
+      actor,
+      player: actor,
+      caller: "#-1",
+      progr: actor,
+      thisObj: "delay_1",
+      verbName: "call_child",
+      definer: "delay_1",
+      message: message(actor, "delay_1", "call_child", []),
+      observations: [],
+      observe: () => {}
+    };
+    expect(world.dispatch(ctx, "delay_1", "call_child", [])).toBe(15);
+    expect(world.dispatch({ ...ctx, verbName: "catcher", message: message(actor, "delay_1", "catcher", []) }, "delay_1", "catcher", [])).toBe("E_BOOM");
+  });
+
+  it("returns structured diagnostics for bad source", () => {
+    const result = compileVerb(`verb :bad() rx {
+  let x = ;
+}`);
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics[0]).toMatchObject({ severity: "error", code: "E_COMPILE" });
+    expect(result.diagnostics[0].span?.line).toBe(2);
   });
 
   it("verifies raw JSON bytecode fallback and versions property definitions", () => {

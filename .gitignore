@@ -4,6 +4,7 @@ coverage/
 .DS_Store
 .env
 .env.*
+.dev.vars
 .woo/
 test-results/
 playwright-report/

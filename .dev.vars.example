@@ -1,0 +1,21 @@
+# Local development environment variables.
+#
+# Copy this file to `.dev.vars` (gitignored) and edit values for local runs.
+# These are NOT used in production deploys — for that, set Cloudflare secrets
+# via `wrangler secret put` (see DEPLOY.md).
+
+# Single-use token for claiming the $wiz binding at first auth.
+# Local default is fine for dev; production must set a high-entropy value via
+# `wrangler secret put WOO_INITIAL_WIZARD_TOKEN`.
+WOO_INITIAL_WIZARD_TOKEN=local-dev-wizard-token
+
+# Per-world entropy seed for ULID minting. Different worlds use different seed
+# phrases so their object identifiers don't collide. Local default is the
+# sentinel value the runtime warns about in production.
+WOO_SEED_PHRASE=dev-seed
+
+# Local SQLite database path. Created on first run.
+WOO_DB=.woo/dev.sqlite
+
+# Optional: override the default port (5173).
+# PORT=5173

@@ -13,6 +13,7 @@ export type ErrorValue = {
   code: string;
   message?: string;
   value?: WooValue;
+  trace?: WooValue[];
 };
 
 export type Message = {
@@ -177,6 +178,12 @@ export type CompileResult = {
   diagnostics: CompileDiagnostic[];
   bytecode?: TinyBytecode;
   source_hash?: string;
+  line_map?: Record<string, WooValue>;
+  metadata?: {
+    name?: string;
+    perms?: string;
+    arg_spec?: Record<string, WooValue>;
+  };
 };
 
 export type InstallResult = {

@@ -41,6 +41,8 @@ Atomically: allocates `seq = next_seq`, increments `next_seq`, durably persists 
 
 `message` is a value (V2-encoded) of any shape. The log does not interpret it. A space subclass passes its standard `{actor, target, verb, args}` shape; an event-sourced document passes operation deltas; a turn log passes move records.
 
+**Outcome is recorded separately.** `:append` commits the message but does not yet know whether the behavior dispatched against it will succeed. Subclasses that care about success/failure (e.g., `$space`) record the outcome through a second storage operation after the behavior runs; see [reference/cloudflare.md §R3.2](../reference/cloudflare.md#r32-two-phase-log-writes) for the storage-layer split and crash-recovery rules. The log row carries an in-flight marker until the outcome lands.
+
 ### `:read(from, limit) -> {messages, next_seq, has_more}`
 
 Returns up to `limit` messages with `seq >= from`, plus the current `next_seq` and a `has_more` flag. Pure introspection; idempotent; no side effects.

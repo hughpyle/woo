@@ -75,8 +75,14 @@ fork(60) { player:tell("a minute later"); }
 suspend(seconds);
 let input = read(player);
 
+observe(event);
 emit(target, event);
 ```
+
+`observe(event)` records an observation on the current invocation route. Inside a
+sequenced call it lands in the applied frame; inside a direct call it is live
+only. `emit(target, event)` records the same event with an explicit delivery
+target.
 
 ### 7.3 Expressions
 

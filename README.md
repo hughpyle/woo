@@ -36,11 +36,17 @@ Historical milestone notes are in [notes/](notes/).
 
 ```sh
 npm install
+cp .dev.vars.example .dev.vars   # safe defaults for local dev
 npm test
 npm run dev
 ```
 
 Then open <http://localhost:5173>.
+
+## Deploy your own world
+
+woo is fork-and-deploy — see [DEPLOY.md](DEPLOY.md) for publishing your own
+world to your own Cloudflare account.
 
 ## Working Rule
 

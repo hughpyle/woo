@@ -501,8 +501,7 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
         case "RAISE":
         case "FAIL": {
           const error = errorFromValue(pop());
-          if (!raise(error)) throw error;
-          break;
+          throw error;
         }
         case "BUILTIN": {
           const builtinArgs = popArgs(numeric(operand2, "builtin argc"));
@@ -545,6 +544,38 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
           const key = assertString(pop());
           const map = assertMap(pop());
           push(allocate({ ...map, [key]: value }));
+          break;
+        }
+        case "INDEX_GET": {
+          const key = pop();
+          const collection = pop();
+          if (Array.isArray(collection)) {
+            const index = oneBasedIndex(key);
+            if (index < 0 || index >= collection.length) throw wooError("E_RANGE", "list index out of range", index + 1);
+            push(collection[index]);
+          } else {
+            const map = assertMap(collection);
+            const mapKey = assertString(key);
+            if (!(mapKey in map)) throw wooError("E_PROPNF", `map key not found: ${mapKey}`);
+            push(map[mapKey]);
+          }
+          break;
+        }
+        case "INDEX_SET": {
+          const value = pop();
+          const key = pop();
+          const collection = pop();
+          if (Array.isArray(collection)) {
+            const index = oneBasedIndex(key);
+            if (index < 0 || index >= collection.length) throw wooError("E_RANGE", "list index out of range", index + 1);
+            const next = [...collection];
+            next[index] = value;
+            push(allocate(next));
+          } else {
+            const map = assertMap(collection);
+            const mapKey = assertString(key);
+            push(allocate({ ...map, [mapKey]: value }));
+          }
           break;
         }
         case "MAKE_MAP": {
@@ -628,7 +659,7 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
     } catch (err) {
       if (isVmSuspendSignal(err)) throw err;
       if (isVmReadSignal(err)) throw err;
-      const error = normalizeVmError(err);
+      const error = attachVmTrace(normalizeVmError(err), frames, currentPc);
       if (!raise(error)) throw error;
     }
   }
@@ -835,7 +866,7 @@ function hydrateVmFrame(world: CallContext["world"], frame: SerializedVmFrame, o
 function tickWeight(op: string): number {
   if (op === "GET_PROP" || op === "SET_PROP") return 5;
   if (op === "CALL_VERB" || op === "PASS" || op === "EMIT") return 10;
-  if (op === "MAKE_LIST" || op === "MAKE_MAP" || op === "LIST_APPEND" || op === "MAP_SET" || op === "STR_CONCAT" || op === "STR_INTERP") return 5;
+  if (op === "MAKE_LIST" || op === "MAKE_MAP" || op === "LIST_APPEND" || op === "MAP_SET" || op === "INDEX_SET" || op === "STR_CONCAT" || op === "STR_INTERP") return 5;
   return 1;
 }
 
@@ -881,6 +912,41 @@ function normalizeVmError(err: unknown): ErrorValue {
   if (isErrorValue(err) && typeof err.code === "string") return err;
   if (err instanceof Error) return wooError("E_INTERNAL", err.message);
   return wooError("E_INTERNAL", "unknown VM error", String(err));
+}
+
+function attachVmTrace(error: ErrorValue, frames: VmFrame[], currentPc: number): ErrorValue {
+  if (error.trace && error.trace.length > 0) return error;
+  const trace = frames
+    .map((frame, index) => vmTraceFrame(frame, index === frames.length - 1 ? currentPc : Math.max(0, frame.pc - 1)))
+    .reverse();
+  return { ...error, trace };
+}
+
+function vmTraceFrame(frame: VmFrame, pc: number): WooValue {
+  const item: Record<string, WooValue> = {
+    obj: frame.ctx.thisObj,
+    verb: frame.ctx.verbName,
+    definer: frame.ctx.definer,
+    progr: frame.ctx.progr,
+    pc
+  };
+  try {
+    const verb = frame.ctx.world.object(frame.ctx.definer).verbs.get(frame.ctx.verbName);
+    if (verb) {
+      item.version = verb.version;
+      const mapped = verb.line_map[String(pc)];
+      if (mapped && typeof mapped === "object" && !Array.isArray(mapped)) {
+        const map = mapped as Record<string, WooValue>;
+        if (typeof map.line === "number") item.line = map.line;
+        if (typeof map.column === "number") item.column = map.column;
+        if (typeof map.end_line === "number") item.end_line = map.end_line;
+        if (typeof map.end_column === "number") item.end_column = map.end_column;
+      }
+    }
+  } catch {
+    // Trace construction is diagnostic-only and must not mask the real error.
+  }
+  return item;
 }
 
 function typeName(value: WooValue): string {

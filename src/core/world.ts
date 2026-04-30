@@ -526,7 +526,7 @@ export class WooWorld {
           logEntry.applied_ok = false;
           logEntry.error = error;
           observations.length = 0;
-          observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null });
+          observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null, trace: error.trace ?? [] });
         }
       }
 
@@ -1254,13 +1254,13 @@ export class WooWorld {
           this.parkedTaskCounter = beforeParkedTaskCounter;
           error = normalizeError(err);
           observations.length = 0;
-          observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null });
+          observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null, trace: error.trace ?? [] });
         }
       });
       return { task, observations, error };
     } catch (err) {
       const error = normalizeError(err);
-      return { task, observations: [{ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null }], error };
+      return { task, observations: [{ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null, trace: error.trace ?? [] }], error };
     }
   }
 
@@ -1296,7 +1296,7 @@ export class WooWorld {
         this.parkedTaskCounter = beforeParkedTaskCounter;
         error = normalizeError(err);
         observations.length = 0;
-        observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null });
+        observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null, trace: error.trace ?? [] });
       }
     });
     return { task, observations, error };
@@ -1358,7 +1358,7 @@ export class WooWorld {
           logEntry.applied_ok = false;
           logEntry.error = error;
           observations.length = 0;
-          observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null });
+          observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null, trace: error.trace ?? [] });
         }
       }
 

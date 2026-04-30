@@ -1,5 +1,7 @@
 import { claimBytecode, setControlBytecode, setPropBytecode, setStatusBytecode, setValueBytecode } from "./fixtures";
+import { compileWooSource } from "./dsl-compiler";
 import type { WorldRepository } from "./repository";
+import { hashSource } from "./source-hash";
 import type { ObjRef, TinyBytecode, VerbDef, WooValue } from "./types";
 import { WooWorld } from "./world";
 
@@ -115,8 +117,16 @@ function seedDubspace(world: WooWorld): void {
   bytecode(world, "$dubspace", "set_control", setControlBytecode, "verb :set_control(target, name, value) rx { ... }");
   native(world, "$dubspace", "preview_control", "preview_control", "verb :preview_control(target, name, value) rxd { ... }", { directCallable: true });
   native(world, "$dubspace", "cursor", "cursor", "verb :cursor(x, y) rxd { ... }", { directCallable: true });
-  native(world, "$dubspace", "start_loop", "start_loop", "verb :start_loop(slot) rx { ... }");
-  native(world, "$dubspace", "stop_loop", "stop_loop", "verb :stop_loop(slot) rx { ... }");
+  source(world, "$dubspace", "start_loop", `verb :start_loop(slot) rx {
+  slot.playing = true;
+  observe({ type: "loop_started", slot: slot, loop_id: slot.loop_id });
+  return true;
+}`, { replaceNative: "start_loop" });
+  source(world, "$dubspace", "stop_loop", `verb :stop_loop(slot) rx {
+  slot.playing = false;
+  observe({ type: "loop_stopped", slot: slot });
+  return true;
+}`, { replaceNative: "stop_loop" });
   native(world, "$dubspace", "save_scene", "save_scene", "verb :save_scene(name) rx { ... }");
   native(world, "$dubspace", "recall_scene", "recall_scene", "verb :recall_scene(scene) rx { ... }");
   native(world, "$dubspace", "set_drum_step", "set_drum_step", "verb :set_drum_step(voice, step, enabled) rx { ... }");
@@ -345,8 +355,39 @@ function native(world: WooWorld, obj: ObjRef, name: string, handler: string, sou
   });
 }
 
-export function hashSource(source: string): string {
-  let hash = 0;
-  for (let i = 0; i < source.length; i++) hash = (hash * 31 + source.charCodeAt(i)) | 0;
-  return `h${Math.abs(hash).toString(16)}`;
+function source(world: WooWorld, obj: ObjRef, name: string, sourceText: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; replaceNative?: string } = {}): void {
+  const existing = world.object(obj).verbs.get(name);
+  const compiled = compileWooSource(sourceText);
+  if (!compiled.ok || !compiled.bytecode) throw new Error(`seed source failed for ${obj}:${name}: ${compiled.diagnostics[0]?.message ?? "compile failed"}`);
+  const shouldReplace =
+    !existing ||
+    (existing.kind === "native" && existing.native === options.replaceNative) ||
+    (existing.kind === "bytecode" && existing.source_hash === compiled.source_hash);
+  if (!shouldReplace) {
+    const next = {
+      ...existing,
+      direct_callable: existing.direct_callable || options.directCallable === true,
+      skip_presence_check: existing.skip_presence_check || options.skipPresenceCheck === true
+    };
+    if (next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
+    return;
+  }
+  const version = existing?.kind === "bytecode" && existing.source_hash === compiled.source_hash ? existing.version : (existing?.version ?? 0) + 1;
+  world.addVerb(obj, {
+    kind: "bytecode",
+    name,
+    aliases: [],
+    owner: "$wiz",
+    perms: compiled.metadata?.perms ?? "rxd",
+    arg_spec: compiled.metadata?.arg_spec ?? {},
+    source: sourceText,
+    source_hash: compiled.source_hash ?? hashSource(sourceText),
+    bytecode: { ...compiled.bytecode, version },
+    version,
+    line_map: compiled.line_map ?? {},
+    direct_callable: options.directCallable === true,
+    skip_presence_check: options.skipPresenceCheck === true
+  });
 }
+
+export { hashSource };

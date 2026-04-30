@@ -12,6 +12,8 @@ Each Durable Object owns a SQLite database with the schema below. A DO holds the
 
 Per-object tables (`property_def`, `property_value`, `verb`, `child`, `content`, `event_schema`, `ancestor_chain`) carry an `object_id` column scoping each row to one of the hosted objects. Per-host caches (`ancestor_verb_cache`, `ancestor_prop_cache`) are keyed by the *defining* object — multiple hosted objects sharing the same ancestor share one cache entry. Per-host coordination tables (sessions, sockets) are not scoped to a hosted object.
 
+> **This schema is the CF backend's storage encoding**, not a contract on runtime types. The runtime works with the TS types in [`src/core/types.ts`](../../src/core/types.ts) and accesses storage through the [`ObjectRepository`](../../src/core/repository.ts) interface ([cloudflare.md §R3](cloudflare.md#r3-per-object-repository-interface)). Other backends (in-memory, local SQLite, JSON-folder) are free to encode differently as long as they satisfy the interface. Where this schema's encoding differs from the runtime types, the encoding is "how the CF SQLite stores it"; the runtime never sees the raw SQL shape.
+
 ### 14.1 Per-`MooObject` schema
 
 ```sql
@@ -24,7 +26,7 @@ CREATE TABLE object (
   owner       TEXT NOT NULL,
   location    TEXT,                -- ULID or NULL
   anchor      TEXT,                -- ULID of anchor; NULL = own host. Immutable.
-  flags       INTEGER NOT NULL,    -- bitfield
+  flags       TEXT NOT NULL,       -- JSON {wizard?, programmer?, fertile?, recyclable?}
   created     INTEGER NOT NULL,
   modified    INTEGER NOT NULL
 );
@@ -36,7 +38,7 @@ CREATE TABLE property_def (
   default_val TEXT NOT NULL,       -- JSON-encoded woo Value
   type_hint   TEXT,                -- nullable; for tooling
   owner       TEXT NOT NULL,
-  perms       INTEGER NOT NULL,    -- r/w/c bits
+  perms       TEXT NOT NULL,       -- string flags, e.g. "rw", "rwc"
   version     INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (object_id, name)
 );
@@ -47,27 +49,28 @@ CREATE TABLE property_value (
   name        TEXT NOT NULL,
   value       TEXT NOT NULL,       -- JSON-encoded woo Value
   owner       TEXT,                -- override; NULL = inherit defining-prop's owner
-  perms       INTEGER,             -- override; NULL = inherit
+  perms       TEXT,                -- override; NULL = inherit
   PRIMARY KEY (object_id, name)
 );
 
--- Verbs defined on a hosted object.
+-- Verbs defined on a hosted object. Bytecode + literals + locals + stack travel
+-- together as the JSON-encoded TinyBytecode shape (src/core/types.ts:62);
+-- splitting them across columns saves nothing and complicates round-tripping.
 CREATE TABLE verb (
-  object_id   TEXT NOT NULL,
-  name        TEXT NOT NULL,
-  aliases     TEXT NOT NULL,       -- JSON list
-  owner       TEXT NOT NULL,
-  perms       INTEGER NOT NULL,    -- r/w/x/d bits
-  arg_spec    TEXT NOT NULL,       -- JSON {dobj, prep, iobj}
-  source      TEXT NOT NULL,       -- raw DSL source
-  bytecode    BLOB NOT NULL,       -- compiled
-  literals    TEXT NOT NULL,       -- JSON list of woo Values
-  var_names   TEXT NOT NULL,       -- JSON list
-  num_locals  INTEGER NOT NULL,
-  max_stack   INTEGER NOT NULL,
-  line_map    TEXT NOT NULL,       -- JSON
-  source_hash TEXT NOT NULL,
-  version     INTEGER NOT NULL DEFAULT 1,
+  object_id    TEXT NOT NULL,
+  name         TEXT NOT NULL,
+  aliases      TEXT NOT NULL,      -- JSON list
+  owner        TEXT NOT NULL,
+  perms        TEXT NOT NULL,      -- string flags, e.g. "rxd", "rx"
+  arg_spec     TEXT NOT NULL,      -- JSON map of named args (per arg_spec convention)
+  source       TEXT NOT NULL,      -- raw DSL source
+  source_hash  TEXT NOT NULL,
+  kind         TEXT NOT NULL,      -- "bytecode" | "native"
+  bytecode     TEXT,               -- JSON TinyBytecode; NULL when kind="native"
+  native       TEXT,               -- handler key for native verbs; NULL otherwise
+  line_map     TEXT NOT NULL,      -- JSON
+  flags        TEXT NOT NULL,      -- JSON {direct_callable?, skip_presence_check?}
+  version      INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (object_id, name)
 );
 
@@ -98,12 +101,9 @@ CREATE TABLE ancestor_verb_cache (
   ancestor    TEXT NOT NULL,
   verb_name   TEXT NOT NULL,
   version     INTEGER NOT NULL,
-  bytecode    BLOB NOT NULL,
-  literals    TEXT NOT NULL,
-  num_locals  INTEGER NOT NULL,
-  max_stack   INTEGER NOT NULL,
+  bytecode    TEXT NOT NULL,       -- JSON TinyBytecode
   owner       TEXT NOT NULL,       -- verb's progr at compile
-  perms       INTEGER NOT NULL,
+  perms       TEXT NOT NULL,       -- string flags
   PRIMARY KEY (ancestor, verb_name)
 );
 
@@ -114,7 +114,7 @@ CREATE TABLE ancestor_prop_cache (
   version     INTEGER NOT NULL,
   default_val TEXT NOT NULL,
   owner       TEXT NOT NULL,
-  perms       INTEGER NOT NULL,
+  perms       TEXT NOT NULL,       -- string flags
   PRIMARY KEY (ancestor, prop_name)
 );
 
@@ -147,6 +147,9 @@ CREATE INDEX task_resume_at ON task(resume_at) WHERE state = 'suspended';
 
 -- Sequenced messages accepted by a hosted $space.
 -- A DO may host more than one $space (anchored cluster); rows are scoped per space.
+-- Two-phase write per cloudflare.md §R3.2: appendLog inserts with applied_ok=NULL;
+-- recordLogOutcome updates applied_ok and error after the behavior runs. Rows
+-- with applied_ok IS NULL at boot are reconciled per cloudflare.md §R3.3.
 -- See semantics/space.md.
 CREATE TABLE space_message (
   space_id    TEXT NOT NULL,
@@ -154,7 +157,7 @@ CREATE TABLE space_message (
   ts          INTEGER NOT NULL,            -- ms epoch when sequenced
   actor       TEXT NOT NULL,               -- objref
   message     TEXT NOT NULL,               -- canonical V2-encoded message map
-  applied_ok  INTEGER NOT NULL,            -- 1 if behavior succeeded; 0 if rolled back
+  applied_ok  INTEGER,                     -- 1 = success; 0 = rolled back; NULL = in-flight
   error       TEXT,                        -- canonical V2-encoded err if applied_ok = 0
   PRIMARY KEY (space_id, seq)
 );
@@ -173,14 +176,15 @@ CREATE TABLE space_snapshot (
 );
 
 -- Session state for reconnect credentials (player objects only).
--- See semantics/identity.md.
+-- Credential metadata only — connection state is in-memory, not persisted, per
+-- semantics/identity.md §I2.
 CREATE TABLE session (
-  id          TEXT PRIMARY KEY,            -- session_id (random 128-bit)
-  actor       TEXT NOT NULL,               -- objref of bound actor
-  started     INTEGER NOT NULL,
-  expires_at  INTEGER NOT NULL,
+  id             TEXT PRIMARY KEY,         -- session_id (random 128-bit)
+  actor          TEXT NOT NULL,            -- objref of bound actor
+  started        INTEGER NOT NULL,
+  expires_at     INTEGER NOT NULL,
   last_detach_at INTEGER,                  -- null while attached
-  token_class TEXT NOT NULL
+  token_class    TEXT NOT NULL             -- "guest" | "bearer" | "apikey"
 );
 
 -- Live websocket ids are not persisted. The in-memory connection registry is
