@@ -53,9 +53,11 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
   // cursor wrapping differs. Returns null on a fresh DO (no `object` rows yet)
   // so createWorld() runs bootstrap + auto-install for first-light boot.
   //
-  // save() is unsupported: the runtime uses per-object methods inside
-  // transaction()/savepoint() blocks. If something calls save() on the CF
-  // backend that's a bug in the routing — we fail loudly to surface it.
+  // save() is implemented via the per-object methods inside one transaction.
+  // createWorld() calls world.persist() once after bootstrap, BEFORE
+  // enableIncrementalPersistence() flips the runtime to per-object writes —
+  // at that moment the runtime takes the WorldRepository.save() path, so the
+  // CF backend has to flush the bootstrap state through this method.
 
   load(): SerializedWorld | null {
     const objectRows = this.all("SELECT * FROM object ORDER BY id");
