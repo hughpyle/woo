@@ -33,6 +33,24 @@ Every frame has a `progr` field (the verb owner at the time of compilation). Per
 
 A wizard `progr` bypasses all perm checks except where explicitly restricted.
 
+Dispatch route is not an authority model. Direct calls, sequenced `$space:call`,
+REST/WS ingress, parked-task resumes, and VM `CALL_VERB`/`PASS` choose ordering,
+durability, presence, and transport behavior; all object behavior still enters
+the same permission kernel:
+
+1. Resolve the verb by normal object lookup.
+2. Check that the caller's current `progr` may execute it: `x`, verb owner, or
+   wizard.
+3. Run the new frame with `progr` set to the resolved verb's owner.
+4. Check property reads, writes, definitions, and metadata changes against the
+   current frame's `progr`.
+
+Public wizard-owned verbs are therefore public capabilities. This is allowed and
+MOO-like, but such verbs must either be deliberately capability-shaped or check
+`actor`/`player` and drop effective permissions before doing caller-controlled
+work. Generic wizard-owned setters on a universal ancestor are not safe public
+capabilities.
+
 ### 11.5 Cross-host trust
 
 When a task migrates between persistent hosts within the same deployment, the receiver trusts the migrated frame's `progr`. The deployment boundary is the trust boundary.

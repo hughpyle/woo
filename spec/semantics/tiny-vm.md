@@ -155,7 +155,13 @@ observation at that `seq`.
 This preserves the order of attempted actions while keeping materialized state
 deterministic.
 
-## T0 Seed Behavior Sketch
+## T0 Fixture Behavior Sketch
+
+These fixtures are useful bytecode smoke tests and narrow demo building blocks.
+They are not a recommendation to expose universal public mutators. If installed
+on a universal ancestor such as `$root`, generic setters must be non-executable
+or otherwise policy-gated; public wizard-owned generic setters are public wizard
+capabilities.
 
 Generic `object:set_value(value)`:
 
@@ -193,9 +199,9 @@ T0 should be a subset of the full VM in [vm.md](vm.md):
 
 ## Concrete Fixtures
 
-Canonical T0 bytecode for five seeded verbs. Each is shown as pseudocode (the verb body the implementer would write if T0 had a source language) followed by the JSON bytecode that an implementer can load directly. These are the load-bearing fixtures for the demos; other seeded verbs follow the same patterns.
+Canonical T0 bytecode for five fixture verbs. Each is shown as pseudocode (the verb body the implementer would write if T0 had a source language) followed by the JSON bytecode that an implementer can load directly. These are load-bearing VM fixtures; demo catalogs should prefer narrow object-specific verbs.
 
-### Fixture 1: `$root:set_value(value)`
+### Fixture 1: `object:set_value(value)`
 
 The simplest mutator. Sets `this.value` to the first argument and emits a `value_changed` observation.
 
@@ -232,7 +238,7 @@ Bytecode:
 }
 ```
 
-### Fixture 2: `$root:set_prop(name, value)`
+### Fixture 2: `object:set_prop(name, value)`
 
 Generic property setter: writes `this[arg[0]] = arg[1]` and emits `property_changed`.
 

@@ -189,6 +189,12 @@ Note the asymmetry: a property *definition* lives on one specific ancestor (with
 2. Permission check: caller `progr` must have `w` on the prop, OR own the value owner, OR be a wizard.
 3. Write the value into `obj`'s own `property_value` table. Does *not* propagate to descendants.
 
+An implementation may carry ad hoc local property values that do not yet have a
+formal property definition, usually from bootstrap or migration. These values are
+readable but not public-writable by default; only the object's owner or a wizard
+may create or update them through checked VM property operations. Publicly
+writable extension points should be explicit property definitions with `w`.
+
 ### 10.3 Defining
 
 `define_prop(obj, name, default, perms)` (compiled to `DEFINE_PROP`):

@@ -89,18 +89,18 @@ function seedUniversal(world: WooWorld): void {
   seedProp(world, "$system", "wizard_actions", []);
   seedProp(world, "$system", "bootstrap_token_used", false);
   seedProp(world, "$system", "applied_migrations", []);
-  define(world, "$actor", "presence_in", [], "list<obj>");
-  define(world, "$actor", "features", [], "list<obj>");
-  define(world, "$actor", "features_version", 0, "int");
-  define(world, "$player", "session_id", null, "str|null");
+  define(world, "$actor", "presence_in", [], "list<obj>", "r");
+  define(world, "$actor", "features", [], "list<obj>", "r");
+  define(world, "$actor", "features_version", 0, "int", "r");
+  define(world, "$player", "session_id", null, "str|null", "r");
   define(world, "$player", "home", "$nowhere", "obj|null");
   removeSeedProperty(world, "$player", "attached_sockets");
-  define(world, "$space", "next_seq", 1, "int");
-  define(world, "$space", "subscribers", [], "list<obj>");
-  define(world, "$space", "last_snapshot_seq", 0, "int");
-  define(world, "$space", "features", [], "list<obj>");
-  define(world, "$space", "features_version", 0, "int");
-  define(world, "$space", "auto_presence", false, "bool");
+  define(world, "$space", "next_seq", 1, "int", "r");
+  define(world, "$space", "subscribers", [], "list<obj>", "r");
+  define(world, "$space", "last_snapshot_seq", 0, "int", "r");
+  define(world, "$space", "features", [], "list<obj>", "r");
+  define(world, "$space", "features_version", 0, "int", "r");
+  define(world, "$space", "auto_presence", false, "bool", "r");
   define(world, "$catalog", "catalog_name", "", "str");
   define(world, "$catalog", "alias", "", "str");
   define(world, "$catalog", "version", "", "str");
@@ -115,14 +115,14 @@ function seedUniversal(world: WooWorld): void {
   seedProp(world, "$catalog_registry", "features_version", 0);
   seedProp(world, "$catalog_registry", "installed_catalogs", []);
 
-  bytecode(world, "$root", "set_value", setValueBytecode, "verb :set_value(value) rx { ... }");
-  bytecode(world, "$root", "set_prop", setPropBytecode, "verb :set_prop(name, value) rx { ... }");
+  bytecode(world, "$root", "set_value", setValueBytecode, "verb :set_value(value) r { ... }", { perms: "r" });
+  bytecode(world, "$root", "set_prop", setPropBytecode, "verb :set_prop(name, value) r { ... }", { perms: "r" });
   native(world, "$root", "describe", "describe", "verb :describe() rxd { ... }", { directCallable: true });
   native(world, "$root", "title", "default_title", "verb :title() rxd { return this.name; }", { directCallable: true });
-  native(world, "$player", "on_disfunc", "player_on_disfunc", "verb :on_disfunc() rx { ... }");
-  native(world, "$player", "moveto", "player_moveto", "verb :moveto(target) rx { ... }");
-  native(world, "$guest", "on_disfunc", "guest_on_disfunc", "verb :on_disfunc() rx { ... }");
-  native(world, "$system", "return_guest", "return_guest", "verb :return_guest(guest) rx { ... }");
+  native(world, "$player", "on_disfunc", "player_on_disfunc", "verb :on_disfunc() r { ... }", { perms: "r" });
+  native(world, "$player", "moveto", "player_moveto", "verb :moveto(target) r { ... }", { perms: "r" });
+  native(world, "$guest", "on_disfunc", "guest_on_disfunc", "verb :on_disfunc() r { ... }", { perms: "r" });
+  native(world, "$system", "return_guest", "return_guest", "verb :return_guest(guest) r { ... }", { perms: "r" });
   native(world, "$thing", "can_be_attached_by", "feature_can_be_attached_by", "verb :can_be_attached_by(actor) rxd { ... }", { directCallable: true });
   for (const obj of ["$actor", "$space"]) {
     native(world, obj, "add_feature", "add_feature", "verb :add_feature(f) rx { ... }");
@@ -152,14 +152,20 @@ function seedGuests(world: WooWorld): void {
   }
 }
 
-function define(world: WooWorld, obj: ObjRef, name: string, defaultValue: WooValue, typeHint: string): void {
-  if (world.object(obj).propertyDefs.has(name)) return;
+function define(world: WooWorld, obj: ObjRef, name: string, defaultValue: WooValue, typeHint: string, perms = "rw"): void {
+  const existing = world.object(obj).propertyDefs.get(name);
+  if (existing) {
+    if (existing.typeHint !== typeHint || existing.perms !== perms) {
+      world.defineProperty(obj, { ...existing, typeHint, perms, version: existing.version + 1 });
+    }
+    return;
+  }
   world.defineProperty(obj, {
     name,
     defaultValue,
     typeHint,
     owner: "$wiz",
-    perms: "rw"
+    perms
   });
 }
 
@@ -189,15 +195,16 @@ function reparentSeed(world: WooWorld, obj: ObjRef, parent: ObjRef): void {
   world.object(parent).children.add(obj);
 }
 
-function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: TinyBytecode, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean } = {}): void {
+function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: TinyBytecode, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; perms?: string } = {}): void {
   const existing = world.object(obj).verbs.get(name);
   if (existing) {
     const next = {
       ...existing,
+      perms: options.perms ?? existing.perms,
       direct_callable: existing.direct_callable || options.directCallable === true,
       skip_presence_check: existing.skip_presence_check || options.skipPresenceCheck === true
     };
-    if (next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
+    if (next.perms !== existing.perms || next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
     return;
   }
   world.addVerb(obj, {
@@ -205,7 +212,7 @@ function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: Tin
     name,
     aliases: [],
     owner: "$wiz",
-    perms: "rxd",
+    perms: options.perms ?? "rxd",
     arg_spec: {},
     source,
     source_hash: hashSource(source),
@@ -217,15 +224,16 @@ function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: Tin
   });
 }
 
-function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean } = {}): void {
+function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; perms?: string } = {}): void {
   const existing = world.object(obj).verbs.get(name);
   if (existing) {
     const next = {
       ...existing,
+      perms: options.perms ?? existing.perms,
       direct_callable: existing.direct_callable || options.directCallable === true,
       skip_presence_check: existing.skip_presence_check || options.skipPresenceCheck === true
     };
-    if (next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
+    if (next.perms !== existing.perms || next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
     return;
   }
   world.addVerb(obj, {
@@ -233,7 +241,7 @@ function native(world: WooWorld, obj: ObjRef, name: string, handler: string, sou
     name,
     aliases: [],
     owner: "$wiz",
-    perms: "rxd",
+    perms: options.perms ?? "rxd",
     arg_spec: {},
     source,
     source_hash: hashSource(source),

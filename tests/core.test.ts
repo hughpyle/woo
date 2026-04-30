@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { compileVerb, definePropertyVersioned, installVerb } from "../src/core/authoring";
 import { bootstrap, createWorld, createWorldFromSerialized, nonEmptyHostScopedWorld, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
-import type { Message, VerbDef } from "../src/core/types";
+import type { Message, TinyBytecode, VerbDef } from "../src/core/types";
 
 function message(actor: string, target: string, verb: string, args: unknown[] = []): Message {
   return { actor, target, verb, args: args as any[] };
@@ -27,6 +27,22 @@ function nativeVerb(name: string, native = "describe", owner = "$wiz"): VerbDef 
     version: 1,
     line_map: {},
     native
+  };
+}
+
+function bytecodeVerb(name: string, bytecode: TinyBytecode, owner = "$wiz", perms = "rxd"): VerbDef {
+  return {
+    kind: "bytecode",
+    name,
+    aliases: [],
+    owner,
+    perms,
+    arg_spec: {},
+    source: `test ${name}`,
+    source_hash: `test-${name}`,
+    version: 1,
+    line_map: {},
+    bytecode
   };
 }
 
@@ -69,6 +85,235 @@ describe("woo core", () => {
     world.setProp("the_taskspace", "description", "private taskspace");
     expect((world.state(actor).objects.the_taskspace as Record<string, unknown>).description).toBeNull();
     expect((world.state("$wiz").objects.the_taskspace as Record<string, unknown>).description).toBe("private taskspace");
+
+    const described = world.directCall("describe-private", actor, "the_taskspace", "describe", []);
+    expect(described.op).toBe("result");
+    if (described.op === "result") expect((described.result as Record<string, unknown>).description).toBeNull();
+  });
+
+  it("rejects non-x verbs across direct, sequenced, CALL_VERB, and PASS dispatch", () => {
+    const { world, session, actor } = authedWorld();
+    world.createObject({ id: "no_x_target", name: "No X Target", parent: "$thing", owner: "$wiz" });
+    world.addVerb("no_x_target", {
+      ...nativeVerb("sealed", "describe", "$wiz"),
+      perms: "rd",
+      direct_callable: true
+    });
+
+    const direct = world.directCall("no-x-direct", actor, "no_x_target", "sealed", []);
+    expect(direct.op).toBe("error");
+    if (direct.op === "error") expect(direct.error.code).toBe("E_PERM");
+
+    const sequenced = world.call("no-x-sequenced", session.id, "the_dubspace", message(actor, "no_x_target", "sealed", []));
+    expect(sequenced.op).toBe("applied");
+    if (sequenced.op === "applied") expect(sequenced.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
+
+    world.addVerb(
+      "delay_1",
+      bytecodeVerb(
+        "call_sealed",
+        {
+          literals: ["no_x_target", "sealed"],
+          num_locals: 0,
+          max_stack: 2,
+          version: 1,
+          ops: [["PUSH_LIT", 0], ["PUSH_LIT", 1], ["CALL_VERB", 0], ["RETURN"]]
+        },
+        actor
+      )
+    );
+    let callErr: unknown;
+    try {
+      world.dispatch(
+        {
+          world,
+          space: "the_dubspace",
+          seq: 1,
+          actor,
+          player: actor,
+          caller: "#-1",
+          progr: actor,
+          thisObj: "delay_1",
+          verbName: "call_sealed",
+          definer: "delay_1",
+          message: message(actor, "delay_1", "call_sealed", []),
+          observations: [],
+          observe: () => {}
+        },
+        "delay_1",
+        "call_sealed",
+        []
+      );
+    } catch (err) {
+      callErr = err;
+    }
+    expect(callErr).toMatchObject({ code: "E_PERM" });
+
+    world.createObject({ id: "no_x_base", name: "No X Base", parent: "$thing", owner: "$wiz" });
+    world.createObject({ id: "no_x_child", name: "No X Child", parent: "no_x_base", owner: actor });
+    world.addVerb(
+      "no_x_base",
+      bytecodeVerb("value", { literals: [], num_locals: 0, max_stack: 1, version: 1, ops: [["PUSH_INT", 1], ["RETURN"]] }, "$wiz", "r")
+    );
+    world.addVerb(
+      "no_x_child",
+      bytecodeVerb("value", { literals: [], num_locals: 0, max_stack: 1, version: 1, ops: [["PASS", 0], ["RETURN"]] }, actor)
+    );
+    let passErr: unknown;
+    try {
+      world.dispatch(
+        {
+          world,
+          space: "the_dubspace",
+          seq: 2,
+          actor,
+          player: actor,
+          caller: "#-1",
+          progr: actor,
+          thisObj: "no_x_child",
+          verbName: "value",
+          definer: "no_x_child",
+          message: message(actor, "no_x_child", "value", []),
+          observations: [],
+          observe: () => {}
+        },
+        "no_x_child",
+        "value",
+        []
+      );
+    } catch (err) {
+      passErr = err;
+    }
+    expect(passErr).toMatchObject({ code: "E_PERM" });
+  });
+
+  it("checks VM property mutations against the running progr", () => {
+    const { world, session, actor } = authedWorld();
+    world.createObject({ id: "private_box", name: "Private Box", parent: "$thing", owner: "$wiz" });
+    world.defineProperty("private_box", {
+      name: "secret",
+      defaultValue: "before",
+      owner: "$wiz",
+      perms: "r",
+      typeHint: "str"
+    });
+    world.addVerb(
+      "delay_1",
+      bytecodeVerb(
+        "write_private",
+        {
+          literals: ["private_box", "secret", "after", null],
+          num_locals: 0,
+          max_stack: 3,
+          version: 1,
+          ops: [["PUSH_LIT", 0], ["PUSH_LIT", 1], ["PUSH_LIT", 2], ["SET_PROP"], ["PUSH_LIT", 3], ["RETURN"]]
+        },
+        actor
+      )
+    );
+
+    const failedWrite = world.call("private-write", session.id, "the_dubspace", message(actor, "delay_1", "write_private", []));
+    expect(failedWrite.op).toBe("applied");
+    if (failedWrite.op === "applied") expect(failedWrite.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
+    expect(world.getProp("private_box", "secret")).toBe("before");
+
+    world.addVerb(
+      "delay_1",
+      bytecodeVerb(
+        "define_on_wiz",
+        {
+          literals: ["$wiz", "new_private_prop", "x", "rw", null],
+          num_locals: 0,
+          max_stack: 4,
+          version: 1,
+          ops: [["PUSH_LIT", 0], ["PUSH_LIT", 1], ["PUSH_LIT", 2], ["PUSH_LIT", 3], ["DEFINE_PROP"], ["PUSH_LIT", 4], ["RETURN"]]
+        },
+        actor
+      )
+    );
+    const failedDefine = world.call("private-define", session.id, "the_dubspace", message(actor, "delay_1", "define_on_wiz", []));
+    expect(failedDefine.op).toBe("applied");
+    if (failedDefine.op === "applied") expect(failedDefine.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
+    expect(() => world.propertyInfo("$wiz", "new_private_prop")).toThrow();
+
+    world.addVerb(
+      "delay_1",
+      bytecodeVerb(
+        "retag_private",
+        {
+          literals: ["private_box", "secret", { perms: "rw" }, null],
+          num_locals: 0,
+          max_stack: 3,
+          version: 1,
+          ops: [["PUSH_LIT", 0], ["PUSH_LIT", 1], ["PUSH_LIT", 2], ["SET_PROP_INFO"], ["PUSH_LIT", 3], ["RETURN"]]
+        },
+        actor
+      )
+    );
+    const failedInfo = world.call("private-info", session.id, "the_dubspace", message(actor, "delay_1", "retag_private", []));
+    expect(failedInfo.op).toBe("applied");
+    if (failedInfo.op === "applied") expect(failedInfo.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
+    expect(world.propertyInfo("private_box", "secret").perms).toBe("r");
+  });
+
+  it("does not expose inherited generic root setters as public capabilities", () => {
+    const { world, session, actor } = authedWorld();
+    const before = world.getProp("$wiz", "description");
+    const result = world.call("root-setter", session.id, "the_dubspace", message(actor, "$wiz", "set_prop", ["description", "pwned"]));
+    expect(result.op).toBe("applied");
+    if (result.op === "applied") expect(result.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
+    expect(world.getProp("$wiz", "description")).toBe(before);
+    expect(world.verbInfo("$root", "set_prop").perms).not.toContain("x");
+  });
+
+  it("does not expose maintenance verbs as public capabilities", () => {
+    const { world, session, actor } = authedWorld();
+    const wizLocation = world.object("$wiz").location;
+    const moved = world.call("move-wiz", session.id, "the_dubspace", message(actor, "$wiz", "moveto", ["the_dubspace"]));
+    expect(moved.op).toBe("applied");
+    if (moved.op === "applied") expect(moved.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
+    expect(world.object("$wiz").location).toBe(wizLocation);
+
+    const returned = world.call("return-guest", session.id, "the_dubspace", message(actor, "$system", "return_guest", [actor]));
+    expect(returned.op).toBe("applied");
+    if (returned.op === "applied") expect(returned.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
+
+    const reset = world.call("reset-guest", session.id, "the_dubspace", message(actor, actor, "on_disfunc", []));
+    expect(reset.op).toBe("applied");
+    if (reset.op === "applied") expect(reset.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
+  });
+
+  it("scopes dubspace public mutators to controls in that dubspace", () => {
+    const { world, session, actor } = authedWorld();
+    const before = world.getProp("$wiz", "description");
+    const rejected = world.call("dubspace-set-wiz", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["$wiz", "description", "pwned"]));
+    expect(rejected.op).toBe("applied");
+    if (rejected.op === "applied") expect(rejected.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
+    expect(world.getProp("$wiz", "description")).toBe(before);
+
+    const valid = world.call("dubspace-set-valid", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.63]));
+    expect(valid.op).toBe("applied");
+    if (valid.op === "applied") expect(valid.observations[0]).toMatchObject({ type: "control_changed", target: "delay_1", name: "wet" });
+    expect(world.getProp("delay_1", "wet")).toBe(0.63);
+
+    const badSlot = world.call("dubspace-start-wiz", session.id, "the_dubspace", message(actor, "the_dubspace", "start_loop", ["$wiz"]));
+    expect(badSlot.op).toBe("applied");
+    if (badSlot.op === "applied") expect(badSlot.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
+    expect(world.propOrNull("$wiz", "playing")).toBeNull();
+  });
+
+  it("runs chat command dispatch under actor authority when entering the planned verb", () => {
+    const { world, actor } = authedWorld();
+    world.createObject({ id: "sealed_sign", name: "Sealed Sign", parent: "$thing", owner: "$wiz", location: "the_chatroom" });
+    world.addVerb("sealed_sign", {
+      ...nativeVerb("poke", "default_title", "$wiz"),
+      perms: "r",
+      direct_callable: true
+    });
+
+    const result = world.directCall("sealed-command", actor, "the_chatroom", "command", ["poke Sealed Sign"]);
+    expect(result.op).toBe("error");
+    if (result.op === "error") expect(result.error.code).toBe("E_PERM");
   });
 
   it("seeds readable descriptions for every bootstrap object", () => {

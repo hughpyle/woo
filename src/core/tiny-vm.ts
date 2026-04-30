@@ -195,6 +195,7 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
   const callVerb = (obj: string, name: string, callArgs: WooValue[], startAt?: string | null): void => {
     const caller = frame();
     const { definer, verb } = startAt === undefined ? caller.ctx.world.resolveVerb(obj, name) : caller.ctx.world.resolveVerbFrom(startAt, name);
+    caller.ctx.world.assertCanExecuteVerb(caller.ctx.progr, obj, name, verb);
     const callCtx: CallContext = {
       ...caller.ctx,
       thisObj: obj,
@@ -426,14 +427,14 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
         case "GET_PROP": {
           const name = assertString(pop());
           const obj = assertObj(pop());
-          push(current.ctx.world.getProp(obj, name));
+          push(current.ctx.world.getPropChecked(current.ctx.progr, obj, name));
           break;
         }
         case "SET_PROP": {
           const value = pop();
           const name = assertString(pop());
           const obj = assertObj(pop());
-          current.ctx.world.setProp(obj, name, value);
+          current.ctx.world.setPropChecked(current.ctx.progr, obj, name, value);
           break;
         }
         case "HAS_PROP": {
@@ -447,15 +448,13 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
           const defaultValue = pop();
           const name = assertString(pop());
           const obj = assertObj(pop());
-          current.ctx.world.defineProperty(obj, { name, defaultValue, perms, owner: current.ctx.progr });
+          current.ctx.world.definePropertyChecked(current.ctx.progr, obj, { name, defaultValue, perms, owner: current.ctx.progr });
           break;
         }
         case "UNDEFINE_PROP": {
           const name = assertString(pop());
-          const obj = current.ctx.world.object(assertObj(pop()));
-          obj.propertyDefs.delete(name);
-          obj.properties.delete(name);
-          obj.propertyVersions.delete(name);
+          const obj = assertObj(pop());
+          current.ctx.world.undefinePropertyChecked(current.ctx.progr, obj, name);
           break;
         }
         case "PROP_INFO": {
@@ -468,14 +467,7 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
           const info = assertMap(pop());
           const name = assertString(pop());
           const obj = assertObj(pop());
-          const currentInfo = assertMap(current.ctx.world.propertyInfo(obj, name) as WooValue);
-          const definedOn = assertObj(currentInfo.defined_on);
-          const def = current.ctx.world.object(definedOn).propertyDefs.get(name);
-          if (!def) throw wooError("E_PROPNF", `property not found: ${name}`, name);
-          if (typeof info.owner === "string") def.owner = info.owner;
-          if (typeof info.perms === "string") def.perms = info.perms;
-          if (typeof info.type_hint === "string") def.typeHint = info.type_hint;
-          def.version += 1;
+          current.ctx.world.setPropertyInfoChecked(current.ctx.progr, obj, name, info);
           break;
         }
 

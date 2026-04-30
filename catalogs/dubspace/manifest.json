@@ -90,7 +90,7 @@
           "name": "set_control",
           "perms": "rx",
           "arg_spec": { "args": ["target", "name", "value"] },
-          "source": "verb :set_control(target, name, value) rx { target.(name) = value; observe({ type: \"control_changed\", target: target, name: name, value: value }); return value; }"
+          "source": "verb :set_control(target, name, value) rx { let allowed = [\"loop_id\", \"playing\", \"gain\", \"freq\", \"send\", \"time\", \"feedback\", \"wet\", \"cutoff\"]; if (!(target in contents(this)) || !(name in allowed)) { raise { code: \"E_PERM\", message: \"control is not writable through this dubspace\", value: { target: target, name: name } }; } target.(name) = value; observe({ type: \"control_changed\", target: target, name: name, value: value }); return value; }"
         },
         {
           "name": "preview_control",
@@ -110,13 +110,13 @@
           "name": "start_loop",
           "perms": "rx",
           "arg_spec": { "args": ["slot"] },
-          "source": "verb :start_loop(slot) rx { slot.playing = true; observe({ type: \"loop_started\", slot: slot, loop_id: slot.loop_id }); return true; }"
+          "source": "verb :start_loop(slot) rx { if (!(slot in contents(this))) { raise { code: \"E_PERM\", message: \"loop slot is not in this dubspace\", value: slot }; } slot.playing = true; observe({ type: \"loop_started\", slot: slot, loop_id: slot.loop_id }); return true; }"
         },
         {
           "name": "stop_loop",
           "perms": "rx",
           "arg_spec": { "args": ["slot"] },
-          "source": "verb :stop_loop(slot) rx { slot.playing = false; observe({ type: \"loop_stopped\", slot: slot }); return true; }"
+          "source": "verb :stop_loop(slot) rx { if (!(slot in contents(this))) { raise { code: \"E_PERM\", message: \"loop slot is not in this dubspace\", value: slot }; } slot.playing = false; observe({ type: \"loop_stopped\", slot: slot }); return true; }"
         },
         {
           "name": "set_drum_step",

@@ -337,7 +337,97 @@ export class WooWorld {
 
   canReadProperty(actor: ObjRef, objRef: ObjRef, name: string): boolean {
     const info = this.propertyInfo(objRef, name);
-    return Boolean(this.object(actor).flags.wizard) || info.owner === actor || String(info.perms).includes("r");
+    return this.canBypassPerms(actor) || info.owner === actor || String(info.perms).includes("r");
+  }
+
+  canWriteProperty(progr: ObjRef, objRef: ObjRef, name: string): boolean {
+    const info = this.propertyInfo(objRef, name);
+    return this.canBypassPerms(progr) || info.owner === progr || String(info.perms).includes("w");
+  }
+
+  getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): WooValue {
+    if (!this.canReadProperty(progr, objRef, name)) {
+      throw wooError("E_PERM", `${progr} cannot read ${objRef}.${name}`, { progr, obj: objRef, property: name });
+    }
+    return this.getProp(objRef, name);
+  }
+
+  setPropChecked(progr: ObjRef, objRef: ObjRef, name: string, value: WooValue): void {
+    try {
+      if (!this.canWriteProperty(progr, objRef, name)) {
+        throw wooError("E_PERM", `${progr} cannot write ${objRef}.${name}`, { progr, obj: objRef, property: name });
+      }
+    } catch (err) {
+      if (!isErrorValue(err) || err.code !== "E_PROPNF") throw err;
+      const obj = this.object(objRef);
+      if (!this.canBypassPerms(progr) && obj.owner !== progr) {
+        throw wooError("E_PERM", `${progr} cannot create ${objRef}.${name}`, { progr, obj: objRef, property: name });
+      }
+    }
+    this.setProp(objRef, name, value);
+  }
+
+  definePropertyChecked(progr: ObjRef, objRef: ObjRef, def: Omit<PropertyDef, "version"> & { version?: number }): PropertyDef {
+    const obj = this.object(objRef);
+    const wizard = this.canBypassPerms(progr);
+    if (!wizard && obj.owner !== progr) {
+      throw wooError("E_PERM", `${progr} cannot define properties on ${objRef}`, { progr, obj: objRef, property: def.name });
+    }
+    if (!wizard && def.owner !== progr) {
+      throw wooError("E_PERM", `${progr} cannot create property ${objRef}.${def.name} owned by ${def.owner}`, { progr, obj: objRef, property: def.name, owner: def.owner });
+    }
+    try {
+      this.propertyInfo(objRef, def.name);
+      throw wooError("E_INVARG", `property already exists: ${objRef}.${def.name}`, { obj: objRef, property: def.name });
+    } catch (err) {
+      if (!isErrorValue(err) || err.code !== "E_PROPNF") throw err;
+    }
+    return this.defineProperty(objRef, def);
+  }
+
+  undefinePropertyChecked(progr: ObjRef, objRef: ObjRef, name: string): void {
+    const obj = this.object(objRef);
+    const def = obj.propertyDefs.get(name);
+    if (!def) throw wooError("E_PROPNF", `property not defined on ${objRef}: ${name}`, { obj: objRef, property: name });
+    if (!this.canBypassPerms(progr) && obj.owner !== progr && def.owner !== progr) {
+      throw wooError("E_PERM", `${progr} cannot undefine ${objRef}.${name}`, { progr, obj: objRef, property: name });
+    }
+    obj.propertyDefs.delete(name);
+    obj.properties.delete(name);
+    obj.propertyVersions.delete(name);
+    obj.modified = Date.now();
+    this.persistObject(objRef);
+    this.persist();
+  }
+
+  setPropertyInfoChecked(progr: ObjRef, objRef: ObjRef, name: string, info: Record<string, WooValue>): void {
+    const currentInfo = this.propertyInfo(objRef, name);
+    const definedOn = assertObj(currentInfo.defined_on);
+    const obj = this.object(definedOn);
+    const def = obj.propertyDefs.get(name);
+    if (!def) throw wooError("E_PROPNF", `property not found: ${name}`, name);
+
+    const wizard = this.canBypassPerms(progr);
+    const owner = def.owner === progr;
+    const wantsOwner = typeof info.owner === "string" && info.owner !== def.owner;
+    const wantsPerms = typeof info.perms === "string" && info.perms !== def.perms;
+    const wantsType = typeof info.type_hint === "string" && info.type_hint !== (def.typeHint ?? null);
+    if ((wantsPerms || wantsType) && !wizard && !owner) {
+      throw wooError("E_PERM", `${progr} cannot change metadata for ${definedOn}.${name}`, { progr, obj: definedOn, property: name });
+    }
+    if (wantsOwner && !wizard && !owner && !def.perms.includes("c")) {
+      throw wooError("E_PERM", `${progr} cannot change owner for ${definedOn}.${name}`, { progr, obj: definedOn, property: name });
+    }
+    if (typeof info.owner === "string") {
+      this.object(info.owner);
+      def.owner = info.owner;
+    }
+    if (typeof info.perms === "string") def.perms = info.perms;
+    if (typeof info.type_hint === "string") def.typeHint = info.type_hint;
+    def.version += 1;
+    obj.modified = Date.now();
+    this.persistObject(definedOn);
+    this.persist();
   }
 
   propOrNullForActor(actor: ObjRef, objRef: ObjRef, name: string): WooValue {
@@ -419,7 +509,7 @@ export class WooWorld {
       return {
         name,
         owner: target.owner,
-        perms: "rw",
+        perms: "r",
         defined_on: objRef,
         type_hint: null,
         version: target.propertyVersions.get(name) ?? 1,
@@ -427,6 +517,15 @@ export class WooWorld {
       };
     }
     throw wooError("E_PROPNF", `property not found: ${name}`, name);
+  }
+
+  canExecuteVerb(progr: ObjRef, verb: VerbDef): boolean {
+    return verb.perms.includes("x") || verb.owner === progr || this.canBypassPerms(progr);
+  }
+
+  assertCanExecuteVerb(progr: ObjRef, target: ObjRef, name: string, verb: VerbDef): void {
+    if (this.canExecuteVerb(progr, verb)) return;
+    throw wooError("E_PERM", `${progr} cannot execute ${target}:${name}`, { progr, target, verb: name, owner: verb.owner, perms: verb.perms });
   }
 
   auth(token: string): Session {
@@ -810,6 +909,7 @@ export class WooWorld {
     this.callDepth += 1;
     try {
       const { definer, verb } = startAt === undefined ? this.resolveVerb(target, verbName) : this.resolveVerbFrom(startAt, verbName);
+      this.assertCanExecuteVerb(ctx.progr, target, verbName, verb);
       const runCtx: CallContext = {
         ...ctx,
         thisObj: target,
@@ -1592,7 +1692,11 @@ export class WooWorld {
   }
 
   private isWizard(actor: ObjRef): boolean {
-    return Boolean(this.object(actor).flags.wizard);
+    return this.canBypassPerms(actor);
+  }
+
+  private canBypassPerms(actor: ObjRef): boolean {
+    return this.objects.get(actor)?.flags.wizard === true;
   }
 
   recordWizardAction(actor: ObjRef, action: string, details: Record<string, WooValue>): void {
@@ -2131,10 +2235,11 @@ export class WooWorld {
   }
 
   private registerNativeHandlers(): void {
-    this.nativeHandlers.set("describe", (ctx) => this.describe(ctx.thisObj));
+    this.nativeHandlers.set("describe", (ctx) => this.describeForActor(ctx.thisObj, ctx.actor));
     this.nativeHandlers.set("default_title", (ctx) => this.object(ctx.thisObj).name);
     this.nativeHandlers.set("player_on_disfunc", () => true);
     this.nativeHandlers.set("player_moveto", (ctx, args) => {
+      if (ctx.thisObj !== ctx.actor && !this.isWizard(ctx.actor)) throw wooError("E_PERM", "players may only move themselves", { actor: ctx.actor, target: ctx.thisObj });
       const target = assertObj(args[0] ?? "$nowhere");
       this.moveObject(ctx.thisObj, target);
       return true;
@@ -2151,7 +2256,8 @@ export class WooWorld {
       this.returnGuest(ctx.thisObj);
       return true;
     });
-    this.nativeHandlers.set("return_guest", (_ctx, args) => {
+    this.nativeHandlers.set("return_guest", (ctx, args) => {
+      if (!this.isWizard(ctx.actor)) throw wooError("E_PERM", "only wizards may return guests", ctx.actor);
       this.returnGuest(assertObj(args[0]));
       return true;
     });
@@ -2205,7 +2311,7 @@ export class WooWorld {
     this.nativeHandlers.set("chat_command", (ctx, args) => {
       const plan = this.chatCommandPlan(ctx, assertString(args[0] ?? ""));
       if (!isCommandPlanOk(plan) || plan.route !== "direct") return plan;
-      return this.dispatch(ctx, assertObj(plan.target), assertString(plan.verb), Array.isArray(plan.args) ? plan.args : []);
+      return this.dispatch({ ...ctx, progr: ctx.actor }, assertObj(plan.target), assertString(plan.verb), Array.isArray(plan.args) ? plan.args : []);
     });
   }
 
