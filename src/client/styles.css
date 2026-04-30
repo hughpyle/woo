@@ -55,6 +55,11 @@ textarea {
 .nav {
   display: flex;
   flex-direction: column;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  overflow: auto;
 }
 
 .github-link {
