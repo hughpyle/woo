@@ -53,7 +53,7 @@ Then open <http://localhost:5173>.
 
 ## Deploy your own world
 
-woo is fork-and-deploy — either locally, ot see [DEPLOY.md](DEPLOY.md) for
+woo is fork-and-deploy — either locally, or see [DEPLOY.md](DEPLOY.md) for
 deploying a world to your own Cloudflare account.
 
 ## Working Rule
