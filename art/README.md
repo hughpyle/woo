@@ -25,10 +25,8 @@ magick -size 1200x630 xc:"$PAPER" \
     -gravity West -geometry +40+0 -composite \
   -font "$GEORGIA_IT" -pointsize 240 -fill "$ACCENT" \
     -gravity NorthWest -annotate +680+170 "woo" \
-  -font "$GEORGIA" -pointsize 32 -fill "$INK" \
-    -gravity NorthWest -annotate +685+410 "persistent objects" \
-  -font "$GEORGIA" -pointsize 32 -fill "$INK" \
-    -gravity NorthWest -annotate +685+450 "all the way down" \
+  -font "$GEORGIA" -pointsize 44 -fill "$INK" \
+    -gravity NorthWest -annotate +685+420 "world of objects" \
   public/og-image.png
 ```
 
