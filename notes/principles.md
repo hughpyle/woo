@@ -5,8 +5,8 @@
 - `spec/semantics/core.md` defines the core model.
 - `spec/semantics/bootstrap.md` defines the seed object graph.
 - `spec/semantics/introspection.md` defines the discovery surface.
-- `spec/dubspace-demo.md` defines the first user-visible demo.
-- `spec/taskspace-demo.md` defines the async coordination demo.
+- `catalogs/dubspace/DESIGN.md` defines the first user-visible demo.
+- `catalogs/taskspace/DESIGN.md` defines the async coordination demo.
 - `spec/authoring/minimal-ide.md` defines the first authoring loop.
 - `spec/protocol/wire.md` defines the first-light websocket protocol.
 - `spec/reference/` defines the current Cloudflare-oriented reference mapping.

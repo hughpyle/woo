@@ -1,8 +1,8 @@
 # Bootstrap
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core** (universal classes); demo classes (`$dubspace`, `$taskspace`) are **first-light**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core** (universal classes); demo apps (`chat`, `taskspace`, `dubspace`) are **first-light local catalogs**.
 
-The seed object graph a world boots from. Lists every object that must exist before the first call lands: universal classes (anything that has objects needs them), demo classes (dubspace, taskspace), and the demo instances those classes are instantiated into.
+The seed object graph a world boots from. Lists every object that must exist before the first call lands: universal classes (anything that has objects needs them), catalog registry scaffolding for v1-ops worlds, and the first-light local-catalog objects used by the bundled demos.
 
 This is the contract the implementation must produce on first start; without it, an implementer would invent structure.
 
@@ -12,9 +12,9 @@ This is the contract the implementation must produce on first start; without it,
 
 1. **Directory** is created first. Holds corename → ULID map and world metadata. Empty at boot until populated.
 2. **`$system` (`#0`)** is created with the reserved ULID `00000000000000000000000000`. `parent = null`.
-3. **Universal classes** are created in dependency order: `$root` → `$actor` → `$player` → `$wiz` / `$guest`, `$sequenced_log` → `$space` → `$thing`. Corenames registered in Directory.
-4. **Demo classes** are created depending on which demos are being booted: dubspace classes (`$dubspace`, `$loop_slot`, `$channel`, `$filter`, `$delay`, `$drum_loop`, `$scene`), taskspace classes (`$taskspace`, `$task`), and chat scaffolding/classes (`$match`, `$failed_match`, `$ambiguous_match`, `$conversational`, `$chatroom`).
-5. **Demo instances** (`$nowhere`, `the_dubspace`, `the_taskspace`, `the_chatroom`) are created with their internal anchored objects. `$nowhere` is a seeded `$thing` used as the default `home` for guests being reset. `:add_feature` calls attach `$conversational` to `the_chatroom` and `the_taskspace` (running as wizard at boot, satisfying both attach-policy gates).
+3. **Universal classes** are created in dependency order: `$root` → `$actor` → `$player` → `$wiz` / `$guest`, `$sequenced_log` → `$space` → `$thing`. v1-ops catalog-capable worlds also seed `$catalog` and `$catalog_registry` after `$space`. Corenames registered in Directory.
+4. **Configured local catalogs** are installed depending on which demos are being booted: `@local:chat`, `@local:taskspace`, and `@local:dubspace`. Until the local catalog installer is wired, first-light builds may hard-seed the equivalent classes and instances from code; the normative source is the catalog manifests.
+5. **Demo instances** (`$nowhere`, `the_dubspace`, `the_taskspace`, `the_chatroom`) are created with their internal anchored objects by those local catalogs. `$nowhere` is a seeded `$thing` used as the default `home` for guests being reset. `:add_feature` calls attach `$conversational` to `the_chatroom` and `the_taskspace` (running as wizard at boot, satisfying both attach-policy gates).
 6. **Guest player pool** is pre-seeded so first connections don't need to mint identities.
 
 Boot is idempotent: running it twice should be a no-op (each seed is created only if its corename isn't already mapped). This makes test setup and dev-restart trivial.
@@ -36,6 +36,8 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | `$sequenced_log` | `$root` | — | Append-only sequenced log primitive. Owns the runtime-blessed `:append`/`:read` verbs, atomic seq allocation, and durable log storage. Subclassed by `$space` and other coordination shapes. See [sequenced-log.md](sequenced-log.md). |
 | `$space` | `$sequenced_log` | — | Coordination workhorse. Adds dispatch, subscribers, and applied-frame broadcast on top of the inherited log primitive. The v1 reference subclass for `:call`-shaped sequenced coordination. |
 | `$thing` | `$root` | — | Simple non-actor base class for persistent objects that primarily hold state. Use it when an object should be addressable and programmable but should not itself originate calls. |
+| `$catalog` | `$thing` | — | v1-ops class for installed catalog records. Instances record source provenance, version, alias, owner, and created objects for introspection and uninstall. See [catalogs.md](../discovery/catalogs.md). |
+| `$catalog_registry` | `$space` | own host | v1-ops singleton space that sequences catalog install/update/uninstall operations. Its log is the catalog operations history. See [catalogs.md §CT5](../discovery/catalogs.md#ct5-install). |
 
 (The "ULID alias" column shows the conventional short form. Real ULIDs are deterministic from a seed phrase per world, so the same seed graph is reproducible.)
 
@@ -126,9 +128,25 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | `:remove_feature(f)` | obj | Remove from `features`. |
 | `:has_feature(f)` rxd | obj | Predicate. |
 
+### B2.9 v1-ops catalog registry
+
+Catalog-capable worlds seed `$catalog` and `$catalog_registry` in addition to
+the v1-core universal classes. `$catalog_registry` has the normal `$space`
+properties (`next_seq`, `subscribers`, `last_snapshot_seq`, `features`,
+`features_version`) plus registry state:
+
+| Property | Type | Default | Notes |
+|---|---|---|---|
+| `installed_catalogs` | list<map> | `[]` | Installed catalogs with alias, version, provenance, owner, and created-object refs. |
+
+Its native verbs are `:install(manifest, frontmatter, alias, provenance)`,
+`:uninstall(tap, catalog)`, `:update(tap, catalog, ref?, accept_major?)`, and
+`:list()` (`rxd`). All mutating verbs are wizard-only and are called through
+`$catalog_registry:call(...)`; direct calls are denied except `:list()`.
+
 ---
 
-## B3. Dubspace classes
+## B3. Local catalog: Dubspace classes
 
 | Corename | Parent | Anchor | Description |
 |---|---|---|---|
@@ -199,7 +217,7 @@ directly.
 
 ---
 
-## B4. Taskspace classes
+## B4. Local catalog: Taskspace classes
 
 | Corename | Parent | Anchor | Description |
 |---|---|---|---|
@@ -247,7 +265,7 @@ directly.
 
 ---
 
-## B5. Chat classes and scaffolding
+## B5. Local catalog: Chat classes and scaffolding
 
 | Corename | Parent | Anchor | Description |
 |---|---|---|---|
@@ -269,7 +287,7 @@ All direct-callable (rxd). See [match.md](match.md) for exact matching rules.
 
 ### B5.2 `$conversational` verbs
 
-All direct-callable (rxd). Observations are live-only by route per [chat-demo.md](../chat-demo.md).
+All direct-callable (rxd). Observations are live-only by route per [chat DESIGN.md](../../catalogs/chat/DESIGN.md).
 
 | Verb | Args | Purpose |
 |---|---|---|

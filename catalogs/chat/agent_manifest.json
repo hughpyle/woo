@@ -1,0 +1,29 @@
+{
+  "format": "mcp/0.1",
+  "tools": [
+    {
+      "name": "chat.say",
+      "description": "Say a public line in a chat-enabled space.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "space": { "type": "string" },
+          "text": { "type": "string" }
+        },
+        "required": ["space", "text"]
+      }
+    },
+    {
+      "name": "chat.who",
+      "description": "List actors present in a chat-enabled space.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "space": { "type": "string" }
+        },
+        "required": ["space"]
+      }
+    }
+  ]
+}
+

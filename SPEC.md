@@ -26,7 +26,7 @@ The system is **infrastructure, not UI**. The chat-text interface is one rendere
 | **Verb** | Callable code attached to an object. Dispatched by name through the standard lookup rule: parent chain, then feature lookup where applicable. |
 | **Property** | Named slot on an object. *Defined* on an ancestor (with default + perms); *value* per object. |
 | **Player** | An object that has an attached client connection. Just an object, not a separate type. |
-| **Task** (VM) | A serializable activation stack; the unit of execution. Migrates between hosts on verb dispatch. Also called a *VM activation* when distinguishing from a taskspace's work-item "task" (see `spec/taskspace-demo.md`). |
+| **Task** (VM) | A serializable activation stack; the unit of execution. Migrates between hosts on verb dispatch. Also called a *VM activation* when distinguishing from a taskspace's work-item "task" (see `catalogs/taskspace/DESIGN.md`). |
 | **Host** | Anything that can run a VM: an edge worker, a persistent host, or a transient host. |
 | **Event** / **Observation** | A structured map (`{type, ...}`) emitted from one object to one or more listeners. The two terms are synonyms: `core.md` says "observation" to distinguish from messages and mutations; `events.md` and the wire/API say "event" by historical naming. |
 | **Renderer** | Code that turns events into a presentation. Usually a transient object. |
@@ -65,7 +65,7 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 - [sequenced-log.md](spec/semantics/sequenced-log.md) — `$sequenced_log` primitive: atomic seq allocation, durable append-only log (SL1–SL10)
 - [space.md](spec/semantics/space.md) — `$space` (a `$sequenced_log` subclass): call lifecycle, failure rules, snapshots (S1–S10)
 - [identity.md](spec/semantics/identity.md) — actor, session, auth lifecycle (I1–I8)
-- [bootstrap.md](spec/semantics/bootstrap.md) — seed object graph: universal classes, demo classes, instances (B1–B9)
+- [bootstrap.md](spec/semantics/bootstrap.md) — seed object graph: universal classes plus first-light local-catalog bootstrapping (B1–B9)
 - [introspection.md](spec/semantics/introspection.md) — `:describe()` convention and discovery surface (N1–N6)
 - [language.md](spec/semantics/language.md) — types, DSL syntax (§6, §7)
 - [vm.md](spec/semantics/vm.md) — bytecode, opcodes, scheduling, metering (§8)
@@ -104,7 +104,7 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 - [provisioning.md](spec/identity/provisioning.md) — actor creation, class assignment, capability granting, directory sync (AP1–AP7) — **placeholder**
 
 ### Discovery
-- [catalogs.md](spec/discovery/catalogs.md) — published reusable object sets, registries, versioned imports (CT1–CT10)
+- [catalogs.md](spec/discovery/catalogs.md) — GitHub-tap-then-install model; sequenced installs through `$catalog_registry`; per-catalog tool manifests; authority and ownership; migration contract (CT1–CT14)
 
 ### Tooling
 - [debugging.md](spec/tooling/debugging.md) — stepping, breakpoints, replay debugging in a sandbox (D1–D10)
@@ -123,6 +123,6 @@ See [LATER.md](LATER.md) for the informal todo list — open items, sketches, ga
 
 For what is *currently built* (as opposed to what the spec is building toward), see the implementation snapshots in [`notes/`](notes/). The current cut is documented in [notes/impl-v0.5-rich-vm-persistence-compiler.md](notes/impl-v0.5-rich-vm-persistence-compiler.md); the older [notes/impl-v0-first-light.md](notes/impl-v0-first-light.md) is historical. Current debt and spec/impl drift is in [TECH_DEBT_AUDIT.md](TECH_DEBT_AUDIT.md).
 
-Loose docs alongside the spec layers:
+Loose docs alongside the spec layers and bundled catalogs:
 - [spec/vision.md](spec/vision.md), [spec/README.md](spec/README.md) — author's working docs.
-- [spec/dubspace-demo.md](spec/dubspace-demo.md), [spec/taskspace-demo.md](spec/taskspace-demo.md), [spec/chat-demo.md](spec/chat-demo.md) — demo surface specs (what each demo provides; first-light profile).
+- [catalogs/dubspace/DESIGN.md](catalogs/dubspace/DESIGN.md), [catalogs/taskspace/DESIGN.md](catalogs/taskspace/DESIGN.md), [catalogs/chat/DESIGN.md](catalogs/chat/DESIGN.md) — catalog-owned demo design docs (what each bundled app provides; first-light profile).

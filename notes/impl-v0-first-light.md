@@ -54,8 +54,8 @@ The forward-looking specification continues to live under `spec/`. This notes do
 
 The demos this cut implements continue to be specified at the spec layer:
 
-- [spec/dubspace-demo.md](../spec/dubspace-demo.md) — what the dubspace demo provides.
-- [spec/taskspace-demo.md](../spec/taskspace-demo.md) — what the taskspace demo provides.
+- [catalogs/dubspace/DESIGN.md](../catalogs/dubspace/DESIGN.md) — what the dubspace demo provides.
+- [catalogs/taskspace/DESIGN.md](../catalogs/taskspace/DESIGN.md) — what the taskspace demo provides.
 - [spec/authoring/minimal-ide.md](../spec/authoring/minimal-ide.md) — what the minimal IDE provides.
 
 The demo specs are the contract; this notes doc records that the implementation in `src/` meets the contract as of this cut.

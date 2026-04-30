@@ -70,9 +70,13 @@ Scope:
 - Structured diagnostics.
 - JSON bytecode fallback remains available for low-level debugging.
 
-This should follow v0.5b unless compiler pressure becomes the next blocker. The
-repository milestone stabilizes more runtime semantics than the compiler does,
-so doing persistence first reduces churn in generated code and tests.
+Status: landed as M1 — see `src/core/dsl-compiler.ts` (1200+ lines, commit
+`82e2e0c`) and `notes/impl-dsl-compiler-m1.md` for scope detail. M1 covers the
+acceptance-test surface: locals, arithmetic, conditionals, loops, verb calls,
+`pass`, `try`/`except`, and structured diagnostics with spans. M1.1 pressure-
+ring items (line maps to source spans, dynamic index opcodes, string-interp
+lowering, native-to-source migration of seed verbs) are tracked in the M1
+notes.
 
 ## v0.5d: Conformance Harness
 
@@ -179,7 +183,10 @@ Still open:
   than the poll cadence can slip up to ~250ms past `resume_at`. Production needs
   alarm-backed scheduling (Cloudflare DO alarms or equivalent) that fires at
   exactly the next-due `resume_at`.
-- Full DSL compiler.
+- DSL compiler M1.1 pressure-ring items: full source-span line maps, dynamic
+  index opcodes for `controls[name] = value` source authoring, string-interp
+  lowering to `STR_INTERP`, and migrating one seed verb from native to authored
+  source as the smoke test. (M1 itself is landed; see §v0.5c.)
 - Failure-injection conformance for crash-mid-transaction recovery. The current
   backends reject pending log outcomes before commit; a simulated-crash backend
   is still needed to exercise storage interruption at each transaction boundary.

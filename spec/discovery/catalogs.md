@@ -2,7 +2,9 @@
 
 > Part of the [woo specification](../../SPEC.md). Layer: **discovery**. Profile: **v1-ops**.
 
-The contract for naming, sharing, and importing reusable object sets — the "publish a `$task` library, use it in your world" story. Beyond the wizard-curated `$system` corename map, multi-developer worlds need a way to introduce *named, versioned* sets of base classes that other worlds (or the same world's separate clusters) can adopt.
+The contract for naming, sharing, and installing reusable object sets — the "publish a `$task` library, use it in your world" story. Beyond the wizard-curated `$system` corename map, multi-developer worlds need a way to introduce *named, versioned* sets of base classes and feature objects that other worlds (or the same world's separate clusters) can adopt.
+
+The distribution model is **GitHub-tap-then-install**, modeled on package managers' tap-add/install flow. Catalogs live as directories in public GitHub repositories; an operator installs a named catalog from a tapped repo by ref. No central registry, no signing infrastructure — git carries versioning, attestation (commit signing), forking, and history.
 
 ---
 
@@ -12,8 +14,8 @@ The contract for naming, sharing, and importing reusable object sets — the "pu
 
 - A team publishing their `$timer` and `$reminder` classes for other teams to use.
 - A community library (`$markdown_renderer`, `$reaction_set`) that hundreds of worlds want.
-- Versioned base classes that evolve (`v1.todo:$task`, `v2.todo:$task`).
-- Cross-world reuse (federation v1) where a peer world's `$canvas` shows up in your world.
+- The example demos shipped in this repo (`dubspace`, `taskspace`, `chat`) — themselves installable catalogs.
+- Versioned base classes that evolve (`v1`, `v2`).
 
 Catalogs are the answer.
 
@@ -21,149 +23,477 @@ Catalogs are the answer.
 
 ## CT2. What is a catalog
 
-A **catalog** is a named, versioned set of objects + verbs + schemas that can be imported into a world. Conceptually:
+A **catalog** is a directory in a public GitHub repository (or in the deployment's bundled `catalogs/` for local catalogs) containing:
 
-```
-catalog: { id, name, version, objects: [{class, parent, verbs, props, schemas}, ...], metadata }
-```
+- `README.md` with YAML frontmatter (name, version, spec_version, license, description, depends).
+- `manifest.json` — the JSON-format export of the catalog's classes, verbs, schemas, features, and seed hooks.
+- Optional `agent_manifest.json` — MCP/OpenAPI tool descriptions (see §CT11).
 
-Catalogs are themselves first-class woo objects (descended from `$catalog`); a world's available catalogs live as objects under `$catalog_registry`.
+Spec ships **source**, not bytecode. The manifest carries DSL source for every verb; the importing world recompiles in its own spec version. This avoids cross-spec-version bytecode portability problems entirely.
 
-A typical catalog:
-
-```
-{
-  id:      "@dubspace_lib/v1",
-  name:    "Dubspace Library",
-  version: "v1.0.0",
-  author:  "@hugh",
-  classes: [
-    { local_name: "$loop_slot",  parent: "@root_lib/v1:$control", ... },
-    { local_name: "$delay",      parent: "@root_lib/v1:$control", ... },
-    ...
-  ],
-  metadata: {
-    description: "Sound-mixer building blocks.",
-    license:     "MIT",
-    spec_version: "v0.1.0"
-  }
-}
-```
-
-Class names within a catalog are scoped to the catalog (`$loop_slot` here means "this catalog's `$loop_slot`"). Cross-catalog references use qualified names (`@root_lib/v1:$control`).
+In-world, installed catalogs are objects descended from `$catalog`; the world's `$catalog_registry` lists them. Each installed class records its source catalog so introspection can answer "where did this come from?"
 
 ---
 
-## CT3. Naming convention
+## CT3. Naming
 
-Three-part names: `@<author>/<catalog>/<version>:<class>`.
+Catalogs are referenced by a four-part name: `<owner>/<repo>:<catalog>[@<ref>]`.
 
-- `@<author>` — namespace owner, e.g., `@hugh`, `@team_xyz`, `@community`. Handle resolution is the discovery layer's responsibility (peer registries, well-known servers).
-- `<catalog>` — the catalog name within the author's namespace.
-- `<version>` — semantic-versioned (`v1.2.3`, or `latest`).
-- `<class>` — the per-catalog corename for one of its classes.
+- `<owner>/<repo>` — GitHub coordinates of the tapped repo (e.g. `hugh/woo-libs`).
+- `<catalog>` — the directory name under `catalogs/` in the repo (e.g. `dubspace`).
+- `<ref>` — optional git ref: a tag, branch, or commit SHA. **Default**: the highest semver tag matching `<catalog>-v*` (e.g. `dubspace-v1.0.0`); if no such tag exists, `main`. Operators are encouraged to pin explicitly.
 
 Examples:
 
-- `@hugh/dubspace/v1:$delay`
-- `@community/markdown/v2.1:$renderer`
-- `@local:$something` — short form for catalog `local` in the world (no remote import).
+- `hugh/woo-libs:dubspace@dubspace-v1.0.3` — pinned tag.
+- `hugh/woo-libs:dubspace` — latest semver tag for `dubspace`.
+- `hugh/woo-libs:dubspace@main` — branch tip; mutable.
+- `hugh/woo-libs:dubspace@<sha>` — pinned commit.
 
-Within a single world, catalogs are imported with optional aliases:
+Within a single world, an installed catalog is referenced by its alias (defaulting to `<catalog>`). Cross-catalog parents in manifests use the full form: `parent: "hugh/woo-libs:root-pack:$control"`.
 
-```
-import_catalog("@hugh/dubspace/v1", as = "dub")
-// then `dub:$delay` resolves to the imported class
-```
+**Local catalogs** use the special prefix `@local`: `@local:dubspace` resolves to `<deployment>/catalogs/dubspace/`. Local catalogs are how the worlds bundle their own first-party content (e.g., the example demos that ship in this repository).
+
+### CT3.1 Reference resolution (precedence)
+
+A catalog object reference inside a manifest (parents, feature ancestors, schemas, and seed hooks) resolves in this fixed order. The runtime stops at the first match:
+
+1. **Catalog-local name** — a `$<name>` with no qualifier resolves to a class declared earlier in *this* manifest's `classes` or `features` list. Within-catalog references are unqualified.
+2. **Universal corename** — a `$<name>` that matches a universal object on `$system` (`$root`, `$actor`, `$player`, `$wiz`, `$guest`, `$sequenced_log`, `$space`, `$thing`, `$catalog`, `$catalog_registry`, and bootstrap scaffolding such as `$nowhere`). Resolved via `$system.<name>`.
+3. **Installed-alias-qualified name** — `<alias>:$<name>` where `<alias>` is the installed alias of another catalog (default alias = catalog name; overridable on install via `as`). Resolved through `$catalog_registry`.
+4. **Full tap-qualified name** — `<owner>/<repo>:<catalog>:$<name>`. Resolved through `$catalog_registry`; refuses if the named catalog is not installed.
+5. **Seed-local instance name** — a non-`$` bare name in a seed hook resolves to an instance created earlier by the same manifest's `seed_hooks` list.
+6. **Installed seed alias** — `<alias>:<name>` in a seed hook resolves to a registry-tracked seed instance created by another installed catalog.
+
+Unqualified `$<name>` references that match neither the catalog-local set nor a universal corename are an error (`E_UNRESOLVED_REFERENCE`); the manifest must qualify the reference. Bare seed-instance names that match neither an earlier seed hook nor an allowed universal/bootstrap object are also an error. World-local corenames (operator-created at runtime) are *not* in the resolution path — manifests cannot reference arbitrary world-local corenames, only universal objects, their own seeded instances, and other installed catalogs.
+
+This rule keeps manifests deterministic across worlds: the same manifest installed into two different worlds resolves to the same class set, given the same dependency catalogs are installed.
 
 ---
 
 ## CT4. Distribution
 
-A catalog is published to a registry — an HTTP-accessible server holding catalog manifests. The reference shape:
+A repository hosting catalogs has the layout:
 
-- **Public registry.** A central or federated set of registries (the URL is well-known); supports listing, search, version lookup. Optional cryptographic signatures attest publication.
-- **Private registry.** A team or org runs their own registry; their worlds are configured to look there first.
-- **In-world registry.** A world can host its own catalogs locally without external publication; useful for project-internal libraries.
+```
+github.com/hugh/woo-libs/
+├── README.md                    (repo-level overview)
+└── catalogs/
+    ├── dubspace/
+    │   ├── README.md            (catalog-level, frontmatter-headed)
+    │   ├── manifest.json
+    │   └── agent_manifest.json  (optional)
+    ├── taskspace/
+    │   ├── README.md
+    │   └── manifest.json
+    └── chat/
+        ├── README.md
+        └── manifest.json
+```
 
-The fetch protocol is HTTPS. A registry exposes:
+Catalog `README.md` frontmatter is YAML between `---` markers, then operator-facing documentation:
 
-- `GET /<author>/<catalog>` → list of versions with metadata
-- `GET /<author>/<catalog>/<version>` → catalog manifest (V2-canonical JSON)
-- `GET /<author>/<catalog>/<version>.sig` → optional signature
+```yaml
+---
+name: dubspace
+version: 1.0.0
+spec_version: v1
+license: MIT
+description: Sound-mixer building blocks for a shared dub-mix space.
+depends:
+  - hugh/woo-libs:root-pack
+---
 
-Catalogs are content-addressable: the manifest's hash is the canonical id. Two installations of `@hugh/dubspace/v1.0.0` are bit-identical or one is wrong.
+# Dubspace
+
+A library for live shared dub-mix sound spaces. Provides $loop_slot,
+$channel, $filter, $delay, $drum_loop, and $scene classes parented from
+$control.
+
+...
+```
+
+Required frontmatter fields: `name`, `version`, `spec_version`, `license`. Optional: `description`, `depends`, `homepage`, `keywords`.
+
+**v1 limitations** (intentional):
+
+- **Public repos only.** Private repos, GitHub tokens, etc. are deferred — see §CT10.
+- **No caching.** Every install or update fetches fresh from `raw.githubusercontent.com`. Operators control freshness via the `ref` parameter.
+- **No automated dependency resolution.** `depends` declares hard prerequisites — install **verifies** each entry is already installed at a compatible version, and refuses with `E_DEPENDENCY` otherwise. The runtime does not fetch or install dependencies on the operator's behalf. The operator installs prerequisites first, in order. Transitive constraint solving is deferred (§CT10).
 
 ---
 
-## CT5. Import
+## CT5. Install
+
+Three operations, all wizard-only and audited. Catalog operations are themselves sequenced — they have an owning sequencer, namely `$catalog_registry` itself.
+
+### CT5.1 `$catalog_registry` is a `$space`
+
+`$catalog_registry` is a universal singleton (corename `$catalog_registry`) that descends from `$space`. Every install, uninstall, and update is a sequenced call **through `$catalog_registry`** — its log is the catalog-operations history. Replay over the registry log reconstructs the sequence of catalog mutations the world has seen.
+
+Because the registry is a `$space` subclass, it inherits the same call lifecycle, replay, and snapshot machinery ([sequenced-log.md §SL2](../semantics/sequenced-log.md#sl2-the-native-verbs), [space.md §S2](../semantics/space.md#s2-the-call-lifecycle)). The two-phase commit + savepoint discipline applies: a partial install rolls back inside the savepoint while the registry log row stays with `applied_ok=false`. Crash-safety and audit follow without new mechanisms.
+
+This places catalog ops in a different sequencing scope from `$space:call` traffic in user spaces — installs don't conflict with normal world activity, but they are themselves totally ordered relative to each other and replay-deterministic.
+
+### CT5.2 REST surface
+
+Hybrid execution path: the Worker handles GitHub I/O at the edge; the world handles the actual install as a sequenced call through `$catalog_registry`.
 
 ```
-import_catalog(catalog_id: str, as?: str, into?: ObjRef) -> ImportResult
+POST /api/tap/install
+body: { tap, catalog, ref?, as? }
 ```
 
-Imports a catalog into a world (or into a specific anchor cluster). The runtime:
+Worker resolves `ref` against the GitHub API (HEAD of the named tag/branch, or the supplied SHA), retrieves the **resolved commit SHA**, then fetches `https://raw.githubusercontent.com/<tap>/<sha>/catalogs/<catalog>/manifest.json` and the README. Computes content hashes (SHA-256) of both. Dispatches `$catalog_registry:call({actor, target: "$catalog_registry", verb: "install", args: [manifest, frontmatter, alias, install_provenance]})` where `actor` is the authenticated wizard actor, `alias = body.as ?? catalog`, and `install_provenance` is:
 
-1. Fetches the manifest from the registry.
-2. Validates signature (if present) and integrity hash.
-3. Resolves the catalog's dependencies (if it depends on other catalogs).
-4. Creates the catalog's classes as objects in the importing world, parented appropriately.
-5. Records the import in `$catalog_registry` for introspection.
+```
+{
+  tap: "<owner>/<repo>",
+  catalog: "<name>",
+  alias: "<installed alias>",
+  ref_requested: "<as user typed it; may be a tag, branch, or sha>",
+  ref_resolved_sha: "<git commit SHA at fetch time>",
+  manifest_hash: "sha256:<hex>",
+  readme_hash: "sha256:<hex>",
+  fetched_at: <ms epoch>
+}
+```
 
-After import, the catalog's classes are addressable as `<as>:<class>` (e.g., `dub:$delay`).
+Returns the applied frame from `$catalog_registry`.
 
-Import is wizard-only by default. The world's policy may delegate to programmer actors for catalogs from trusted authors.
+```
+POST /api/tap/uninstall
+body: { tap, catalog }
+```
+
+Wizard-only. Sequenced through `$catalog_registry`. Recycle policy for instances of imported classes follows §CT9.
+
+```
+POST /api/tap/update
+body: { tap, catalog, ref?, accept_major? }
+```
+
+Explicit re-install at a new ref. Operator opts in; there is no auto-update. The Worker resolves the new ref to a commit SHA before dispatching. The runtime compares the manifest's `version` against the recorded version and refuses if the major bumped unless `accept_major: true`; major-version updates require an explicit migration (§CT14).
+
+```
+GET /api/taps
+```
+
+Returns `$catalog_registry` contents: installed catalogs with their `install_provenance`, version, alias, and timestamps. The provenance fields make every install reconstructable.
+
+For `@local:<catalog>` installs, the Worker reads from the deployment's bundled `catalogs/<catalog>/` directory instead of fetching from GitHub. The provenance carries `tap: "@local"`, `ref_requested: "@local"`, `ref_resolved_sha: "<sha of the deployment's git HEAD at install time, or 'unversioned'>"`, `alias`, and content hashes computed locally.
+
+### CT5.3 In-world entry: `$catalog_registry:install`
+
+`$catalog_registry:install(manifest, frontmatter, alias, install_provenance)` is wizard-only. It runs as a sequenced call on the registry, so the install is replay-safe and audit-visible:
+
+1. Validate frontmatter (`name` + `version` + `spec_version` present; spec_version compatible).
+2. **Verify** declared dependencies are already installed and version-compatible — refuse with `E_DEPENDENCY` if any are missing or incompatible. v1 does not auto-resolve; the operator installs dependencies first.
+3. Recompile every verb in the manifest using the world's current DSL compiler.
+4. Create classes, property defs, verbs, event schemas, feature objects in the manifest's declared order. Parents are resolved via the reference grammar (§CT3.1).
+5. Run the manifest's `seed_hooks` block — feature attachments, instance creation, post-install verbs.
+6. Record the install in the registry's local state: `{tap, catalog, alias, version, install_provenance, installed_at, owner: actor_at_install}`.
+
+Steps 3–5 run inside the call's savepoint; any failure rolls them back while the registry log row stays at the assigned seq with `applied_ok=false` and an error observation, per the standard sequenced-call discipline.
+
+### CT5.4 Local catalogs and auto-install
+
+A deployment's bundled `catalogs/` directory ships with the world's source. The local-catalog mechanism reads from this bundle when `tap = @local`.
+
+Boot-time auto-install is controlled by `WOO_AUTO_INSTALL_CATALOGS` (a comma-separated list, see [reference/cloudflare.md §R14](../reference/cloudflare.md#r14-deploying-your-own-world)):
+
+- `WOO_AUTO_INSTALL_CATALOGS=chat,taskspace,dubspace` — the **target** default for this repository's dev configuration once the local catalog installer is wired. Until then, v0.5 bootstraps the same demo objects directly from code and treats the bundled `catalogs/` directory as source/spec data.
+- `WOO_AUTO_INSTALL_CATALOGS=` (empty) — clean world; operators install what they want.
+- Each entry is a catalog name resolved against `@local:<name>`.
+
+Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the boot-time pass skips it. Each auto-installed catalog still produces a registry log entry, so the install history is complete.
+
+### CT5.5 Manifest shape
+
+```jsonc
+{
+  "name": "dubspace",
+  "version": "1.0.0",
+  "spec_version": "v1",
+  "depends": ["hugh/woo-libs:root-pack"],
+  "classes": [
+    {
+      "local_name": "$loop_slot",
+      "parent": "hugh/woo-libs:root-pack:$control",
+      "properties": [{"name": "loop_id", "default": null, "perms": "rw"}, ...],
+      "verbs": [{"name": "play", "source": "verb $loop_slot:play() {...}", "perms": "rxd", ...}, ...]
+    },
+    ...
+  ],
+  "features": [
+    {
+      "local_name": "$conversational",
+      "parent": "$thing",
+      "verbs": [...]
+    }
+  ],
+  "schemas": [
+    {"on": "$loop_slot", "type": "loop_started", "shape": {...}}
+  ],
+  "seed_hooks": [
+    {"kind": "create_instance", "class": "$loop_slot", "as": "slot_1", "anchor": "the_dubspace"},
+    {"kind": "attach_feature", "consumer": "the_chatroom", "feature": "$conversational"},
+    ...
+  ]
+}
+```
+
+The DSL source per verb is what enables the recompile-in-importing-world discipline.
 
 ---
 
 ## CT6. Versioning
 
-Semantic versioning (`major.minor.patch`):
+Semantic versioning communicated via git tags. Tag format is `<catalog>-v<major>.<minor>.<patch>` so a single repository can host multiple catalogs without tag collisions.
 
-- **Patch** — bug fixes; same shape; auto-upgrade safe.
-- **Minor** — additive (new classes, new verbs); existing imports keep working.
-- **Major** — breaking; importing world must explicitly opt in via re-import.
+- **Patch** — bug fixes; same shape; manifests are upgrade-safe.
+- **Minor** — additive (new classes, new verbs); existing instances keep working.
+- **Major** — breaking; importing world must explicitly opt in via `update` and may need migrations.
 
-A world may pin a specific version (`@hugh/dubspace/v1.0.3`) or accept a semver range (`@hugh/dubspace/^1.0.0`). The pinned form is canonical for reproducibility; ranges are a convenience.
-
-Major-version upgrades involve migrations ([migrations.md](../operations/migrations.md)) since they may change shapes existing data has.
+The `update` operation refuses by default if the major-version delta is non-zero; operators pass an explicit `accept_major: true` to proceed and acknowledge migration responsibility.
 
 ---
 
-## CT7. Trust and signing
+## CT7. Trust
 
-A catalog signature is a cryptographic attestation by the publisher (or registry) that the manifest is genuine. World policy decides what's accepted:
+Trust is rooted in **the operator's choice of which repo to install from**. v1 has no signing infrastructure; the operator inspecting the GitHub repo is the trust step.
 
-- **Open trust** — accept any manifest from any registry. Suitable for development.
-- **Pinned trust** — only accept manifests signed by a known set of keys.
-- **Per-author trust** — accept signed manifests from specific authors.
+- Public repos only, by URL.
+- Optional commit-signature verification — deferred to v1.1; GitHub's UI shows verified commits today.
+- Every install/uninstall/update is sequenced through `$catalog_registry` (§CT5.1) **and** logged as a wizard action ([cloudflare.md §R10.4](../reference/cloudflare.md#r104-wizard-audit)). Both records carry the full `install_provenance`: tap, catalog, requested ref, **resolved commit SHA**, and SHA-256 hashes of the fetched manifest and README. A later operator can reconstruct exactly what bytes were installed even if the upstream tag has been moved or the branch has advanced.
 
-Trust failures (unsigned, wrong signature, untrusted author) result in the import being rejected with `E_TRUST`. Wizards can override on a one-shot basis with full audit.
+When the operator says `tap install hugh/woo-libs:dubspace`, they are vouching for `hugh/woo-libs` as a source. Exactly the same trust model as `cargo install` from a git URL or `homebrew tap`.
 
 ---
 
 ## CT8. Naming collisions
 
-Two catalogs can both define `$control`. Importing both with no aliases collides; the runtime rejects the second import with `E_NAME_COLLISION`. The fix: import one (or both) with an alias.
+Two catalogs can both define `$control`. Installing both with no aliases collides; the runtime rejects the second install with `E_NAME_COLLISION`. The fix: install one (or both) with an alias via the `as?` field.
 
-The world's `$catalog_registry` shows installed catalogs and their aliases for introspection.
+The world's `$catalog_registry` shows installed catalogs and their aliases for introspection. References to a catalog's classes use `<alias>:<class>` (for in-world authoring) or the full form `<owner>/<repo>:<catalog>:<class>` (in manifests).
 
 ---
 
 ## CT9. Catalog-bound objects vs world-local objects
 
-Imported classes are *templates* — they exist as objects but aren't expected to be instantiated unless the importing world chooses. A `dub:$delay` is a class; `the_dubspace`'s actual delay is `#delay_42` parented from `dub:$delay`.
+Imported classes are *templates* — they exist as objects but instances are world-local. A `dub:$delay` is a class; `the_dubspace`'s actual delay is `#delay_42` parented from `dub:$delay`.
 
-Modifications: the importing world *may* override an imported class's verbs and properties (subject to permission), but those overrides are *local*. They do not propagate back to the catalog, and they are lost if the catalog is re-imported (with confirmation prompt to wizard).
+Modifications: the importing world *may* override an imported class's verbs and properties (subject to permission), but those overrides are *local*. They do not propagate back to the catalog, and they are lost if the catalog is re-installed (with confirmation prompt to wizard).
 
 The override pattern: `chparent` an instance to a local subclass that wraps the imported class. This is woo's normal mechanism; nothing special for catalogs.
+
+**Uninstall** is intentionally conservative. A live world accumulates state — instances of imported classes may have local property values, references from other objects, log entries, anchored children, role-property assignments, and user-created relationships that the runtime cannot inspect for catalog provenance. Removing classes out from under that state risks orphaning verbs and breaking unrelated calls.
+
+The v1 rule:
+
+1. The operator runs `tap_uninstall { tap, catalog }`.
+2. The runtime walks the catalog's classes and feature objects. For each, it checks for **live descendants** (any object whose `parent` is the class) and **live attached consumers** (any `$actor`/`$space` with the feature in its `features` list). If any are found, the call refuses with `E_HAS_DESCENDANTS` listing the offenders. The operator must reparent or detach explicitly first; the runtime offers no automatic reparenting in v1.
+3. If there are no live descendants or attached consumers, the runtime removes the class objects, feature objects, and any registry-tracked seed instances *that have not been further referenced by world-local state*. A seed instance with non-catalog references (e.g., the operator wrote a verb that calls `the_dubspace:set_control`, and that verb still exists) likewise refuses.
+4. The registry entry is not removed until step 3 succeeds; on refusal, the registry still shows the catalog as installed.
+
+A `force?: true` flag is available wizard-only for cases where the operator accepts torn state — wraps the recycle in a wizard-audit log entry and proceeds. Default behavior is the safe path.
+
+This is deliberately stricter than the previous "remove unless they have non-catalog descendants" rule: live state, references, log entries, and feature attachments all count. The cost is that operators must clean up before uninstalling; the benefit is that uninstall never silently breaks a working world. (Generic uninstall-while-preserving-instances with automatic reparenting is deferred — see §CT10.)
 
 ---
 
 ## CT10. What's deferred
 
-- **Catalog dependency resolution at scale.** Currently dependencies are inline manifest references; a real-world dependency graph (transitive deps, version constraint solving) is a v2 concern.
-- **Catalog removal** (uninstalling an imported catalog while preserving the instances). Tricky — instances of imported classes lose their parent. Out of v1.
-- **Catalog forking** ("publish my modified version of yours"). Conventions for fork attribution and version namespacing exist in package ecosystems; not specced here yet.
-- **Cross-spec-version catalogs.** A catalog published against spec v1.0 may not load on spec v0.x; the import should refuse rather than try. Semantics specced; tooling deferred.
-- **Decentralized registries / DHT / IPFS.** All registries here are HTTPS centralized. Decentralized alternatives are interesting but not first-light.
+- **Private repo support.** GitHub auth tokens, fine-grained permissions, deployment-scoped secrets. Public repos only in v1.
+- **Local caching of fetched manifests.** Every install/update fetches fresh. Caching adds invalidation complexity for marginal benefit.
+- **Transitive dependency resolution.** `depends` declares hard prerequisites, but operators install dependencies explicitly. v2 may add a constraint solver.
+- **Cross-spec-version migration tooling.** A catalog published against spec v1.0 may not load cleanly on v1.5 if signatures changed. Today: refuse with `E_SPEC_VERSION_MISMATCH`. Future: a migration manifest.
+- **Catalog uninstall while preserving instances.** Tricky — instances of imported classes lose their parent. Operators handle reparenting manually for v1.
+- **Commit signature verification.** GitHub already does this server-side; the runtime can optionally check `gpg`-verified commits via the GitHub API. Deferred.
+- **Decentralized distribution** (IPFS, peer-to-peer). All taps are HTTPS GitHub URLs in v1.
+- **Catalog forking conventions.** Standard GitHub forks work; namespacing fork attribution and version compatibility hasn't been specced.
+- **Authoring → publish loop.** A wizard verb that *exports* the world's local objects into a manifest, ready to commit to a repo. Worth building once the install path is solid; not in v1.
+
+---
+
+## CT11. Tool manifests (agent ecosystem)
+
+External agents (Claude via MCP, OpenAI tool-calling, generic OpenAPI clients) discover capabilities via **per-catalog tool manifests**. The runtime does not invent a manifest format; it emits standard MCP tool schemas (or OpenAPI fragments) generated from the catalog's verb signatures.
+
+A catalog may ship `agent_manifest.json` alongside `manifest.json`. Schema (sketch):
+
+```json
+{
+  "format": "mcp/0.1",
+  "tools": [
+    {
+      "name": "dubspace.set_control",
+      "description": "Set a control value on the dubspace.",
+      "inputSchema": { "type": "object", "properties": {...}, "required": [...] }
+    },
+    ...
+  ]
+}
+```
+
+**Tool exposure is explicit, not derived.** `direct_callable: true` means a verb is invokable via the REST `direct` path without sequencing — it does *not* mean the verb is a useful or safe agent tool. Auto-deriving tool exposure from `direct_callable` would expose internal utility verbs (introspection, presence helpers, low-level mutators) to agents indiscriminately.
+
+A verb is exposed as an agent tool only if **either**:
+
+- The catalog's `agent_manifest.json` lists it explicitly with a description and input schema, or
+- The verb metadata carries `tool_exposed: true` (a separate flag from `direct_callable`). Catalogs that prefer per-verb annotation over a separate manifest opt in this way; the runtime then auto-generates a tool manifest entry from the verb's `arg_spec` and accompanying doc-comment.
+
+A catalog with neither `agent_manifest.json` nor any `tool_exposed: true` verbs is invisible to agent tool discovery — that's the safe default. Operators who want to expose a catalog's tools but lack publisher cooperation can install a thin local catalog that wraps the upstream's verbs with `tool_exposed: true` annotations.
+
+**World-level discovery** aggregates per tap:
+
+```
+GET /.well-known/mcp.json                    → all installed catalogs' tools
+GET /.well-known/mcp.json?tap=hugh/woo-libs:dubspace  → just that catalog
+GET /.well-known/mcp.json?tap=@local         → bundled local catalogs
+```
+
+This namespaces external tool discovery cleanly: agents subscribe to versioned, named, operator-vouched tool surfaces, not "every direct-callable verb in the world." The aggregation root is the catalog, not the world.
+
+Strongly typed verb signatures (return types, raised errors, named-arg shapes) would tighten the auto-generated manifests. The minimum bar is `arg_spec` as it stands today; richer signatures land when external integration pressure proves what's needed (see [LATER.md](../../LATER.md)).
+
+---
+
+## CT12. Catalog UI (placeholder)
+
+A catalog may eventually ship **UI components alongside its code** — control surfaces for its classes, dashboards, custom renderers for the observations it emits. The dubspace catalog's mixer panel, the taskspace catalog's Kanban view, a chat catalog's transcript renderer — all natural extensions of "the things this catalog provides."
+
+**Status: not specified.** woo does not yet have a production UI framework (see [LATER.md "object-defined UI components"](../../LATER.md)); the bundled client `src/client/main.ts` is hand-rolled per-demo. Until a framework lands — likely a feature class like `$ui_renderable` with `:ui_hint()` returning a layout-and-binding payload, possibly emitting A2UI — the UI story belongs to the bundled client, not the catalog.
+
+When the UI story does land, this section will specify:
+
+- **Directory shape**: a `ui/` subdirectory inside the catalog (e.g. `catalogs/dubspace/ui/`) holding the layout components, asset references, and any catalog-specific renderer code.
+- **Distribution discipline**: same recompile-on-install rule as code — UI ships as source/declarative descriptions, the importing world materializes them in its current UI framework's idiom.
+- **Per-catalog mounting**: similar to tool manifests (§CT11), the world's UI shell discovers catalog UIs via the registry and mounts them per-catalog rather than as a flat surface.
+- **Versioning + trust**: inherited from the rest of the catalog. UI changes ride along with `<catalog>-v<x.y.z>` tags.
+- **Pure-data UI vs. catalog-supplied verbs**: where the boundary sits between "the catalog declares its own components" and "the catalog declares hints, the world's renderer composes."
+
+Authors picking up the repo should expect their first-party UI work (the dubspace mixer, the taskspace board, the chat transcript) to migrate from `src/client/` into their respective catalogs once the framework exists. The current bundled client is a v1 expedient, not an architectural choice.
+
+---
+
+## CT13. Authority and ownership
+
+Catalog installs introduce code into the world. Who owns that code, and whose authority does it run with, are subtle and load-bearing questions.
+
+### CT13.1 Ownership of imported objects
+
+Every class, feature object, and seed instance created by a catalog install is **owned by the actor who issued the install** (typically `$wiz`, since installs are wizard-only by default). The owner field is recorded at install time and persists for the object's lifetime.
+
+This means:
+
+- An imported class is owned by the operator who installed the catalog. Recycling, reparenting, or deleting it follows the standard ownership rules ([permissions.md §11.1](../semantics/permissions.md#111-ownership)).
+- A future operator who installs a different catalog does not gain ownership of the first catalog's classes.
+- A wizard who installs a catalog "as themselves" rather than `$wiz` is unusual but supported — the resulting classes are owned by that wizard and can be recycled by them without further wizard authority.
+
+**The catalog publisher is *not* a principal in the importing world.** They are a source. Their identity is recorded in `install_provenance` (the GitHub `<owner>/<repo>`) but does not become an actor in the world. Verbs imported from a catalog do not run with the publisher's authority — they run per the standard `progr` rule (§CT13.2).
+
+### CT13.2 `progr` for imported verbs
+
+A verb imported from a catalog runs with `progr = <verb_owner_at_compile>`, exactly as for any other verb ([permissions.md §11.4](../semantics/permissions.md#114-effective-permission)). The verb owner is set at install time to the actor who issued the install. So:
+
+- A catalog installed by `$wiz` produces verbs whose `progr` is `$wiz`. Those verbs run with wizard authority.
+- A catalog installed by a non-wizard programmer (if a world's policy permits) produces verbs whose `progr` is that programmer. The verbs run with that programmer's authority — they cannot do anything the installing actor couldn't do directly.
+
+**This is the load-bearing rule.** Catalog publishers cannot smuggle elevated authority into the importing world. The maximum authority a catalog's code achieves is the authority of the actor who installed it.
+
+### CT13.3 Feature attachment under catalogs
+
+Per [features.md §FT3](../semantics/features.md#ft3-frame-state-inside-a-feature-verb), feature verbs run with `progr = feature_verb_owner`. Combined with §CT13.2:
+
+- A catalog's `$conversational` feature, installed by `$wiz`, has `progr = $wiz` for every feature verb. Attaching it to *any* consumer (including non-wizard consumers) causes those verbs to run with wizard authority through the consumer.
+- This is *exactly* the FT3 contract — features confer authority. The catalog story doesn't change the rule, just makes it more visible at scale.
+- Feature catalogs are **powerful and dangerous**. A wizard installing a feature catalog from an untrusted source effectively grants that source's verb authors wizard-level capability on every consumer.
+
+The mitigations:
+- Operators inspect the manifest before install (the GitHub-tap model surfaces this naturally — the source is browsable).
+- Catalogs declare their `direct_callable` and `tool_exposed` flags conservatively (§CT11).
+- The catalog's `:can_be_attached_by` policy verb (per FT5) gates who can attach the feature; well-behaved feature catalogs ship a non-trivial policy rather than the default owner-only check.
+
+### CT13.4 Ownership transitions
+
+If the installing actor is later recycled (e.g., a guest operator who installed a catalog while logged in as `$wiz`, then disconnected), the imported objects retain their owner reference, which becomes a dangling ref per [recycle.md §RC5](../semantics/recycle.md#rc5-dangling-references). The objects continue to function (`progr` is captured at compile, not resolved at call time), but ownership-gated operations against them will fail until a wizard reassigns ownership via the standard mechanism.
+
+For installs by ephemeral actors (guests, soon-to-expire sessions), operators should reassign ownership to a stable principal (`$wiz` or a dedicated `$catalog_admin`) immediately after install. A `wiz:reassign_catalog_owner(catalog, new_owner)` convenience verb is recommended but not normative.
+
+---
+
+## CT14. Migrations
+
+Persistent worlds mean catalog upgrades affect live state — instances created by `v1.0` may not be valid under `v2.0` if the class shape changed. A serious ecosystem needs migration conventions as mature as database migration tooling.
+
+v1 ships **the contract**, not yet the tooling. The contract:
+
+### CT14.1 Migration manifests
+
+A catalog publishing a major-version bump (e.g., `dubspace-v1.x.x` → `dubspace-v2.0.0`) ships a sibling file `migration-v1-to-v2.json` in the same `catalogs/<catalog>/` directory. The Worker fetches this alongside `manifest.json` when an `update` resolves to a major bump.
+
+```jsonc
+{
+  "from_version": "1.x.x",
+  "to_version": "2.0.0",
+  "spec_version": "v1",
+  "steps": [
+    {
+      "kind": "rename_property",
+      "class": "$loop_slot",
+      "from": "loop_id",
+      "to": "loop_ref"
+    },
+    {
+      "kind": "transform_property",
+      "class": "$delay",
+      "name": "feedback",
+      "transform": "verb(old) { return clamp(old, 0.0, 1.0); }"
+    },
+    {
+      "kind": "drop_verb",
+      "class": "$loop_slot",
+      "verb": "deprecated_play"
+    },
+    ...
+  ]
+}
+```
+
+### CT14.2 Step kinds (v1)
+
+The v1 migration vocabulary is intentionally minimal:
+
+- `rename_class` — change a catalog-local class name; instances reparent.
+- `rename_property` — rename a property across all instances of a class.
+- `transform_property` — apply a transformation verb to every instance's value of a property.
+- `drop_property` — remove a property; values discarded (irreversible).
+- `add_property` — add a property with a default; instances get the default.
+- `rename_verb` — change a verb name on a class.
+- `drop_verb` — remove a verb (callers fail with `E_VERBNF`).
+- `change_parent` — `chparent` a class to a new parent (must be in the new manifest's class list or universal classes).
+
+Anything more complex requires a custom migration verb, declared as `kind: "custom"` with a `verb` body in DSL source. Custom steps run with the install actor's authority, like any other catalog code.
+
+### CT14.3 Execution
+
+A major-version `update` runs migration steps inside `$catalog_registry`'s sequenced call, in declared order. Each step is wrapped in a savepoint. If a step fails, the migration body catches the error, rolls back only the failing step's savepoint, records `migration_state`, emits `migration_failed`, and returns normally. That means the registry call itself commits with `applied_ok=true`; completed earlier steps remain committed and the registry log records exactly where the migration stopped.
+
+This is deliberately **not** the same as an unhandled behavior failure. If the migration body lets the error escape, the standard `$space:call` failure rule applies and the whole behavior savepoint rolls back. Catalog migration code must catch step failures when it wants the partial-progress semantics described here.
+
+Recovery from a failed migration is operator work in v1. The registry exposes `:migration_state(catalog)` returning `{from_version, to_version, completed_steps, failed_step?}` so operators can either complete the migration manually or roll back to a backup.
+
+### CT14.4 Idempotency
+
+Migration steps must be **idempotent** — running them twice is safe. This is the recovery story: if step N fails, the operator fixes the underlying issue (data, code, environment) and reruns the migration; steps 1..N-1 no-op (rename to a target that already has the target name; transform a value already transformed; drop a property already dropped). The runtime does not enforce idempotency; catalog publishers attest to it.
+
+### CT14.5 What's deferred
+
+- **Rollback to prior version.** Major downgrades are not in v1. A failed migration can be repaired forward but cannot reliably undo earlier migration steps. Backups are the recovery path; backups, snapshots, and the export tooling are spec'd separately ([backups.md](../operations/backups.md)).
+- **Cross-catalog migrations.** A migration that requires another catalog to be at a specific version is hard to express in v1's `depends` model. Defer.
+- **Schema-typed property migrations.** Without typed verb signatures (§CT11 closing note), the `transform_property` step takes the old value as untyped data. Typed migrations land when typed signatures do.
+- **Rolling migrations on live worlds.** v1 migrations are operator-coordinated and may pause normal traffic while running. Online schema migration is post-v1.
+- **Auto-generated migrations from manifest diffs.** Tooling for "compute the migration steps between v1.0 and v2.0 manifests" is useful but secondary; publishers write migrations by hand for now.
+
+The principle: **migrations are the publisher's responsibility, recovery is the operator's, and the runtime provides the sequencing and audit substrate.** This matches the rest of woo's discipline — the runtime guarantees minimal primitives; user/publisher code does the domain-specific work.

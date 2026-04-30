@@ -1,0 +1,187 @@
+{
+  "name": "dubspace",
+  "version": "0.1.0",
+  "spec_version": "v1",
+  "description": "Shared dub-mix sound space demo objects.",
+  "license": "MIT",
+  "depends": [],
+  "classes": [
+    {
+      "local_name": "$control",
+      "parent": "$root",
+      "description": "Base class for addressable controls in a sound surface.",
+      "properties": [
+        { "name": "value", "type": "any", "default": 0, "perms": "rw" }
+      ],
+      "verbs": []
+    },
+    {
+      "local_name": "$loop_slot",
+      "parent": "$control",
+      "description": "Control class for a loaded loop slot.",
+      "properties": [
+        { "name": "loop_id", "type": "str|null", "default": null, "perms": "rw" },
+        { "name": "playing", "type": "bool", "default": false, "perms": "rw" },
+        { "name": "gain", "type": "float", "default": 1.0, "perms": "rw" },
+        { "name": "freq", "type": "float", "default": 220.0, "perms": "rw" }
+      ],
+      "verbs": []
+    },
+    {
+      "local_name": "$channel",
+      "parent": "$control",
+      "description": "Control class for mixer-channel state.",
+      "properties": [
+        { "name": "gain", "type": "float", "default": 1.0, "perms": "rw" }
+      ],
+      "verbs": []
+    },
+    {
+      "local_name": "$filter",
+      "parent": "$control",
+      "description": "Control class for filter state.",
+      "properties": [
+        { "name": "cutoff", "type": "float", "default": 1000.0, "perms": "rw" }
+      ],
+      "verbs": []
+    },
+    {
+      "local_name": "$delay",
+      "parent": "$control",
+      "description": "Control class for delay-effect state.",
+      "properties": [
+        { "name": "send", "type": "float", "default": 0.0, "perms": "rw" },
+        { "name": "time", "type": "float", "default": 0.25, "perms": "rw" },
+        { "name": "feedback", "type": "float", "default": 0.3, "perms": "rw" },
+        { "name": "wet", "type": "float", "default": 0.5, "perms": "rw" }
+      ],
+      "verbs": []
+    },
+    {
+      "local_name": "$drum_loop",
+      "parent": "$control",
+      "description": "Control class for a small step-sequenced percussion loop.",
+      "properties": [
+        { "name": "bpm", "type": "int", "default": 118, "perms": "rw" },
+        { "name": "playing", "type": "bool", "default": false, "perms": "rw" },
+        { "name": "started_at", "type": "int", "default": 0, "perms": "rw" },
+        { "name": "step_count", "type": "int", "default": 8, "perms": "rw" },
+        { "name": "pattern", "type": "map<str,list<bool>>", "default": { "kick": [true, false, false, false, true, false, false, false], "snare": [false, false, true, false, false, false, true, false], "hat": [true, true, true, true, true, true, true, true], "tone": [false, false, false, true, false, false, false, true] }, "perms": "rw" }
+      ],
+      "verbs": []
+    },
+    {
+      "local_name": "$scene",
+      "parent": "$root",
+      "description": "Class for saved control snapshots.",
+      "properties": [
+        { "name": "name", "type": "str", "default": "", "perms": "rw" },
+        { "name": "controls", "type": "map", "default": {}, "perms": "rw" }
+      ],
+      "verbs": []
+    },
+    {
+      "local_name": "$dubspace",
+      "parent": "$space",
+      "description": "Base class for shared dub-mix spaces.",
+      "properties": [],
+      "verbs": [
+        {
+          "name": "set_control",
+          "perms": "rx",
+          "arg_spec": { "args": ["target", "name", "value"] },
+          "source": "verb :set_control(target, name, value) rx { target.(name) = value; observe({ type: \"control_changed\", target: target, name: name, value: value }); return value; }"
+        },
+        {
+          "name": "preview_control",
+          "perms": "rxd",
+          "direct_callable": true,
+          "arg_spec": { "args": ["target", "name", "value"] },
+          "source": "verb :preview_control(target, name, value) rxd { observe({ type: \"gesture_progress\", actor: actor, target: target, name: name, value: value }); return value; }"
+        },
+        {
+          "name": "cursor",
+          "perms": "rxd",
+          "direct_callable": true,
+          "arg_spec": { "args": ["x", "y"] },
+          "source": "verb :cursor(x, y) rxd { observe({ type: \"cursor\", actor: actor, x: x, y: y }); return true; }"
+        },
+        {
+          "name": "start_loop",
+          "perms": "rx",
+          "arg_spec": { "args": ["slot"] },
+          "source": "verb :start_loop(slot) rx { slot.playing = true; observe({ type: \"loop_started\", slot: slot, loop_id: slot.loop_id }); return true; }"
+        },
+        {
+          "name": "stop_loop",
+          "perms": "rx",
+          "arg_spec": { "args": ["slot"] },
+          "source": "verb :stop_loop(slot) rx { slot.playing = false; observe({ type: \"loop_stopped\", slot: slot }); return true; }"
+        },
+        {
+          "name": "set_drum_step",
+          "perms": "rx",
+          "arg_spec": { "args": ["voice", "step", "enabled"] },
+          "source": "verb :set_drum_step(voice, step, enabled) rx { /* update drum_1.pattern[voice][step] */ observe({ type: \"drum_step_changed\", target: drum_1, voice: voice, step: step, enabled: enabled }); return enabled; }"
+        },
+        {
+          "name": "set_tempo",
+          "perms": "rx",
+          "arg_spec": { "args": ["bpm"] },
+          "source": "verb :set_tempo(bpm) rx { drum_1.bpm = bpm; observe({ type: \"tempo_changed\", target: drum_1, bpm: bpm }); return bpm; }"
+        },
+        {
+          "name": "start_transport",
+          "perms": "rx",
+          "arg_spec": { "args": [] },
+          "source": "verb :start_transport() rx { drum_1.playing = true; drum_1.started_at = now(); observe({ type: \"transport_started\", target: drum_1, started_at: drum_1.started_at, bpm: drum_1.bpm }); return drum_1.started_at; }"
+        },
+        {
+          "name": "stop_transport",
+          "perms": "rx",
+          "arg_spec": { "args": [] },
+          "source": "verb :stop_transport() rx { drum_1.playing = false; observe({ type: \"transport_stopped\", target: drum_1 }); return true; }"
+        },
+        {
+          "name": "save_scene",
+          "perms": "rx",
+          "arg_spec": { "args": ["name"] },
+          "source": "verb :save_scene(name) rx { default_scene.name = name; default_scene.controls = capture_controls(this); observe({ type: \"scene_saved\", scene: default_scene, name: name }); return default_scene; }"
+        },
+        {
+          "name": "recall_scene",
+          "perms": "rx",
+          "arg_spec": { "args": ["scene"] },
+          "source": "verb :recall_scene(scene) rx { apply_controls(scene.controls); observe({ type: \"scene_recalled\", scene: scene }); return true; }"
+        }
+      ]
+    }
+  ],
+  "features": [],
+  "schemas": [
+    { "on": "$dubspace", "type": "loop_started", "shape": { "slot": "obj", "loop_id": "str" } },
+    { "on": "$dubspace", "type": "loop_stopped", "shape": { "slot": "obj" } },
+    { "on": "$dubspace", "type": "control_changed", "shape": { "target": "obj", "name": "str", "value": "any" } },
+    { "on": "$dubspace", "type": "scene_saved", "shape": { "scene": "obj", "name": "str" } },
+    { "on": "$dubspace", "type": "scene_recalled", "shape": { "scene": "obj" } },
+    { "on": "$dubspace", "type": "drum_step_changed", "shape": { "target": "obj", "voice": "str", "step": "int", "enabled": "bool" } },
+    { "on": "$dubspace", "type": "tempo_changed", "shape": { "target": "obj", "bpm": "int" } },
+    { "on": "$dubspace", "type": "transport_started", "shape": { "target": "obj", "started_at": "int", "bpm": "int" } },
+    { "on": "$dubspace", "type": "transport_stopped", "shape": { "target": "obj" } },
+    { "on": "$dubspace", "type": "gesture_progress", "shape": { "actor": "obj", "target": "obj", "name": "str", "value": "any" } },
+    { "on": "$dubspace", "type": "cursor", "shape": { "actor": "obj", "x": "float", "y": "float" } }
+  ],
+  "seed_hooks": [
+    { "kind": "create_instance", "class": "$dubspace", "as": "the_dubspace", "name": "Dubspace", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0 } },
+    { "kind": "create_instance", "class": "$loop_slot", "as": "slot_1", "name": "Loop 1", "anchor": "the_dubspace", "location": "the_dubspace", "properties": { "loop_id": "loop-1", "playing": false, "gain": 0.75, "freq": 110 } },
+    { "kind": "create_instance", "class": "$loop_slot", "as": "slot_2", "name": "Loop 2", "anchor": "the_dubspace", "location": "the_dubspace", "properties": { "loop_id": "loop-2", "playing": false, "gain": 0.75, "freq": 146.83 } },
+    { "kind": "create_instance", "class": "$loop_slot", "as": "slot_3", "name": "Loop 3", "anchor": "the_dubspace", "location": "the_dubspace", "properties": { "loop_id": "loop-3", "playing": false, "gain": 0.75, "freq": 196 } },
+    { "kind": "create_instance", "class": "$loop_slot", "as": "slot_4", "name": "Loop 4", "anchor": "the_dubspace", "location": "the_dubspace", "properties": { "loop_id": "loop-4", "playing": false, "gain": 0.75, "freq": 261.63 } },
+    { "kind": "create_instance", "class": "$channel", "as": "channel_1", "name": "Channel", "anchor": "the_dubspace", "location": "the_dubspace", "properties": { "gain": 0.8 } },
+    { "kind": "create_instance", "class": "$filter", "as": "filter_1", "name": "Filter", "anchor": "the_dubspace", "location": "the_dubspace", "properties": { "cutoff": 1000 } },
+    { "kind": "create_instance", "class": "$delay", "as": "delay_1", "name": "Delay", "anchor": "the_dubspace", "location": "the_dubspace", "properties": { "send": 0.3, "time": 0.25, "feedback": 0.35, "wet": 0.4 } },
+    { "kind": "create_instance", "class": "$drum_loop", "as": "drum_1", "name": "Percussion Loop", "anchor": "the_dubspace", "location": "the_dubspace" },
+    { "kind": "create_instance", "class": "$scene", "as": "default_scene", "name": "Default Scene", "anchor": "the_dubspace", "location": "the_dubspace", "properties": { "name": "Default", "controls": {} } }
+  ]
+}
+

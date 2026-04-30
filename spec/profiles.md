@@ -25,9 +25,9 @@ Source of truth for which profile each spec doc belongs to. Per-doc `Profile:` f
 
 ### first-light
 
-- `spec/dubspace-demo.md`
-- `spec/taskspace-demo.md`
-- `spec/chat-demo.md` (planned extension; not in the current reference implementation)
+- `catalogs/dubspace/DESIGN.md`
+- `catalogs/taskspace/DESIGN.md`
+- `catalogs/chat/DESIGN.md`
 - `spec/authoring/minimal-ide.md`
 - (Reference implementation in `src/`; not a spec doc.)
 
@@ -59,7 +59,7 @@ Some docs carry rules that *escalate* between profiles:
 
 - **`semantics/space.md §S7` snapshots** — optional in v1-core; required in v1-ops.
 - **`semantics/identity.md` auth tokens** — guest-only in v1-core; credentialed (bearer/OAuth) added in v1-ops via `identity/auth.md`.
-- **`semantics/bootstrap.md` seed graph** — universal classes in v1-core; demo classes (`$dubspace`, `$taskspace`) are first-light artifacts.
+- **`semantics/bootstrap.md` seed graph** — universal classes in v1-core; demo apps (`chat`, `taskspace`, `dubspace`) are first-light local-catalog artifacts.
 - **`semantics/failures.md` storage failure rows** — all profiles agree, but storage-failure modes are only fully exercised in v1-core+ (first-light/local v0.5 has SQLite and JSON persistence slices, but not the production host failure model).
 
 Where escalation happens, the section explicitly notes it with the higher profile's name.

@@ -211,7 +211,7 @@ to current participants.
 This is the **logged social interaction** variant: useful when utterances should
 be durable/auditable. The default chat-demo surface uses direct `:say` calls
 instead, so speech observations are live-only and do not advance the room's
-sequence. See [chat-demo.md](../chat-demo.md) and [§C13](#c13-call-discipline).
+sequence. See [chat DESIGN.md](../../catalogs/chat/DESIGN.md) and [§C13](#c13-call-discipline).
 
 This captures LambdaMOO's useful room behavior without making "room" the
 universal core primitive.

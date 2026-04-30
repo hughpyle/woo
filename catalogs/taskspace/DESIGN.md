@@ -199,7 +199,7 @@ claiming is first-come, first-served.
 `task:add_requirement(text)`:
 
 - Appends `{text, checked: false}` to `requirements`. No length limit on `text`
-  beyond the value-model max ([values.md §V9](semantics/values.md#v9-size-limits)).
+  beyond the value-model max ([values.md §V9](../../spec/semantics/values.md#v9-size-limits)).
 - Emits `requirement_added {task, index, text}`.
 
 `task:check_requirement(index, checked)`:
@@ -280,7 +280,7 @@ and the UI falls back to displaying `ref` literally.
 
 This is the demo's open default. Projects that want stricter rules apply the
 per-claimer-update pattern from
-[identity.md §I7.1](semantics/identity.md#i71-the-per-claimer-update-pattern)
+[identity.md §I7.1](../../spec/semantics/identity.md#i71-the-per-claimer-update-pattern)
 with whichever fields fit.
 
 ## Definition of Done
@@ -319,7 +319,7 @@ Three concrete patterns:
   for permission. Surfaced in the UI for context; doesn't constrain behavior.
 
 The pattern is the per-claimer check from
-[identity.md §I7.1](semantics/identity.md#i71-the-per-claimer-update-pattern)
+[identity.md §I7.1](../../spec/semantics/identity.md#i71-the-per-claimer-update-pattern)
 generalized: any actor-typed property can become a role, and any verb can gate
 itself on `progr` matching that property. The platform permits; it does not
 prescribe.
@@ -332,7 +332,7 @@ machinery; they are all just object data and verb code.
 
 ## Workflow Variant (useful taskspace)
 
-The basic demo above uses the open-policy `:set_status` (any actor, any transition). For a useful coordination platform, the same taskspace can declare a [workflow](operations/workflows.md) that gates transitions on roles and entrance conditions. This is the cut you'd actually use to coordinate work between agents (or people).
+The basic demo above uses the open-policy `:set_status` (any actor, any transition). For a useful coordination platform, the same taskspace can declare a [workflow](../../spec/operations/workflows.md) that gates transitions on roles and entrance conditions. This is the cut you'd actually use to coordinate work between agents (or people).
 
 ### Example workflow
 
@@ -363,7 +363,7 @@ Each task carries `performer` and `reviewer` properties (alongside or replacing 
 
 ### Task properties for agent routing
 
-When the same taskspace coordinates AI agents at different capability tiers, two extra properties on each task make routing predictable (per [workflows.md §WF11](operations/workflows.md#wf11-capability-gating-for-agent-claims)):
+When the same taskspace coordinates AI agents at different capability tiers, two extra properties on each task make routing predictable (per [workflows.md §WF11](../../spec/operations/workflows.md#wf11-capability-gating-for-agent-claims)):
 
 - `capability: "low" | "medium" | "high" | null` — minimum claimer tier. Defaults null (no constraint). Set per task at creation, or by a wizard later.
 - `token_budget: int | null` — advisory estimate of tokens to complete the work; surfaced in listings so agents can self-select.
@@ -393,7 +393,7 @@ A **reviewer agent**:
        or #task:transition("design") with #task:add_message("rationale") (reject)
 ```
 
-These flows compose with the [REST API](protocol/rest.md): the agent's runtime makes ordinary HTTP calls, no WebSocket required.
+These flows compose with the [REST API](../../spec/protocol/rest.md): the agent's runtime makes ordinary HTTP calls, no WebSocket required.
 
 ### Why this is "useful"
 

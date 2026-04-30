@@ -1,0 +1,45 @@
+{
+  "format": "mcp/0.1",
+  "tools": [
+    {
+      "name": "taskspace.create_task",
+      "description": "Create a top-level task in a taskspace.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "space": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" }
+        },
+        "required": ["space", "title"]
+      }
+    },
+    {
+      "name": "taskspace.set_status",
+      "description": "Set a task status.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "space": { "type": "string" },
+          "task": { "type": "string" },
+          "status": { "type": "string", "enum": ["open", "claimed", "in_progress", "blocked", "done"] }
+        },
+        "required": ["space", "task", "status"]
+      }
+    },
+    {
+      "name": "taskspace.add_message",
+      "description": "Add a timeline message to a task.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "space": { "type": "string" },
+          "task": { "type": "string" },
+          "body": { "type": "string" }
+        },
+        "required": ["space", "task", "body"]
+      }
+    }
+  ]
+}
+

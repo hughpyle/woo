@@ -1,5 +1,12 @@
 # DSL Compiler M1
 
+> **Status: M1 landed** (commit `82e2e0c`). Implementation in
+> `src/core/dsl-compiler.ts` (~1200 lines) is the canonical source compiler;
+> the regex-shaped T0 compiler is fully replaced. Acceptance tests below were
+> all met as of the landing commit (see `tests/core.test.ts` set_feedback,
+> index_and_interp, explode, sum_to, verb-calls + pass + try/except, bad source,
+> and JSON-fallback cases). M1.1 pressure-ring items remain forward-looking.
+
 ## Purpose
 
 The v0.5 VM can run useful object programs, but the authoring path still depends

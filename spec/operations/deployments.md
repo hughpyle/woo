@@ -22,7 +22,7 @@ A world *exists* in a deployment. Moving a world between deployments uses backup
 
 ## DP2. Seed distribution
 
-A deployment boots from a seed graph (universal classes + demo classes). The seed is identical across environments — the same `$root`, `$space`, `$dubspace`, etc. — so a worktree's patch series, an export, and a migration catalog all behave the same way regardless of which environment they target.
+A deployment boots from a seed graph plus configured local catalogs. The universal seed is identical across environments (`$root`, `$space`, `$thing`, etc.); demo surfaces such as `$dubspace` and `$taskspace` come from bundled local catalogs, so a worktree's patch series, an export, and a migration catalog all behave the same way regardless of which environment they target.
 
 Seed graph is delivered with the runtime code; bumping the spec version updates the seed.
 

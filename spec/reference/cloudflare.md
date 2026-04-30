@@ -333,7 +333,7 @@ The seed graph from [bootstrap.md](../semantics/bootstrap.md) materializes the f
 3. `$system` DO checks its `bootstrapped` flag. If false:
    - Acquires its own storage transaction.
    - Materializes universal classes by RPC-creating each — `$root`, `$actor`, `$player`, `$wiz`, `$guest`, `$sequenced_log`, `$space`, `$thing`. Each landed via `env.WOO.get(idFromName(corename)).create(...)`.
-   - Materializes demo classes and instances per the boot order.
+   - Installs configured local catalogs per `WOO_AUTO_INSTALL_CATALOGS`; until the local catalog installer lands, first-light builds may materialize the equivalent demo classes and instances directly per the boot order.
    - Registers corenames in the `Directory` DO.
    - Sets `bootstrapped = true`.
 4. Boot is idempotent; concurrent first-requests serialize on `$system`'s single-threaded execution.

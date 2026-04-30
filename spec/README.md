@@ -14,13 +14,15 @@ The spec is intended to be detailed enough to guide implementation, testing, ope
 | `deferred/` | deferred | Designs not in v1 (federation, audio, capabilities, conformance) |
 | `authoring/` | authoring | First authoring surface (minimal IDE) |
 
-## Demo and working docs at this level
+## Demo and working docs
 
-These cross all four layers and live at the spec root rather than under any one layer:
+The platform contracts live under `spec/`; bundled app designs live with their
+local catalogs:
 
 - [vision.md](vision.md) — what Woo is becoming and what it is not yet
-- [dubspace-demo.md](dubspace-demo.md) — first sound-space demo
-- [taskspace-demo.md](taskspace-demo.md) — async coordination demo
+- [../catalogs/chat/DESIGN.md](../catalogs/chat/DESIGN.md) — chat feature demo
+- [../catalogs/dubspace/DESIGN.md](../catalogs/dubspace/DESIGN.md) — first sound-space demo
+- [../catalogs/taskspace/DESIGN.md](../catalogs/taskspace/DESIGN.md) — async coordination demo
 
 ## Process
 

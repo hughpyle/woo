@@ -1,7 +1,7 @@
 # Dubspace Demo
 
-The first working Woo demo is a tiny collaborative dub mix space: a shared,
-persistent control surface for live sound gestures.
+A tiny collaborative dub mix space: a shared, persistent control surface for
+live sound gestures.
 
 ## Goal
 
@@ -42,7 +42,7 @@ for fast reload. No world-level clock is required for ordering.
 
 Slider motion has two layers — two routes for the same control surface:
 
-- **Preview** (direct call): while a player drags a slider, the client calls a direct verb, `the_dubspace:preview_control(target, name, value)`. The verb body emits a `gesture_progress` observation; per [events.md §12.6](semantics/events.md#126-observation-durability-follows-invocation-route), the observation is live-only because the call is direct. Not sequenced, not logged, not replayed.
+- **Preview** (direct call): while a player drags a slider, the client calls a direct verb, `the_dubspace:preview_control(target, name, value)`. The verb body emits a `gesture_progress` observation; per [events.md §12.6](../../spec/semantics/events.md#126-observation-durability-follows-invocation-route), the observation is live-only because the call is direct. Not sequenced, not logged, not replayed.
 - **Commit** (sequenced): when the drag ends, the client sends `$space:call({verb: "set_control", args: [target, name, value]})`. The value becomes materialized persistent state and is replayable.
 
 The preview layer exists so continuous gestures feel live without filling the `$space` log with every pointer sample. It is the same control surface called via a different route, not a second source of truth.
@@ -67,7 +67,7 @@ Each observation the dubspace emits has a defined payload shape. UI and agents c
 | `gesture_progress` | `{actor: obj, target: obj, name: str, value: any}` | Direct call: in-flight slider drag preview. Live-only. |
 | `cursor` | `{actor: obj, x: float, y: float}` | Direct call: pointer position. Live-only. |
 
-All observations include `type` (the table key) and `source` (the dubspace itself, unless noted otherwise). Observations from sequenced verbs (`:set_control`, `:start_loop`, etc.) become part of the resulting applied frame and are replayable. Observations from direct verbs (`:preview_control`, `:cursor`) are live-only — see [events.md §12.6](semantics/events.md#126-observation-durability-follows-invocation-route).
+All observations include `type` (the table key) and `source` (the dubspace itself, unless noted otherwise). Observations from sequenced verbs (`:set_control`, `:start_loop`, etc.) become part of the resulting applied frame and are replayable. Observations from direct verbs (`:preview_control`, `:cursor`) are live-only — see [events.md §12.6](../../spec/semantics/events.md#126-observation-durability-follows-invocation-route).
 
 ## Live Events
 

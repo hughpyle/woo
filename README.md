@@ -29,7 +29,6 @@ Start with [spec/README.md](spec/README.md).
 ## Implementation Plan
 
 Runtime code lives under [src/](src/), with focused tests under [tests/](tests/).
-Current debt and spec/impl drift is in [TECH_DEBT_AUDIT.md](TECH_DEBT_AUDIT.md).
 Historical milestone notes are in [notes/](notes/).
 
 ## Run Locally

@@ -1,0 +1,62 @@
+{
+  "name": "chat",
+  "version": "0.1.0",
+  "spec_version": "v1",
+  "description": "Feature-object chat surface and standalone chatroom demo.",
+  "license": "MIT",
+  "depends": [],
+  "classes": [
+    {
+      "local_name": "$match",
+      "parent": "$thing",
+      "description": "Chat-shaped text-to-action scaffold.",
+      "properties": [],
+      "verbs": [
+        { "name": "match_object", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["name", "location"] }, "source": "verb :match_object(name, location) rxd { return match_object(name, location); }" },
+        { "name": "match_verb", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["name", "target"] }, "source": "verb :match_verb(name, target) rxd { return match_verb(name, target); }" },
+        { "name": "parse_command", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["text", "actor"] }, "source": "verb :parse_command(text, actor) rxd { return parse_chat_command(text, actor); }" }
+      ]
+    },
+    { "local_name": "$failed_match", "parent": "$thing", "description": "Stable sentinel returned when no visible object matches.", "properties": [], "verbs": [] },
+    { "local_name": "$ambiguous_match", "parent": "$thing", "description": "Stable sentinel returned when multiple visible objects match.", "properties": [], "verbs": [] },
+    {
+      "local_name": "$chatroom",
+      "parent": "$space",
+      "description": "Standalone chat room class whose behavior comes from $conversational.",
+      "properties": [],
+      "verbs": []
+    }
+  ],
+  "features": [
+    {
+      "local_name": "$conversational",
+      "parent": "$thing",
+      "description": "Feature object carrying live chat verbs for spaces.",
+      "properties": [],
+      "verbs": [
+        { "name": "can_be_attached_by", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["actor"] }, "source": "verb :can_be_attached_by(actor) rxd { return true; }" },
+        { "name": "say", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["text"] }, "source": "verb :say(text) rxd { observe({ type: \"said\", actor: actor, text: text }); return true; }" },
+        { "name": "emote", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["text"] }, "source": "verb :emote(text) rxd { observe({ type: \"emoted\", actor: actor, text: text }); return true; }" },
+        { "name": "tell", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["recipient", "text"] }, "source": "verb :tell(recipient, text) rxd { observe({ type: \"told\", from: actor, to: recipient, text: text }); return true; }" },
+        { "name": "look", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :look() rxd { return { description: this.description, contents: this.contents, present_actors: this.subscribers }; }" },
+        { "name": "who", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :who() rxd { return this.subscribers; }" },
+        { "name": "enter", "perms": "rxd", "direct_callable": true, "skip_presence_check": true, "arg_spec": { "args": ["actor?"] }, "source": "verb :enter(who) rxd { let entrant = who || actor; this:add_presence(entrant); observe({ type: \"entered\", actor: entrant }); return this.subscribers; }" },
+        { "name": "leave", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["actor?"] }, "source": "verb :leave(who) rxd { let leaver = who || actor; this:remove_presence(leaver); observe({ type: \"left\", actor: leaver }); return this.subscribers; }" },
+        { "name": "command", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["text"] }, "source": "verb :command(text) rxd { let cmd = $match:parse_command(text, actor); return dispatch_chat_command(this, cmd); }" }
+      ]
+    }
+  ],
+  "schemas": [
+    { "on": "$conversational", "type": "said", "shape": { "source": "obj", "actor": "obj", "text": "str" } },
+    { "on": "$conversational", "type": "emoted", "shape": { "source": "obj", "actor": "obj", "text": "str" } },
+    { "on": "$conversational", "type": "told", "shape": { "source": "obj", "from": "obj", "to": "obj", "text": "str" } },
+    { "on": "$conversational", "type": "entered", "shape": { "source": "obj", "actor": "obj" } },
+    { "on": "$conversational", "type": "left", "shape": { "source": "obj", "actor": "obj" } },
+    { "on": "$conversational", "type": "huh", "shape": { "source": "obj", "actor": "obj", "text": "str", "suggestion": "str?" } }
+  ],
+  "seed_hooks": [
+    { "kind": "create_instance", "class": "$chatroom", "as": "the_chatroom", "name": "Lobby", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0 } },
+    { "kind": "attach_feature", "consumer": "the_chatroom", "feature": "$conversational" }
+  ]
+}
+
