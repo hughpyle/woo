@@ -52,6 +52,26 @@ textarea {
   padding: 1rem;
 }
 
+.nav {
+  display: flex;
+  flex-direction: column;
+}
+
+.github-link {
+  margin-top: auto;
+  align-self: flex-start;
+  color: #5f685d;
+  display: inline-flex;
+  padding: 0.25rem;
+  border-radius: 4px;
+  transition: color 120ms;
+}
+
+.github-link:hover,
+.github-link:focus-visible {
+  color: #1a3a17;
+}
+
 .events {
   border-right: 0;
   border-left: 1px solid #d0d7cd;
