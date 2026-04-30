@@ -11,6 +11,7 @@ export { DirectoryDO } from "./directory-do";
 
 const WORLD_HOST = "world";
 const DIRECTORY_HOST = "directory";
+const INTERNAL_ORIGIN = "https://woo.internal";
 
 function isApiPath(pathname: string): boolean {
   return (
@@ -139,7 +140,7 @@ async function broadcastRoutedCall(env: Env, response: Response, host: string): 
     const body = await response.json() as Record<string, unknown>;
     if (body.op === "applied") {
       await registerObjectsFromApplied(env, body, host);
-      await forwardToHost(env, WORLD_HOST, new Request("https://woo.internal/__internal/broadcast-applied", {
+      await forwardToHost(env, WORLD_HOST, new Request(`${INTERNAL_ORIGIN}/__internal/broadcast-applied`, {
         method: "POST",
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify({ frame: body })
@@ -147,7 +148,7 @@ async function broadcastRoutedCall(env: Env, response: Response, host: string): 
       return;
     }
     if (Array.isArray(body.observations)) {
-      await forwardToHost(env, WORLD_HOST, new Request("https://woo.internal/__internal/broadcast-live-events", {
+      await forwardToHost(env, WORLD_HOST, new Request(`${INTERNAL_ORIGIN}/__internal/broadcast-live-events`, {
         method: "POST",
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify({ audience: host, observations: body.observations })
@@ -205,7 +206,7 @@ async function resolveDirectoryObject(env: Env, id: string, fallbackHost: string
 
 async function directoryPost(env: Env, path: string, body: Record<string, unknown>): Promise<unknown> {
   const id = env.DIRECTORY.idFromName(DIRECTORY_HOST);
-  const response = await env.DIRECTORY.get(id).fetch(new Request(`https://directory.local${path}`, {
+  const response = await env.DIRECTORY.get(id).fetch(new Request(`${INTERNAL_ORIGIN}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify(body)

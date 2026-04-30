@@ -9,11 +9,6 @@
 # `wrangler secret put WOO_INITIAL_WIZARD_TOKEN`.
 WOO_INITIAL_WIZARD_TOKEN=local-dev-wizard-token
 
-# Per-world entropy seed for ULID minting. Different worlds use different seed
-# phrases so their object identifiers don't collide. Local default is the
-# sentinel value the runtime warns about in production.
-WOO_SEED_PHRASE=dev-seed
-
 # Local SQLite database path. Created on first run.
 WOO_DB=.woo/dev.sqlite
 

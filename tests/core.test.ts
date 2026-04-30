@@ -58,6 +58,17 @@ describe("woo core", () => {
     expect(world.describeForActor("the_taskspace", actor).properties).toContain(name);
     expect(() => world.getPropForActor(actor, "the_taskspace", name)).toThrow(/cannot read/);
     expect(world.getPropForActor("$wiz", "the_taskspace", name)).toBe("secret");
+
+    world.defineProperty("the_taskspace", {
+      name: "description",
+      defaultValue: "private taskspace",
+      owner: "$wiz",
+      perms: "w",
+      typeHint: "str"
+    });
+    world.setProp("the_taskspace", "description", "private taskspace");
+    expect((world.state(actor).objects.the_taskspace as Record<string, unknown>).description).toBeNull();
+    expect((world.state("$wiz").objects.the_taskspace as Record<string, unknown>).description).toBe("private taskspace");
   });
 
   it("seeds readable descriptions for every bootstrap object", () => {

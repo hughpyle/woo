@@ -320,32 +320,6 @@ export interface ObjectRepository {
   saveMeta(key: string, value: string): void;
 }
 
-export class InMemoryWorldRepository implements WorldRepository {
-  private stored: SerializedWorld | null = null;
-
-  load(): SerializedWorld | null {
-    return this.stored ? structuredClone(this.stored) : null;
-  }
-
-  save(world: SerializedWorld): void {
-    this.stored = structuredClone(world);
-  }
-
-  saveSpaceSnapshot(snapshot: SpaceSnapshotRecord): void {
-    if (!this.stored) {
-      this.stored = { version: 1, taskCounter: 1, parkedTaskCounter: 1, sessionCounter: 1, objects: [], sessions: [], logs: [], snapshots: [], parkedTasks: [] };
-    }
-    const snapshots = this.stored.snapshots.filter((item) => !(item.space_id === snapshot.space_id && item.seq === snapshot.seq));
-    snapshots.push(structuredClone(snapshot));
-    this.stored.snapshots = snapshots;
-  }
-
-  latestSpaceSnapshot(space: ObjRef): SpaceSnapshotRecord | null {
-    const snapshots = this.stored?.snapshots.filter((snapshot) => snapshot.space_id === space).sort((a, b) => b.seq - a.seq) ?? [];
-    return snapshots[0] ? structuredClone(snapshots[0]) : null;
-  }
-}
-
 type PendingSpaceLogEntry = Omit<SpaceLogEntry, "applied_ok"> & { applied_ok: boolean | null };
 
 type InMemoryObjectRepositoryState = {

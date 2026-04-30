@@ -45,7 +45,12 @@ const server = http.createServer(async (req, res) => {
   try {
     if (await handleRestApi(req, res, url.pathname ?? "")) return;
     if (req.method === "GET" && url.pathname === "/api/state") {
-      return json(res, world.state());
+      try {
+        const session = requireRestSession(req);
+        return json(res, world.state(session.actor));
+      } catch (err) {
+        return restError(res, err);
+      }
     }
     if (req.method === "GET" && url.pathname === "/api/object") {
       const id = String(url.query.id ?? "");

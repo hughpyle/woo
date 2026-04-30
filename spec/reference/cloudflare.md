@@ -549,16 +549,15 @@ That is the entire required surface. Optional bindings (Workers Analytics Engine
 
 ### R14.2 Required configuration
 
-Two secrets must be set before first deploy. Both are single-string values. Both go through `wrangler secret put` (never the `[vars]` block in `wrangler.toml`).
+One secret must be set before first deploy. It is a single-string value and goes through `wrangler secret put` (never the `[vars]` block in `wrangler.toml`).
 
 | Secret | Purpose |
 |---|---|
 | `WOO_INITIAL_WIZARD_TOKEN` | One-time token presented at first auth to claim the `$wiz` binding. Consumed on use; subsequent auths cannot present the same value. See §R14.4. |
-| `WOO_SEED_PHRASE` | Per-world entropy seed. Mixed into ULID minting so independent deployments produce non-colliding object identifiers. See §R14.5. |
 
-The Worker checks both at startup. Missing either is a `503` with a clear remediation message — see §R14.7.
+The Worker checks this at startup. A missing token is a `503` with a clear remediation message — see §R14.7.
 
-For local development, the values live in `.dev.vars` (gitignored) with sane defaults. A `.dev.vars.example` file in the repo root shows the shape; operators copy it to `.dev.vars` and edit.
+For local development, the value lives in `.dev.vars` (gitignored) with a sane default. A `.dev.vars.example` file in the repo root shows the shape; operators copy it to `.dev.vars` and edit.
 
 ### R14.3 Optional bindings
 
@@ -591,16 +590,17 @@ After this exchange, the operator has wizard authority and can mint additional p
 
 The token-secret model is the only acceptable v1 path.
 
-### R14.5 Seed phrase and ULID determinism
+### R14.5 ID determinism status
 
-Per [objects.md §5.5](../semantics/objects.md#55-id-allocation), ULIDs are minted from a deterministic generator seeded per-world. The seed phrase is `WOO_SEED_PHRASE`. Two consequences:
+Per [objects.md §5.5](../semantics/objects.md#55-id-allocation), the long-term target is deterministic object-id allocation from per-world entropy. The current v1 Worker does **not** implement that allocator and does **not** read `WOO_SEED_PHRASE`.
 
-- **Independent deployments produce non-colliding ULIDs** (operator A's `$wiz` ULID ≠ operator B's `$wiz` ULID). This matters for future portability — backups from one world should be loadable into another without ULID collisions.
-- **A given deployment's seed graph is reproducible** — re-running bootstrap produces the same ULIDs for `$wiz`, `$root`, etc. Combined with [bootstrap.md §B9](../semantics/bootstrap.md#b9-idempotent-rebooting) (idempotent boot), this lets operators recover a world from a clean repo + the same seed phrase.
+Current deploy semantics:
 
-Operators should treat `WOO_SEED_PHRASE` as durable secret state — losing it is recoverable (the world keeps running with its existing ULIDs), but rotating it would re-randomize the entire seed graph and is operationally equivalent to creating a new world.
+- Seeded core and catalog objects keep the IDs declared by their seed data.
+- Runtime-created persistent objects keep the IDs committed in storage.
+- Re-running bootstrap is idempotent because existing objects are discovered and preserved, not because a seed phrase remints the same graph.
 
-For local development, the default seed phrase is `"dev-seed"`. Production deploys with this default emit a startup warning; operators should override.
+Seeded deterministic ULID allocation remains deferred. Until it lands, `WOO_SEED_PHRASE` is not a deploy requirement and must not be presented to operators as a portability or collision-resistance guarantee.
 
 ### R14.6 First-deploy and upgrade discipline
 
@@ -637,8 +637,6 @@ A misconfigured deploy must fail loudly, not silently. The Worker's startup chec
 | Condition | Response |
 |---|---|
 | `WOO_INITIAL_WIZARD_TOKEN` unset on a fresh world (no `bootstrap_token_used`) | Every request returns `503` with body `{ error: { code: "E_BOOTSTRAP_TOKEN_MISSING", message: "set WOO_INITIAL_WIZARD_TOKEN via wrangler secret put" } }` |
-| `WOO_SEED_PHRASE` unset | Every request returns `503` with body `{ error: { code: "E_SEED_PHRASE_MISSING", message: "set WOO_SEED_PHRASE via wrangler secret put; once chosen, do not rotate" } }` |
-| `WOO_SEED_PHRASE = "dev-seed"` (the local-dev default) on a non-dev environment (detected via `CF_ENV != "development"`) | Worker boots with a `warn`-level log every 60 s; not fatal, since some operators may legitimately use the default. |
 | Workers Free plan (no DO support) | `503` with body `{ error: { code: "E_DO_UNAVAILABLE", message: "Durable Objects require Workers Paid plan" } }` |
 
 A working deploy never returns `503` for these reasons. Operators see them only if they skipped a setup step.
@@ -648,7 +646,7 @@ A working deploy never returns `503` for these reasons. Operators see them only 
 Reserved for later:
 
 - **Multi-tenancy in a single deploy.** One deploy = one world. Hosting many isolated worlds in a single CF account requires either separate Worker deployments (already supported by CF, no woo work needed) or a deeper isolation model (deferred).
-- **Operator-to-operator world handoff.** Transferring a world from one CF account to another involves DO data export, ULID preservation, and seed-phrase carry. Possible via the JSON-folder dump format ([persistence.md](persistence.md) implicit), but not yet a documented flow.
+- **Operator-to-operator world handoff.** Transferring a world from one CF account to another involves DO data export and object-id preservation. Possible via the JSON-folder dump format ([persistence.md](persistence.md) implicit), but not yet a documented flow.
 - **Auto-scaling / multi-region tuning.** CF picks the closest region per DO automatically; v1 does not expose region pinning.
 - **Federated worlds.** Out of scope for v1; reserved for v2 (see [federation.md](../deferred/federation.md)).
 - **Metered billing / per-world cost dashboards.** Operators consult their CF dashboard.

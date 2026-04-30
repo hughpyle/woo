@@ -1,7 +1,13 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type APIRequestContext } from "@playwright/test";
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function authHeaders(request: APIRequestContext): Promise<Record<string, string>> {
+  const response = await request.post("/api/auth", { data: { token: `guest:e2e-${crypto.randomUUID()}` } });
+  const body = await response.json();
+  return { authorization: `Session ${body.session}` };
 }
 
 test("loads shell and renders nav", async ({ page }) => {
@@ -67,7 +73,8 @@ test("dubspace cue keeps loop controls local", async ({ page, request }) => {
   await expect(page.locator(".vertical-fader")).toHaveCount(5);
   await expect(page.locator('[aria-label="Filter cutoff"]')).toBeVisible();
 
-  const before = await request.get("/api/state").then((response) => response.json());
+  const headers = await authHeaders(request);
+  const before = await request.get("/api/state", { headers }).then((response) => response.json());
   const beforeSlot = before.dubspace.slot_1.props;
   const localFreq = Number(beforeSlot.freq ?? 110) === 432.5 ? 433.5 : 432.5;
   const localGain = Number(beforeSlot.gain ?? 0.75) === 0.11 ? 0.22 : 0.11;
@@ -81,8 +88,8 @@ test("dubspace cue keeps loop controls local", async ({ page, request }) => {
   await expect(page.locator('[data-loop="slot_1"]')).toHaveText("Start");
   expect(sentFrames.some((frame) => frame.includes("start_loop") || frame.includes("stop_loop"))).toBe(false);
 
-  await page.locator('[data-control="slot_1:freq"]').fill(String(localFreq));
-  await page.locator('[data-control="slot_1:gain"]').evaluate((element, value) => {
+  await page.locator('[data-control][data-target="slot_1"][data-name="freq"]').fill(String(localFreq));
+  await page.locator('[data-control][data-target="slot_1"][data-name="gain"]').evaluate((element, value) => {
     const input = element as HTMLInputElement;
     input.value = String(value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -91,7 +98,7 @@ test("dubspace cue keeps loop controls local", async ({ page, request }) => {
   await page.waitForTimeout(100);
 
   expect(sentFrames.some((frame) => frame.includes("preview_control") || frame.includes("set_control"))).toBe(false);
-  const after = await request.get("/api/state").then((response) => response.json());
+  const after = await request.get("/api/state", { headers }).then((response) => response.json());
   expect(after.dubspace.slot_1.props.freq ?? 110).toBe(beforeSlot.freq ?? 110);
   expect(after.dubspace.slot_1.props.gain).toBe(beforeSlot.gain);
 
@@ -101,7 +108,7 @@ test("dubspace cue keeps loop controls local", async ({ page, request }) => {
   expect(sentFrames.some((frame) => frame.includes("set_control"))).toBe(true);
   await expect
     .poll(async () => {
-      const current = await request.get("/api/state").then((response) => response.json());
+      const current = await request.get("/api/state", { headers }).then((response) => response.json());
       return current.dubspace.slot_1.props;
     })
     .toMatchObject({ freq: localFreq, gain: localGain });

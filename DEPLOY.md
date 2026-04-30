@@ -17,12 +17,13 @@ npm install
 # 2. Authenticate with Cloudflare
 npx wrangler login
 
-# 3. Set the two required secrets (see "Required configuration" below)
+# 3. Set the required bootstrap secret (see "Required configuration" below)
 npx wrangler secret put WOO_INITIAL_WIZARD_TOKEN
-npx wrangler secret put WOO_SEED_PHRASE
 
-# 4. Deploy
-npx wrangler deploy
+# 4. Deploy (runs preflight, build, deploy, postflight checks)
+npm run deploy
+#    or, low-level:  npx wrangler deploy
+#    Hotfix overrides: --dirty, --allow-branch=<x>, --skip-tests, --skip-postflight
 
 # 5. Claim wizard authority
 #    Connect to the deployed world's URL and present:
@@ -48,7 +49,7 @@ If you skip Workers Paid, the deploy succeeds but every request returns `503 E_D
 
 ## Required configuration
 
-Two secrets, both via `wrangler secret put` (never the `[vars]` block in `wrangler.toml`):
+One secret is required via `wrangler secret put` (never the `[vars]` block in `wrangler.toml`):
 
 ### `WOO_INITIAL_WIZARD_TOKEN`
 
@@ -67,21 +68,9 @@ npx wrangler secret put WOO_INITIAL_WIZARD_TOKEN
 
 The token is **single-use**. Once consumed, subsequent presentations return `401 E_TOKEN_CONSUMED`. To rotate the bootstrap token after first use (e.g., for disaster recovery), call `wiz:rotate_bootstrap_token(new_token)` once you have wizard authority.
 
-### `WOO_SEED_PHRASE`
+### Future deterministic ID seed
 
-A per-world entropy seed mixed into ULID minting so independent deployments produce non-colliding object identifiers. Pick something durable:
-
-```sh
-openssl rand -hex 16   # or a memorable phrase, e.g., "my-world-2026-launch"
-```
-
-Set it:
-
-```sh
-npx wrangler secret put WOO_SEED_PHRASE
-```
-
-**Once chosen, do not rotate it.** Rotating re-randomizes the entire seed graph and is operationally equivalent to creating a new world. The runtime warns at boot if it detects the local-dev default `"dev-seed"` running in production.
+The v1 Worker does **not** read a seed phrase or salt object-id allocation. Seeded deterministic ULID allocation is deferred until the runtime has a real allocator for newly-created persistent objects. For now, deployed worlds rely on persisted object IDs plus catalog/core manifest IDs; `WOO_SEED_PHRASE` is not a deploy requirement.
 
 ---
 
@@ -190,10 +179,8 @@ If your fork diverges from upstream's migration history, you cannot cleanly merg
 | Symptom | Cause | Fix |
 |---|---|---|
 | `503 E_BOOTSTRAP_TOKEN_MISSING` | `WOO_INITIAL_WIZARD_TOKEN` not set | `wrangler secret put WOO_INITIAL_WIZARD_TOKEN` |
-| `503 E_SEED_PHRASE_MISSING` | `WOO_SEED_PHRASE` not set | `wrangler secret put WOO_SEED_PHRASE` |
 | `503 E_DO_UNAVAILABLE` | Account on Workers Free | Upgrade to Workers Paid |
 | `401 E_TOKEN_CONSUMED` on first auth | The bootstrap token was already used | Use the `Authorization: Session <id>` from the original response, or call `wiz:rotate_bootstrap_token` if you have wizard via another path |
-| Repeated startup warning `seed_phrase: dev-seed in production` | Production deploy still using the local-dev default | `wrangler secret put WOO_SEED_PHRASE` with a real value (note: rotating later is equivalent to a new world) |
 | Worker deploys but requests time out | DO migration mismatch with prior deploy | Check `wrangler tail` for migration errors; reconcile with the upstream migration history |
 
 ---

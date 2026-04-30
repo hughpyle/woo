@@ -39,7 +39,7 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | `$catalog` | `$thing` | — | v1-ops class for installed catalog records. Instances record source provenance, version, alias, owner, and created objects for introspection and uninstall. See [catalogs.md](../discovery/catalogs.md). |
 | `$catalog_registry` | `$space` | own host | v1-ops singleton space that sequences catalog install/update/uninstall operations. Its log is the catalog operations history. See [catalogs.md §CT5](../discovery/catalogs.md#ct5-install). |
 
-(The "ULID alias" column shows the conventional short form. Real ULIDs are deterministic from a seed phrase per world, so the same seed graph is reproducible.)
+(The "ULID alias" column shows the conventional short form. Seeded deterministic ULID allocation is the target for runtime-created objects, but the current v1 implementation uses the stable IDs declared by seed data and preserves existing IDs on reboot.)
 
 ### B2.1 `$root` properties
 

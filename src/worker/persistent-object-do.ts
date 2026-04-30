@@ -47,11 +47,12 @@ export interface Env {
   DIRECTORY: DurableObjectNamespace;
   ASSETS?: Fetcher;
   WOO_INITIAL_WIZARD_TOKEN?: string;
-  WOO_SEED_PHRASE?: string;
   WOO_AUTO_INSTALL_CATALOGS?: string;
 }
 
 const WORLD_HOST = "world";
+const DIRECTORY_HOST = "directory";
+const INTERNAL_ORIGIN = "https://woo.internal";
 
 export class PersistentObjectDO {
   private state: DurableObjectState;
@@ -67,16 +68,10 @@ export class PersistentObjectDO {
   }
 
   async fetch(request: Request): Promise<Response> {
-    // Operator-bootstrap precondition checks (cloudflare.md §R14.7).
+    // Operator-bootstrap precondition check (cloudflare.md §R14.7).
     if (!this.env.WOO_INITIAL_WIZARD_TOKEN) {
       return jsonResponse(
         { error: { code: "E_BOOTSTRAP_TOKEN_MISSING", message: "set WOO_INITIAL_WIZARD_TOKEN via wrangler secret put" } },
-        503
-      );
-    }
-    if (!this.env.WOO_SEED_PHRASE) {
-      return jsonResponse(
-        { error: { code: "E_SEED_PHRASE_MISSING", message: "set WOO_SEED_PHRASE via wrangler secret put; once chosen, do not rotate" } },
         503
       );
     }
@@ -144,6 +139,16 @@ export class PersistentObjectDO {
         const session = this.requireRestSession(world, request);
         this.requireWizard(world, session.actor);
         return jsonResponse({ catalogs: world.getProp("$catalog_registry", "installed_catalogs") });
+      }
+
+      if (request.method === "GET" && pathname === "/api/object") {
+        const session = this.requireRestSession(world, request);
+        const target = this.resolveRestObject(world, String(url.searchParams.get("id") ?? ""), session);
+        return jsonResponse({
+          description: world.describeForActor(target, session.actor),
+          verbs: world.verbs(target).map((name) => world.verbInfo(target, String(name))),
+          properties: world.properties(target).map((name) => world.propertyInfo(target, String(name)))
+        });
       }
 
       const route = parseObjectRoute(pathname);
@@ -286,7 +291,7 @@ export class PersistentObjectDO {
   private async fetchHostState(host: string, actor: ObjRef): Promise<Record<string, unknown> | null> {
     try {
       const id = this.env.WOO.idFromName(host);
-      const response = await this.env.WOO.get(id).fetch(new Request("https://woo.internal/__internal/state", {
+      const response = await this.env.WOO.get(id).fetch(new Request(`${INTERNAL_ORIGIN}/__internal/state`, {
         headers: { "x-woo-host-key": host, "x-woo-internal-actor": actor }
       }));
       if (!response.ok) return null;
@@ -415,8 +420,8 @@ export class PersistentObjectDO {
 
   private async registerSessionRoute(session: Session): Promise<void> {
     try {
-      const id = this.env.DIRECTORY.idFromName("directory");
-      await this.env.DIRECTORY.get(id).fetch(new Request("https://directory.local/register-session", {
+      const id = this.env.DIRECTORY.idFromName(DIRECTORY_HOST);
+      await this.env.DIRECTORY.get(id).fetch(new Request(`${INTERNAL_ORIGIN}/register-session`, {
         method: "POST",
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify({
@@ -471,6 +476,10 @@ export class PersistentObjectDO {
     if (requested === session.actor) return requested;
     if (world.object(session.actor).flags.wizard) {
       world.object(requested);
+      world.recordWizardAction(session.actor, "impersonate", {
+        actor: requested,
+        via: typeof impersonated === "string" ? "REST X-Woo-Impersonate-Actor" : "REST actor field"
+      });
       return requested;
     }
     throw wooError("E_PERM", "actor does not match session actor", { actor: requested, session_actor: session.actor });
@@ -635,8 +644,8 @@ export class PersistentObjectDO {
     const cached = this.routeCache.get(id);
     if (cached) return cached;
     try {
-      const directoryId = this.env.DIRECTORY.idFromName("directory");
-      const response = await this.env.DIRECTORY.get(directoryId).fetch(new Request("https://directory.local/resolve-object", {
+      const directoryId = this.env.DIRECTORY.idFromName(DIRECTORY_HOST);
+      const response = await this.env.DIRECTORY.get(directoryId).fetch(new Request(`${INTERNAL_ORIGIN}/resolve-object`, {
         method: "POST",
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify({ id, fallback_host: fallbackHost })
@@ -690,7 +699,7 @@ export class PersistentObjectDO {
 
   private async forwardInternal<T>(host: string, path: string, body: Record<string, unknown>): Promise<T> {
     const id = this.env.WOO.idFromName(host);
-    const response = await this.env.WOO.get(id).fetch(new Request(`https://woo.internal${path}`, {
+    const response = await this.env.WOO.get(id).fetch(new Request(`${INTERNAL_ORIGIN}${path}`, {
       method: "POST",
       headers: {
         "content-type": "application/json; charset=utf-8",

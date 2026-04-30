@@ -15,10 +15,10 @@
     "pretypecheck": "npm run catalog:index",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.worker.json",
     "prebuild": "npm run catalog:index",
-    "build": "vite build"
+    "build": "vite build",
+    "deploy": "scripts/deploy.sh"
   },
   "dependencies": {
-    "@vitejs/plugin-basic-ssl": "^2.1.0",
     "vite": "^7.0.0",
     "ws": "^8.18.0"
   },

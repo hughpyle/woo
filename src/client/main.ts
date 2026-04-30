@@ -170,8 +170,7 @@ function writeStorage(key: string, value: string) {
 }
 
 async function refresh() {
-  const headers = state.session ? { authorization: `Session ${state.session}` } : undefined;
-  const response = await fetch("/api/state", { headers });
+  const response = await fetch("/api/state", { headers: authHeaders() });
   if (!response.ok) return;
   state.world = await response.json();
   state.clockOffset = Number(state.world.server_time ?? Date.now()) - Date.now();
@@ -179,6 +178,10 @@ async function refresh() {
   syncTaskSelection();
   audio?.sync(effectiveDubspace(), state.clockOffset);
   render();
+}
+
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return state.session ? { ...extra, authorization: `Session ${state.session}` } : extra;
 }
 
 function call(space: string, target: string, verb: string, args: any[] = []) {
@@ -256,7 +259,7 @@ function clearCueState(target: string) {
 function commitCueControls(target: string) {
   const values = new Map<string, number>();
   document.querySelectorAll<HTMLInputElement>("[data-control]").forEach((input) => {
-    const [obj, name] = input.dataset.control!.split(":");
+    const { target: obj, name } = controlBinding(input);
     if (obj !== target) return;
     const value = Number(input.value);
     if (Number.isFinite(value)) values.set(name, value);
@@ -287,9 +290,25 @@ function receiveLiveEvent(observation: any) {
 function receiveLiveControl(observation: any) {
   const key = liveKey(observation.target, observation.name);
   state.liveControls[key] = { value: observation.value, actor: observation.actor, at: Date.now() };
-  const input = document.querySelector<HTMLInputElement>(`[data-control="${observation.target}:${observation.name}"]`);
+  const input = findControlInput(String(observation.target), String(observation.name));
   if (input && document.activeElement !== input) input.value = String(observation.value);
   audio?.sync(effectiveDubspace(), state.clockOffset);
+}
+
+function findControlInput(target: string, name: string): HTMLInputElement | null {
+  for (const input of document.querySelectorAll<HTMLInputElement>("[data-control]")) {
+    const binding = controlBinding(input);
+    if (binding.target === target && binding.name === name) return input;
+  }
+  return null;
+}
+
+function controlBinding(input: HTMLInputElement): { target: string; name: string } {
+  const target = input.dataset.target ?? "";
+  const name = input.dataset.name ?? "";
+  if (target && name) return { target, name };
+  const [legacyTarget = "", legacyName = ""] = (input.dataset.control ?? "").split(":");
+  return { target: legacyTarget, name: legacyName };
 }
 
 function forgetLiveControls(observations: any[]) {
@@ -423,7 +442,7 @@ function renderFilterStrip(filter: any) {
         <strong>F</strong>
         <span>Filter</span>
       </div>
-      <input class="vertical-fader" aria-label="Filter cutoff" data-control="filter_1:cutoff" type="range" min="80" max="5000" step="1" value="${escapeHtml(String(cutoff))}">
+      <input class="vertical-fader" aria-label="Filter cutoff" data-control data-target="filter_1" data-name="cutoff" type="range" min="80" max="5000" step="1" value="${escapeHtml(String(cutoff))}">
       <span class="fader-readout">${escapeHtml(String(Math.round(Number(cutoff))))} Hz</span>
     </div>
   `;
@@ -442,10 +461,10 @@ function renderLoopStrip(id: string, index: number, dub: any) {
         <span>${escapeHtml(String(dub[id]?.name ?? id))}</span>
       </div>
       <button data-loop="${escapeHtml(id)}" data-playing="${buttonPlaying ? "true" : "false"}">${buttonPlaying ? "Stop" : "Start"}</button>
-      <input class="vertical-fader" aria-label="Loop ${index} gain" data-control="${escapeHtml(`${id}:gain`)}" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(slot.gain ?? 0.75))}">
+      <input class="vertical-fader" aria-label="Loop ${index} gain" data-control data-target="${escapeHtml(id)}" data-name="gain" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(slot.gain ?? 0.75))}">
       <label class="freq-field">
         <span>Freq</span>
-        <input aria-label="Loop ${index} frequency" data-control="${escapeHtml(`${id}:freq`)}" type="number" min="40" max="1200" step="0.01" value="${escapeHtml(String(freq))}">
+        <input aria-label="Loop ${index} frequency" data-control data-target="${escapeHtml(id)}" data-name="freq" type="number" min="40" max="1200" step="0.01" value="${escapeHtml(String(freq))}">
       </label>
       <button class="cue-button ${cue ? "active" : ""}" data-cue-slot="${escapeHtml(id)}" aria-pressed="${cue}">CUE</button>
     </div>
@@ -453,7 +472,7 @@ function renderLoopStrip(id: string, index: number, dub: any) {
 }
 
 function slider(obj: string, prop: string, value: number) {
-  return `<label>${escapeHtml(prop)} <input data-control="${escapeHtml(`${obj}:${prop}`)}" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(value))}"></label>`;
+  return `<label>${escapeHtml(prop)} <input data-control data-target="${escapeHtml(obj)}" data-name="${escapeHtml(prop)}" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(value))}"></label>`;
 }
 
 function bindDubspace() {
@@ -501,7 +520,7 @@ function bindDubspace() {
   });
   document.querySelectorAll<HTMLInputElement>("[data-control]").forEach((input) => {
     input.addEventListener("input", () => {
-      const [target, name] = input.dataset.control!.split(":");
+      const { target, name } = controlBinding(input);
       if (state.cueSlots[target]) {
         setCueControl(target, name, Number(input.value));
         return;
@@ -509,7 +528,7 @@ function bindDubspace() {
       sendPreviewControl(target, name, Number(input.value));
     });
     input.addEventListener("change", () => {
-      const [target, name] = input.dataset.control!.split(":");
+      const { target, name } = controlBinding(input);
       if (state.cueSlots[target]) {
         setCueControl(target, name, Number(input.value));
         return;
@@ -1072,7 +1091,7 @@ function bindIde() {
     const source = document.querySelector<HTMLTextAreaElement>("[data-source]")!.value;
     const name = document.querySelector<HTMLInputElement>("[data-verb-name]")!.value.trim();
     const object = state.selectedObject;
-    const info = await fetch(`/api/object?id=${encodeURIComponent(object)}`).then((response) => response.json());
+    const info = await fetch(`/api/object?id=${encodeURIComponent(object)}`, { headers: authHeaders() }).then((response) => response.json());
     const current = info.verbs?.find((verb: any) => verb.name === name);
     const response = await fetch("/api/install", {
       method: "POST",
