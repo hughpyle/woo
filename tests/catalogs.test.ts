@@ -214,10 +214,22 @@ describe("local catalogs", () => {
       expect(squawk.observations[0]).toMatchObject({ type: "cockatoo_squawk", source: "the_cockatoo", actor: session.actor });
     }
 
-    world.directCall("teach", session.actor, "the_cockatoo", "teach", ["world of objects"]);
+    // Persistent mutations (teach/gag/ungag) are sequenced through the chatroom
+    // so they appear in the room's log and replicate as sequenced state.
+    const taught = world.call("teach", session.id, "the_chatroom", { actor: session.actor, target: "the_cockatoo", verb: "teach", args: ["world of objects"] });
+    expect(taught.op).toBe("applied");
     expect((world.getProp("the_cockatoo", "phrases") as string[]).at(-1)).toBe("world of objects");
 
-    world.directCall("gag", session.actor, "the_cockatoo", "gag", []);
+    // Non-string phrases must be rejected at the verb boundary (would otherwise
+    // violate the cockatoo_squawk schema, which declares text: str).
+    const badTeach = world.call("teach-bad", session.id, "the_chatroom", { actor: session.actor, target: "the_cockatoo", verb: "teach", args: [{ not: "a string" } as unknown as string] });
+    expect(badTeach.op).toBe("applied");
+    if (badTeach.op === "applied") {
+      const errObs = badTeach.observations.find((obs) => obs.type === "$error");
+      expect(errObs?.code).toBe("E_TYPE");
+    }
+
+    world.call("gag", session.id, "the_chatroom", { actor: session.actor, target: "the_cockatoo", verb: "gag", args: [] });
     const muffled = world.directCall("squawk-gagged", session.actor, "the_cockatoo", "squawk", []);
     if (muffled.op === "result") {
       expect(muffled.result).toBe("*muffled noises*");

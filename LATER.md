@@ -38,6 +38,7 @@ The sections below distinguish three flavors of pending item:
 - ~~minimal authoring on-ramp~~ — first draft in `spec/authoring/minimal-ide.md`
 - broader authoring system: schema editor, history/replay viewer, version/rollback UI, package import/export
 - woo-flavoured rewrite of [yduj's duck tutorial](https://www.hayseed.net/MOO/yduj-duck-tutorial.text) — the canonical "build your first verb on a duck" walkthrough, ported to woo's DSL, dispatch model, and authoring surface. Aimed at first-time programmers (the original audience), not engineers porting from MOO.
+- chat UI: surface room *contents* (objects with `location == this`) and per-object verb discovery so a browser user can find e.g. `the_cockatoo:squawk()` without prior knowledge. Currently only `present_actors` is rendered; the cockatoo is in the room but invisible.
 
 ## deferred specs (placeholder docs to write)
 

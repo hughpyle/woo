@@ -112,6 +112,10 @@ What's intentionally not (yet) here: **self-driven timer chatter**. The canonica
 
 **When the timer lands, gate it on presence.** A cockatoo that schedules a wakeup every N seconds against an empty room would keep the chatroom DO out of CF hibernation indefinitely — DO billing is by active wall time, so a continuously-self-squawking bird in an unattended room is a money-burning bird. Cheap mitigation, also true to the LambdaMOO `@activate` pattern: start the fork loop on `:enter` when subscribers transition from 0 → 1, cancel the next scheduled fork on `:leave` when subscribers go back to 0. That keeps DO wake-ups proportional to *actor presence* rather than wall clock; an empty chatroom hibernates as it would without the cockatoo.
 
+**Determinism if the wake path is sequenced.** If the scheduled wake fires through `the_chatroom`'s sequenced log so other clients see the same squawk on replay, calling `random()` *inside* the resumed handler breaks replay determinism (per [space.md](../../spec/semantics/space.md)). Capture randomness at *schedule time* — the scheduler picks the next phrase and the next interval and passes both as args/body to the scheduled message — rather than re-rolling on the wake. That mirrors the LambdaMOO `fork` pattern, where the next-scheduled call is itself the value chosen at this tick.
+
+**UI discovery still missing.** The cockatoo is in the room and reachable by objref, but the chat UI doesn't currently surface room contents or available verbs — a browser user won't naturally find `the_cockatoo:squawk()`. Tracked at [LATER.md](../../LATER.md): chat client should render `$conversational:look()`'s `present_actors` plus a separate "things in this room" panel sourced from `room.contents`, with verb-discovery via `:describe()` on selected objects.
+
 ## Renderer
 
 A transient browser host that:
