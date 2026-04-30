@@ -21,7 +21,9 @@ the design work rather than precede it.
 Early implementation. Run locally with SQLite persistence, or deploy the current
 Cloudflare Workers + Durable Objects slice. The Cloudflare target now has a
 gateway DO, a Directory DO, and routed demo-space hosts for dubspace/taskspace;
-full host-scoped runtime decomposition is still in progress.
+cluster hosts load host-scoped world slices instead of bootstrapping full shadow
+worlds. Cross-host verb-body RPC and internal-forwarding hardening are still in
+progress.
 
 ## Specification
 

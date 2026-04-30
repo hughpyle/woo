@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { createWorld } from "../src/core/bootstrap";
+import { createWorld, createWorldFromSerialized, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import type { SerializedWorld } from "../src/core/repository";
 import type { Message, TinyBytecode, VerbDef } from "../src/core/types";
 import { dumpSerializedObjectsToJsonFolder, JsonFolderWorldRepository } from "../src/server/json-folder-repository";
@@ -92,6 +92,57 @@ function installReadFixture(world: ReturnType<typeof createWorld>): void {
 }
 
 describe("sqlite persistence", () => {
+  it("reloads host-scoped cluster state from per-object writes after initial seed save", () => {
+    const { dir, path } = tempDb();
+    try {
+      const gateway = createWorld();
+      const session = gateway.auth("guest:cluster-restart");
+      const gatewaySeed = gateway.exportWorld();
+
+      const firstRepo = new CountingLocalSQLiteRepository(path);
+      const firstSeed = scopeSerializedWorldToHost(firstRepo.load() ?? gatewaySeed, "the_taskspace");
+      const firstCluster = createWorldFromSerialized(firstSeed, { repository: firstRepo });
+      expect(firstRepo.saves).toBeGreaterThan(0);
+      firstRepo.saves = 0;
+
+      firstCluster.ensureSessionForActor(session.id, session.actor, session.tokenClass, session.expiresAt);
+      const created = firstCluster.call(
+        "cluster-create",
+        session.id,
+        "the_taskspace",
+        message(session.actor, "the_taskspace", "create_task", ["Cluster persisted", "written after host seed"])
+      );
+      expect(created.op).toBe("applied");
+      expect(firstRepo.saves).toBe(0);
+      if (created.op !== "applied") return;
+      const task = String(created.observations.find((obs) => obs.type === "task_created")?.task ?? "");
+      expect(task).toMatch(/^obj_the_taskspace_/);
+      firstRepo.close();
+
+      const secondRepo = new CountingLocalSQLiteRepository(path);
+      const stored = secondRepo.load();
+      expect(stored).not.toBeNull();
+      const secondSeed = scopeSerializedWorldToHost(stored ?? gatewaySeed, "the_taskspace");
+      const secondCluster = createWorldFromSerialized(secondSeed, { repository: secondRepo });
+      expect(secondRepo.saves).toBeGreaterThan(0);
+      secondRepo.saves = 0;
+
+      expect(secondCluster.object(task).parent).toBe("$task");
+      expect(secondCluster.getProp(task, "title")).toBe("Cluster persisted");
+      expect(secondCluster.getProp("the_taskspace", "root_tasks")).toContain(task);
+      expect(secondCluster.replay("the_taskspace", 1, 10).map((entry) => entry.message.verb)).toEqual(["create_task"]);
+
+      secondCluster.ensureSessionForActor(session.id, session.actor, session.tokenClass, session.expiresAt);
+      const status = secondCluster.call("cluster-status", session.id, "the_taskspace", message(session.actor, task, "set_status", ["done"]));
+      expect(status.op).toBe("applied");
+      expect(secondCluster.getProp(task, "status")).toBe("done");
+      expect(secondRepo.saves).toBe(0);
+      secondRepo.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("uses object-repository writes after bootstrap instead of whole-world saves", () => {
     const { dir, path } = tempDb();
     try {

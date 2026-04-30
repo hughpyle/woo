@@ -56,6 +56,7 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | `name` | str | `""` | Human-readable. Not unique. |
 | `description` | str | `""` | Long-form description. Surfaced by `:look`-like verbs. |
 | `aliases` | list<str> | `[]` | Alternate names for command/match. |
+| `host_placement` | str \| null | null | Optional host-placement hint. `self` means this object owns its own host; anchored objects route to their anchor's host. Runtime semantics do not depend on this hint in single-host deployments. |
 
 ### B2.2 `$root` verbs
 
@@ -121,6 +122,7 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | `subscribers` | list<obj> | `[]` | Actors observing this space's applied frames. |
 | `features` | list<obj> | `[]` | Feature objects contributing verbs to this space. See [features.md](features.md). |
 | `features_version` | int | 0 | Monotonic counter; verb-lookup cache invalidation. |
+| `auto_presence` | bool | false | If true, new sessions automatically enter this space. This is a generic placement/presence policy used by bundled app spaces that should be immediately usable without an explicit `:enter`. |
 
 ### B2.8 `$space` verbs
 

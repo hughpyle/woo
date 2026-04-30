@@ -35,7 +35,6 @@ function parseArgs(argv: string[]): { db?: string; out?: string; object?: string
 
 function usage(code: number, message?: string): never {
   if (message) console.error(message);
-  console.error("usage: npm run dump:json -- [--db .woo/dev.sqlite] [--out .woo/json-dump] [--object delay_1] [--objects delay_1,drum_1]");
+  console.error("usage: npm run dump:json -- [--db .woo/dev.sqlite] [--out .woo/json-dump] [--object obj_1] [--objects obj_1,obj_2]");
   process.exit(code);
 }
-

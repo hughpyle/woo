@@ -160,18 +160,22 @@ async function broadcastRoutedCall(env: Env, response: Response, host: string): 
   }
 }
 
-async function registerObjectsFromApplied(env: Env, frame: Record<string, unknown>, host: string): Promise<void> {
-  const observations = Array.isArray(frame.observations) ? frame.observations : [];
-  const routes: Array<{ id: string; host: string; anchor: string | null }> = [];
-  for (const observation of observations) {
-    if (!observation || typeof observation !== "object" || Array.isArray(observation)) continue;
-    const record = observation as Record<string, unknown>;
-    if (record.type === "task_created" && typeof record.task === "string") {
-      routes.push({ id: record.task, host, anchor: host });
-    }
-  }
-  if (routes.length === 0) return;
-  await directoryPost(env, "/register-objects", { routes });
+async function registerObjectsFromApplied(env: Env, _frame: Record<string, unknown>, host: string): Promise<void> {
+  const id = env.WOO.idFromName(host);
+  const response = await env.WOO.get(id).fetch(new Request(`${INTERNAL_ORIGIN}/__internal/object-routes`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "x-woo-host-key": host
+    },
+    body: "{}"
+  }));
+  if (!response.ok) return;
+  const parsed = await response.json();
+  const routes = Array.isArray(parsed)
+    ? parsed.filter((route) => route && typeof route === "object" && !Array.isArray(route) && (route as Record<string, unknown>).host === host)
+    : [];
+  if (routes.length > 0) await directoryPost(env, "/register-objects", { routes });
 }
 
 async function resolveRequestSession(env: Env, request: Request): Promise<{ session_id: string; actor: string; expires_at: number; token_class: string } | null> {

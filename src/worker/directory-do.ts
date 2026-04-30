@@ -17,54 +17,6 @@ type SessionRoute = {
 
 const WORLD_HOST = "world";
 
-const SEEDED_OBJECT_ROUTES: Array<{ id: ObjRef; host: string; anchor: ObjRef | null }> = [
-  { id: "$system", host: WORLD_HOST, anchor: null },
-  { id: "$root", host: WORLD_HOST, anchor: null },
-  { id: "$actor", host: WORLD_HOST, anchor: null },
-  { id: "$player", host: WORLD_HOST, anchor: null },
-  { id: "$wiz", host: WORLD_HOST, anchor: null },
-  { id: "$guest", host: WORLD_HOST, anchor: null },
-  { id: "$sequenced_log", host: WORLD_HOST, anchor: null },
-  { id: "$space", host: WORLD_HOST, anchor: null },
-  { id: "$thing", host: WORLD_HOST, anchor: null },
-  { id: "$catalog", host: WORLD_HOST, anchor: null },
-  { id: "$catalog_registry", host: WORLD_HOST, anchor: null },
-  { id: "$nowhere", host: WORLD_HOST, anchor: null },
-
-  { id: "$conversational", host: WORLD_HOST, anchor: null },
-  { id: "$chatroom", host: WORLD_HOST, anchor: null },
-  { id: "$match", host: WORLD_HOST, anchor: null },
-  { id: "$failed_match", host: WORLD_HOST, anchor: null },
-  { id: "$ambiguous_match", host: WORLD_HOST, anchor: null },
-
-  { id: "$dubspace", host: WORLD_HOST, anchor: null },
-  { id: "$loop_slot", host: WORLD_HOST, anchor: null },
-  { id: "$channel", host: WORLD_HOST, anchor: null },
-  { id: "$filter", host: WORLD_HOST, anchor: null },
-  { id: "$delay", host: WORLD_HOST, anchor: null },
-  { id: "$drum_loop", host: WORLD_HOST, anchor: null },
-  { id: "$scene", host: WORLD_HOST, anchor: null },
-
-  { id: "$taskspace", host: WORLD_HOST, anchor: null },
-  { id: "$task", host: WORLD_HOST, anchor: null },
-
-  { id: "the_dubspace", host: "the_dubspace", anchor: null },
-  { id: "slot_1", host: "the_dubspace", anchor: "the_dubspace" },
-  { id: "slot_2", host: "the_dubspace", anchor: "the_dubspace" },
-  { id: "slot_3", host: "the_dubspace", anchor: "the_dubspace" },
-  { id: "slot_4", host: "the_dubspace", anchor: "the_dubspace" },
-  { id: "channel_1", host: "the_dubspace", anchor: "the_dubspace" },
-  { id: "filter_1", host: "the_dubspace", anchor: "the_dubspace" },
-  { id: "delay_1", host: "the_dubspace", anchor: "the_dubspace" },
-  { id: "drum_1", host: "the_dubspace", anchor: "the_dubspace" },
-  { id: "default_scene", host: "the_dubspace", anchor: "the_dubspace" },
-
-  { id: "the_taskspace", host: "the_taskspace", anchor: null },
-  // Chat remains on the gateway host until player-DO fan-out lands; otherwise
-  // direct chat events would need a cross-host presence index to broadcast safely.
-  { id: "the_chatroom", host: WORLD_HOST, anchor: null }
-];
-
 export class DirectoryDO {
   private state: DurableObjectState;
 
@@ -151,17 +103,6 @@ export class DirectoryDO {
     ]) {
       this.state.storage.sql.exec(stmt);
     }
-
-    const bootstrapped = firstValue(this.state.storage.sql.exec("SELECT value FROM directory_meta WHERE key = ?", "seeded_routes"));
-    if (bootstrapped === "true") return;
-    this.state.storage.transactionSync(() => {
-      for (const route of SEEDED_OBJECT_ROUTES) this.registerObject(route.id, route.host, route.anchor);
-      this.state.storage.sql.exec(
-        "INSERT OR REPLACE INTO directory_meta(key, value) VALUES (?, ?)",
-        "seeded_routes",
-        "true"
-      );
-    });
   }
 
   private registerObject(id: ObjRef, host: string, anchor: ObjRef | null): void {

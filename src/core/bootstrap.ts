@@ -1,6 +1,6 @@
 import { setPropBytecode, setValueBytecode } from "./fixtures";
 import { installLocalCatalogs } from "./local-catalogs";
-import type { ObjectRepository, WorldRepository } from "./repository";
+import type { ObjectRepository, SerializedWorld, WorldRepository } from "./repository";
 import { hashSource } from "./source-hash";
 import type { ObjRef, TinyBytecode, WooValue } from "./types";
 import { WooWorld } from "./world";
@@ -22,6 +22,23 @@ export function createWorld(options: { repository?: WorldRepository & Partial<Ob
   }
   world.enableIncrementalPersistence();
   return world;
+}
+
+export function createWorldFromSerialized(
+  serialized: SerializedWorld,
+  options: { repository?: WorldRepository & Partial<ObjectRepository>; persist?: boolean } = {}
+): WooWorld {
+  const world = new WooWorld(options.repository);
+  world.importWorld(serialized);
+  if (options.persist !== false) world.persist();
+  world.enableIncrementalPersistence();
+  return world;
+}
+
+export function scopeSerializedWorldToHost(serialized: SerializedWorld, host: ObjRef): SerializedWorld {
+  const world = new WooWorld();
+  world.importWorld(serialized);
+  return world.exportHostScopedWorld(host);
 }
 
 export function bootstrap(world: WooWorld, options: BootstrapOptions = {}): WooWorld {
@@ -52,6 +69,7 @@ function seedUniversal(world: WooWorld): void {
     define(world, id, "description", "", "str");
     define(world, id, "aliases", [], "list<str>");
   }
+  define(world, "$root", "host_placement", null, "str|null");
   describeSeed(world, "$system", "Bootstrap object and world registry root. It has no parent, owns the reserved #0 identity, carries wizard authority, and is where corenames and world-level metadata are anchored.");
   describeSeed(world, "$root", "Universal base class for ordinary persistent objects. It defines common descriptive slots and inherited utility verbs, so most object parent chains terminate here before reaching $system.");
   describeSeed(world, "$actor", "Base class for principals that can originate messages. Actors participate in spaces through presence, appear as message.actor, and are the objects whose authority user-facing calls represent.");
@@ -77,6 +95,7 @@ function seedUniversal(world: WooWorld): void {
   define(world, "$space", "last_snapshot_seq", 0, "int");
   define(world, "$space", "features", [], "list<obj>");
   define(world, "$space", "features_version", 0, "int");
+  define(world, "$space", "auto_presence", false, "bool");
   define(world, "$catalog", "catalog_name", "", "str");
   define(world, "$catalog", "alias", "", "str");
   define(world, "$catalog", "version", "", "str");

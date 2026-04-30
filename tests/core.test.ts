@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { compileVerb, definePropertyVersioned, installVerb } from "../src/core/authoring";
-import { bootstrap, createWorld } from "../src/core/bootstrap";
+import { bootstrap, createWorld, createWorldFromSerialized, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
 import type { Message, VerbDef } from "../src/core/types";
 
@@ -113,6 +113,46 @@ describe("woo core", () => {
     expect(world.verbInfo("the_taskspace", "say").definer).toBe("$conversational");
   });
 
+  it("exports host-scoped worlds for routed cluster hosts", () => {
+    const world = createWorld();
+    const session = world.auth("guest:host-scope");
+    const scoped = world.exportHostScopedWorld("the_taskspace");
+    const ids = scoped.objects.map((obj) => obj.id);
+
+    expect(ids).toContain("the_taskspace");
+    expect(ids).toContain("$taskspace");
+    expect(ids).toContain("$task");
+    expect(ids).toContain("$conversational");
+    expect(ids).toContain(session.actor);
+    expect(ids).not.toContain("the_dubspace");
+    expect(ids).not.toContain("the_chatroom");
+    expect(scoped.sessions).toEqual([]);
+    expect(scoped.logs.every(([space]) => space === "the_taskspace")).toBe(true);
+
+    const cluster = createWorldFromSerialized(scoped, { persist: false });
+    cluster.ensureSessionForActor(session.id, session.actor, session.tokenClass, session.expiresAt);
+    const created = cluster.call("host-scope-create", session.id, "the_taskspace", message(session.actor, "the_taskspace", "create_task", ["Scoped", ""]));
+    expect(created.op).toBe("applied");
+    if (created.op !== "applied") return;
+    const task = String(created.observations.find((obs) => obs.type === "task_created")?.task ?? "");
+    expect(task).toMatch(/^obj_the_taskspace_/);
+    expect(cluster.object(task).parent).toBe("$task");
+    expect(cluster.objectRoutes()).toContainEqual({ id: task, host: "the_taskspace", anchor: "the_taskspace" });
+  });
+
+  it("can prune a full serialized world to one host slice", () => {
+    const full = createWorld().exportWorld();
+    const scoped = scopeSerializedWorldToHost(full, "the_dubspace");
+    const ids = scoped.objects.map((obj) => obj.id);
+
+    expect(ids).toContain("the_dubspace");
+    expect(ids).toContain("$dubspace");
+    expect(ids).toContain("$loop_slot");
+    expect(ids).toContain("slot_1");
+    expect(ids).not.toContain("the_taskspace");
+    expect(ids).not.toContain("the_chatroom");
+  });
+
   it("sequences calls and emits observations", () => {
     const { world, session, actor } = authedWorld();
     const first = world.call("1", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.77]));
@@ -176,6 +216,31 @@ describe("woo core", () => {
     world.attachSocket(resumed.id, "ws-2");
     expect(resumed.actor).toBe(session.actor);
     expect(world.sessions.get(session.id)?.lastDetachAt).toBeNull();
+  });
+
+  it("does not expire a session while a socket is attached", () => {
+    const world = createWorld();
+    const session = world.auth("guest:attached");
+    world.attachSocket(session.id, "ws-1");
+    session.expiresAt = Date.now() - 1;
+
+    expect(world.sessionAlive(session.id)).toBe(true);
+    expect(world.reapExpiredSessions()).toEqual([]);
+    expect(world.sessions.has(session.id)).toBe(true);
+  });
+
+  it("keeps a long-attached session resumable for the detach grace window", () => {
+    const world = createWorld();
+    const session = world.auth("guest:long-attached");
+    world.attachSocket(session.id, "ws-1");
+    session.expiresAt = Date.now() - 1;
+
+    world.detachSocket(session.id, "ws-1");
+
+    const detached = world.sessions.get(session.id);
+    expect(detached?.lastDetachAt).toEqual(expect.any(Number));
+    expect(detached?.expiresAt).toBeGreaterThan(detached?.lastDetachAt ?? 0);
+    expect(world.auth(`session:${session.id}`).actor).toBe(session.actor);
   });
 
   it("reaps detached guest sessions and returns guests to the pool", () => {

@@ -322,6 +322,23 @@ describe("local catalogs", () => {
     expect(subtask.op).toBe("applied");
   });
 
+  it("exposes generic catalog-derived state and object routes", () => {
+    const world = createWorld();
+    const session = world.auth("guest:catalog-state");
+    const state = world.state(session.actor);
+    expect(state.catalogs.installed.map((record: any) => record.catalog)).toEqual(expect.arrayContaining(["chat", "dubspace", "taskspace"]));
+    expect(state.spaces).toHaveProperty("the_dubspace");
+    expect(state.spaces).toHaveProperty("the_taskspace");
+    expect(state.spaces).toHaveProperty("the_chatroom");
+    expect((state.objects.the_dubspace as any).props.auto_presence).toBe(true);
+    expect((state.objects.slot_1 as any).props.gain).toBe(0.75);
+    expect(state.object_routes).toEqual(expect.arrayContaining([
+      { id: "the_dubspace", host: "the_dubspace", anchor: null },
+      { id: "slot_1", host: "the_dubspace", anchor: "the_dubspace" },
+      { id: "the_taskspace", host: "the_taskspace", anchor: null }
+    ]));
+  });
+
   it("declares source for every catalog verb", () => {
     for (const name of readdirSync(root).filter((entry) => existsSync(join(root, entry, "manifest.json")))) {
       const manifest = readManifest(name);

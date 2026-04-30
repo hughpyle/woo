@@ -44,14 +44,13 @@ const state: AppState = {
   chatPresent: [],
   chatDraft: "",
   observations: [],
-  selectedObject: "delay_1",
+  selectedObject: "",
   taskExpanded: {},
   taskStatusFilter: { open: true, claimed: true, in_progress: true, blocked: true, done: false }
 };
 
 let audio: DubAudio | undefined;
 const sessionKey = "woo.session";
-const spaces = ["the_dubspace", "the_taskspace"] as const;
 const drumVoices = [
   { id: "kick", label: "Kick" },
   { id: "snare", label: "Snare" },
@@ -61,23 +60,40 @@ const drumVoices = [
 const taskStatuses = ["open", "claimed", "in_progress", "blocked", "done"] as const;
 const directThrottle = new Map<string, number>();
 const pendingDirect = new Map<string, (result: any) => void>();
+const reconnectBaseDelayMs = 500;
+const reconnectMaxDelayMs = 5000;
+const heartbeatIntervalMs = 25_000;
+let reconnectDelayMs = reconnectBaseDelayMs;
+let reconnectTimer: number | undefined;
+let heartbeatTimer: number | undefined;
+let lastPongAt = 0;
 
 connect();
 window.setInterval(pruneLiveControls, 700);
 
 function connect() {
+  if (state.socket?.readyState === WebSocket.OPEN || state.socket?.readyState === WebSocket.CONNECTING) return;
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${protocol}//${location.host}/ws`);
   state.socket = socket;
-  socket.addEventListener("open", () => socket.send(JSON.stringify({ op: "auth", token: authToken() })));
+  socket.addEventListener("open", () => {
+    reconnectDelayMs = reconnectBaseDelayMs;
+    lastPongAt = Date.now();
+    sendSocket(socket, { op: "auth", token: authToken() });
+    startHeartbeat(socket);
+  });
   socket.addEventListener("message", async (event) => {
     const frame = JSON.parse(event.data);
+    if (frame.op === "pong") {
+      lastPongAt = Date.now();
+      return;
+    }
     if (frame.op === "session") {
       state.actor = frame.actor;
       state.session = frame.session;
       storeSession(frame.session);
-      requestReplay(socket);
       await refresh();
+      requestReplay(socket);
     }
     if (frame.op === "applied") {
       forgetLiveControls(frame.observations ?? []);
@@ -114,13 +130,70 @@ function connect() {
       if (typeof frame.id === "string") pendingDirect.delete(frame.id);
       if (frame.error?.code === "E_NOSESSION") {
         clearSession();
-        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ op: "auth", token: "guest:local" }));
+        if (socket.readyState === WebSocket.OPEN) sendSocket(socket, { op: "auth", token: "guest:local" });
         return;
       }
       state.observations.unshift({ error: frame.error });
       render();
     }
   });
+  socket.addEventListener("close", () => {
+    if (state.socket !== socket) return;
+    stopHeartbeat();
+    pendingDirect.clear();
+    scheduleReconnect();
+  });
+  socket.addEventListener("error", () => {
+    if (state.socket === socket && socket.readyState !== WebSocket.CLOSED) socket.close();
+  });
+}
+
+function sendSocket(socket: WebSocket, frame: Record<string, unknown>) {
+  if (socket.readyState !== WebSocket.OPEN) return false;
+  socket.send(JSON.stringify(frame));
+  return true;
+}
+
+function sendFrame(frame: Record<string, unknown>) {
+  const socket = state.socket;
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    scheduleReconnect();
+    return false;
+  }
+  return sendSocket(socket, frame);
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer !== undefined) return;
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = undefined;
+    connect();
+  }, reconnectDelayMs);
+  reconnectDelayMs = Math.min(reconnectDelayMs * 2, reconnectMaxDelayMs);
+}
+
+function startHeartbeat(socket: WebSocket) {
+  stopHeartbeat();
+  heartbeatTimer = window.setInterval(() => {
+    if (state.socket !== socket) {
+      stopHeartbeat();
+      return;
+    }
+    if (Date.now() - lastPongAt > heartbeatIntervalMs * 3) {
+      socket.close();
+      return;
+    }
+    if (!sendSocket(socket, { op: "ping" })) {
+      stopHeartbeat();
+      scheduleReconnect();
+    }
+  }, heartbeatIntervalMs);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer === undefined) return;
+  window.clearInterval(heartbeatTimer);
+  heartbeatTimer = undefined;
 }
 
 function authToken() {
@@ -141,9 +214,9 @@ function clearSession() {
 }
 
 function requestReplay(socket: WebSocket) {
-  for (const space of spaces) {
+  for (const space of Object.keys(state.world?.spaces ?? {})) {
     const from = Number(readStorage(`woo.lastSeq.${space}`) ?? "0") + 1;
-    if (from > 1) socket.send(JSON.stringify({ op: "replay", id: crypto.randomUUID(), space, from, limit: 100 }));
+    if (from > 1) sendSocket(socket, { op: "replay", id: crypto.randomUUID(), space, from, limit: 100 });
   }
 }
 
@@ -172,7 +245,8 @@ function writeStorage(key: string, value: string) {
 async function refresh() {
   const response = await fetch("/api/state", { headers: authHeaders() });
   if (!response.ok) return;
-  state.world = await response.json();
+  state.world = adaptWorld(await response.json());
+  if (!state.selectedObject || !state.world.objects?.[state.selectedObject]) state.selectedObject = defaultSelectedObject();
   state.clockOffset = Number(state.world.server_time ?? Date.now()) - Date.now();
   state.chatPresent = Array.isArray(state.world?.chat?.present) ? state.world.chat.present : state.chatPresent;
   syncTaskSelection();
@@ -184,15 +258,127 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
   return state.session ? { ...extra, authorization: `Session ${state.session}` } : extra;
 }
 
+function adaptWorld(raw: any) {
+  const world = raw && typeof raw === "object" ? { ...raw } : {};
+  world.objects = raw?.objects ?? {};
+  world.catalogs = raw?.catalogs ?? { installed: [] };
+  world.dubspaceMeta = buildDubspaceMeta(world);
+  world.dubspace = projectDubspace(world, world.dubspaceMeta);
+  world.taskspaceMeta = buildTaskspaceMeta(world);
+  world.taskspace = projectTaskspace(world, world.taskspaceMeta);
+  world.chatMeta = buildChatMeta(world);
+  world.chat = projectChat(world, world.chatMeta);
+  return world;
+}
+
+function installedCatalog(world: any, name: string): any | undefined {
+  const installed = Array.isArray(world?.catalogs?.installed) ? world.catalogs.installed : [];
+  return installed.find((record: any) => record?.alias === name || record?.catalog === name);
+}
+
+function catalogClass(catalog: any, localName: string): string | undefined {
+  const value = catalog?.objects?.[localName];
+  return typeof value === "string" ? value : undefined;
+}
+
+function objectsByParent(world: any, parent: string | undefined, anchor?: string | null): string[] {
+  if (!parent) return [];
+  return Object.entries(world.objects ?? {})
+    .filter(([, obj]: [string, any]) => obj?.parent === parent && (anchor === undefined || obj?.anchor === anchor || obj?.location === anchor))
+    .map(([id]) => id)
+    .sort((a, b) => objectName(world, a).localeCompare(objectName(world, b)) || a.localeCompare(b));
+}
+
+function firstObjectByParent(world: any, parent: string | undefined): string | undefined {
+  return objectsByParent(world, parent)[0];
+}
+
+function objectView(world: any, id: string | undefined) {
+  if (!id) return null;
+  const obj = world.objects?.[id];
+  if (!obj) return null;
+  return { id, name: obj.name ?? id, props: obj.props ?? {} };
+}
+
+function objectName(world: any, id: string) {
+  return String(world.objects?.[id]?.name ?? id);
+}
+
+function buildDubspaceMeta(world: any) {
+  const catalog = installedCatalog(world, "dubspace");
+  const space = firstObjectByParent(world, catalogClass(catalog, "$dubspace"));
+  const byClass = (localName: string) => objectsByParent(world, catalogClass(catalog, localName), space);
+  return {
+    space,
+    slots: byClass("$loop_slot"),
+    channel: byClass("$channel")[0],
+    filter: byClass("$filter")[0],
+    delay: byClass("$delay")[0],
+    drum: byClass("$drum_loop")[0],
+    scene: byClass("$scene")[0]
+  };
+}
+
+function projectDubspace(world: any, meta: any) {
+  const ids = [meta.space, ...(meta.slots ?? []), meta.channel, meta.filter, meta.delay, meta.drum, meta.scene].filter(Boolean);
+  return Object.fromEntries(ids.map((id: string) => [id, objectView(world, id)]).filter(([, view]) => view));
+}
+
+function buildTaskspaceMeta(world: any) {
+  const catalog = installedCatalog(world, "taskspace");
+  return {
+    space: firstObjectByParent(world, catalogClass(catalog, "$taskspace")),
+    taskClass: catalogClass(catalog, "$task")
+  };
+}
+
+function projectTaskspace(world: any, meta: any) {
+  const space = objectView(world, meta.space);
+  const taskIds = objectsByParent(world, meta.taskClass);
+  return {
+    root_tasks: Array.isArray(space?.props?.root_tasks) ? space.props.root_tasks : [],
+    tasks: Object.fromEntries(taskIds.map((id) => [id, objectView(world, id)]).filter(([, view]) => view))
+  };
+}
+
+function buildChatMeta(world: any) {
+  const catalog = installedCatalog(world, "chat");
+  return { room: firstObjectByParent(world, catalogClass(catalog, "$chatroom")) };
+}
+
+function projectChat(world: any, meta: any) {
+  const room = objectView(world, meta.room);
+  return {
+    room: room ? { id: room.id, name: room.name, description: room.props.description ?? "" } : null,
+    present: Array.isArray(room?.props?.subscribers) ? room.props.subscribers : []
+  };
+}
+
+function defaultSelectedObject() {
+  return state.world?.dubspaceMeta?.delay ?? Object.keys(state.world?.objects ?? {}).sort()[0] ?? "";
+}
+
+function dubspaceSpace() {
+  return String(state.world?.dubspaceMeta?.space ?? "");
+}
+
+function taskspaceSpace() {
+  return String(state.world?.taskspaceMeta?.space ?? "");
+}
+
+function chatRoom() {
+  return String(state.world?.chatMeta?.room ?? "");
+}
+
 function call(space: string, target: string, verb: string, args: any[] = []) {
   const id = crypto.randomUUID();
-  state.socket?.send(JSON.stringify({ op: "call", id, space, message: { target, verb, args } }));
+  sendFrame({ op: "call", id, space, message: { target, verb, args } });
 }
 
 function direct(target: string, verb: string, args: any[] = [], onResult?: (result: any) => void) {
   const id = crypto.randomUUID();
   if (onResult) pendingDirect.set(id, onResult);
-  state.socket?.send(JSON.stringify({ op: "direct", id, target, verb, args }));
+  if (!sendFrame({ op: "direct", id, target, verb, args })) pendingDirect.delete(id);
   return id;
 }
 
@@ -237,7 +423,8 @@ function sendPreviewControl(target: string, name: string, value: any) {
   const last = directThrottle.get(key) ?? 0;
   if (Date.now() - last < 35) return;
   directThrottle.set(key, Date.now());
-  direct("the_dubspace", "preview_control", [target, name, value]);
+  const space = dubspaceSpace();
+  if (space) direct(space, "preview_control", [target, name, value]);
 }
 
 function setCueControl(target: string, name: string, value: any) {
@@ -270,7 +457,8 @@ function commitCueControls(target: string) {
     const numeric = Number(value);
     if (Number.isFinite(numeric)) values.set(name, numeric);
   }
-  for (const [name, value] of values) call("the_dubspace", "the_dubspace", "set_control", [target, name, value]);
+  const space = dubspaceSpace();
+  for (const [name, value] of values) if (space) call(space, space, "set_control", [target, name, value]);
 }
 
 function receiveLiveEvent(observation: any) {
@@ -396,10 +584,11 @@ function bindCommon() {
 
 function renderDubspace() {
   const dub = effectiveDubspace();
-  const slots = ["slot_1", "slot_2", "slot_3", "slot_4"];
-  const filter = dub.filter_1?.props ?? {};
-  const delay = dub.delay_1?.props ?? {};
-  const drum = dub.drum_1?.props ?? {};
+  const meta = state.world?.dubspaceMeta ?? {};
+  const slots = Array.isArray(meta.slots) ? meta.slots : [];
+  const filter = dub[meta.filter]?.props ?? {};
+  const delay = dub[meta.delay]?.props ?? {};
+  const drum = dub[meta.drum]?.props ?? {};
   const pattern = normalizePattern(drum.pattern);
   return `
     <section class="toolbar">
@@ -411,14 +600,14 @@ function renderDubspace() {
     <section class="grid">
       <article class="panel loop-console-panel">
         <div class="panel-head"><h2>Loops</h2></div>
-        <div class="loop-console">${slots.map((id, index) => renderLoopStrip(id, index + 1, dub)).join("")}${renderFilterStrip(filter)}</div>
+        <div class="loop-console">${slots.map((id: string, index: number) => renderLoopStrip(id, index + 1, dub)).join("")}${renderFilterStrip(filter)}</div>
       </article>
       <article class="panel">
         <h2>Delay</h2>
-        ${slider("delay_1", "send", delay.send ?? 0.3)}
-        ${slider("delay_1", "time", delay.time ?? 0.25)}
-        ${slider("delay_1", "feedback", delay.feedback ?? 0.35)}
-        ${slider("delay_1", "wet", delay.wet ?? 0.4)}
+        ${slider(meta.delay, "send", delay.send ?? 0.3)}
+        ${slider(meta.delay, "time", delay.time ?? 0.25)}
+        ${slider(meta.delay, "feedback", delay.feedback ?? 0.35)}
+        ${slider(meta.delay, "wet", delay.wet ?? 0.4)}
       </article>
       <article class="panel sequencer">
         <div class="panel-head">
@@ -436,13 +625,14 @@ function renderDubspace() {
 
 function renderFilterStrip(filter: any) {
   const cutoff = filter.cutoff ?? 1000;
+  const target = state.world?.dubspaceMeta?.filter ?? "";
   return `
     <div class="filter-strip">
       <div class="loop-strip-head">
         <strong>F</strong>
         <span>Filter</span>
       </div>
-      <input class="vertical-fader" aria-label="Filter cutoff" data-control data-target="filter_1" data-name="cutoff" type="range" min="80" max="5000" step="1" value="${escapeHtml(String(cutoff))}">
+      <input class="vertical-fader" aria-label="Filter cutoff" data-control data-target="${escapeHtml(target)}" data-name="cutoff" type="range" min="80" max="5000" step="1" value="${escapeHtml(String(cutoff))}">
       <span class="fader-readout">${escapeHtml(String(Math.round(Number(cutoff))))} Hz</span>
     </div>
   `;
@@ -453,7 +643,7 @@ function renderLoopStrip(id: string, index: number, dub: any) {
   const cue = state.cueSlots[id] === true;
   const serverPlaying = state.world?.dubspace?.[id]?.props?.playing === true;
   const buttonPlaying = cue ? state.cuePlaying[id] === true : serverPlaying;
-  const freq = slot.freq ?? defaultLoopFreq(id);
+  const freq = slot.freq ?? defaultLoopFreq(index);
   return `
     <div class="loop-strip ${slot.playing ? "playing" : ""} ${cue ? "cue-active" : ""}">
       <div class="loop-strip-head">
@@ -499,7 +689,8 @@ function bindDubspace() {
         render();
         return;
       }
-      call("the_dubspace", "the_dubspace", playing ? "stop_loop" : "start_loop", [slot]);
+      const space = dubspaceSpace();
+      if (space) call(space, space, playing ? "stop_loop" : "start_loop", [slot]);
     });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-cue-slot]").forEach((button) => {
@@ -533,24 +724,35 @@ function bindDubspace() {
         setCueControl(target, name, Number(input.value));
         return;
       }
-      call("the_dubspace", "the_dubspace", "set_control", [target, name, Number(input.value)]);
+      const space = dubspaceSpace();
+      if (space) call(space, space, "set_control", [target, name, Number(input.value)]);
     });
   });
   document.querySelector<HTMLButtonElement>("[data-transport]")?.addEventListener("click", (event) => {
     const mode = (event.currentTarget as HTMLButtonElement).dataset.transport;
-    call("the_dubspace", "the_dubspace", mode === "stop" ? "stop_transport" : "start_transport", []);
+    const space = dubspaceSpace();
+    if (space) call(space, space, mode === "stop" ? "stop_transport" : "start_transport", []);
   });
   document.querySelector<HTMLInputElement>("[data-tempo]")?.addEventListener("change", (event) => {
-    call("the_dubspace", "the_dubspace", "set_tempo", [Number((event.currentTarget as HTMLInputElement).value)]);
+    const space = dubspaceSpace();
+    if (space) call(space, space, "set_tempo", [Number((event.currentTarget as HTMLInputElement).value)]);
   });
   document.querySelectorAll<HTMLButtonElement>("[data-step]").forEach((button) => {
     button.addEventListener("click", () => {
       const [voice, step] = button.dataset.step!.split(":");
-      call("the_dubspace", "the_dubspace", "set_drum_step", [voice, Number(step), button.dataset.enabled !== "true"]);
+      const space = dubspaceSpace();
+      if (space) call(space, space, "set_drum_step", [voice, Number(step), button.dataset.enabled !== "true"]);
     });
   });
-  document.querySelector<HTMLButtonElement>("[data-save-scene]")?.addEventListener("click", () => call("the_dubspace", "the_dubspace", "save_scene", [`Scene ${new Date().toLocaleTimeString()}`]));
-  document.querySelector<HTMLButtonElement>("[data-recall-scene]")?.addEventListener("click", () => call("the_dubspace", "the_dubspace", "recall_scene", ["default_scene"]));
+  document.querySelector<HTMLButtonElement>("[data-save-scene]")?.addEventListener("click", () => {
+    const space = dubspaceSpace();
+    if (space) call(space, space, "save_scene", [`Scene ${new Date().toLocaleTimeString()}`]);
+  });
+  document.querySelector<HTMLButtonElement>("[data-recall-scene]")?.addEventListener("click", () => {
+    const space = dubspaceSpace();
+    const scene = state.world?.dubspaceMeta?.scene;
+    if (space && scene) call(space, space, "recall_scene", [scene]);
+  });
 }
 
 function normalizePattern(raw: any): Record<string, boolean[]> {
@@ -577,7 +779,9 @@ function renderStepRow(voice: string, label: string, row: boolean[]) {
 }
 
 function enterChat() {
-  direct("the_chatroom", "enter", [], (result) => {
+  const room = chatRoom();
+  if (!room) return;
+  direct(room, "enter", [], (result) => {
     setChatPresent(result);
     if (state.tab === "chat") render();
   });
@@ -693,7 +897,9 @@ function bindChat() {
   });
   document.querySelector<HTMLButtonElement>("[data-chat-enter]")?.addEventListener("click", enterChat);
   document.querySelector<HTMLButtonElement>("[data-chat-leave]")?.addEventListener("click", () => {
-    direct("the_chatroom", "leave", [], (result) => {
+    const room = chatRoom();
+    if (!room) return;
+    direct(room, "leave", [], (result) => {
       setChatPresent(result);
       if (state.tab === "chat") render();
     });
@@ -729,11 +935,13 @@ function sendChatInput(text: string) {
     return;
   }
   if (text.startsWith("/me ")) {
-    direct("the_chatroom", "emote", [text.slice(4).trim()]);
+    const room = chatRoom();
+    if (room) direct(room, "emote", [text.slice(4).trim()]);
     return;
   }
   if (text.startsWith(":")) {
-    direct("the_chatroom", "emote", [text.slice(1).trim()]);
+    const room = chatRoom();
+    if (room) direct(room, "emote", [text.slice(1).trim()]);
     return;
   }
   if (text.startsWith("/tell ")) {
@@ -743,14 +951,18 @@ function sendChatInput(text: string) {
       pushChatLine({ kind: "error", text: "Tell needs a recipient and text." });
       return;
     }
-    direct("the_chatroom", "tell", [rest.slice(0, split), rest.slice(split + 1).trim()]);
+    const room = chatRoom();
+    if (room) direct(room, "tell", [rest.slice(0, split), rest.slice(split + 1).trim()]);
     return;
   }
-  direct("the_chatroom", "say", [text]);
+  const room = chatRoom();
+  if (room) direct(room, "say", [text]);
 }
 
 function refreshChatWho() {
-  direct("the_chatroom", "who", [], (result) => {
+  const room = chatRoom();
+  if (!room) return;
+  direct(room, "who", [], (result) => {
     setChatPresent(result);
     const names = state.chatPresent.map(actorLabel).join(", ") || "nobody";
     pushChatLine({ kind: "system", text: `Present: ${names}` });
@@ -758,7 +970,9 @@ function refreshChatWho() {
 }
 
 function refreshChatLook() {
-  direct("the_chatroom", "look", [], (result) => {
+  const room = chatRoom();
+  if (!room) return;
+  direct(room, "look", [], (result) => {
     const present = Array.isArray(result?.present_actors) ? result.present_actors.map(String) : [];
     state.chatPresent = present;
     const names = present.map(actorLabel).join(", ") || "nobody";
@@ -991,7 +1205,8 @@ function bindTaskspace() {
     const descriptionInput = document.querySelector<HTMLInputElement>("[data-new-description]");
     const title = titleInput?.value.trim() || "Untitled";
     const description = descriptionInput?.value.trim() || "";
-    call("the_taskspace", "the_taskspace", "create_task", [title, description]);
+    const space = taskspaceSpace();
+    if (space) call(space, space, "create_task", [title, description]);
     if (titleInput) titleInput.value = "";
     if (descriptionInput) descriptionInput.value = "";
   });
@@ -1014,8 +1229,10 @@ function bindTaskspace() {
   document.querySelectorAll<HTMLButtonElement>("[data-task-action]").forEach((button) => {
     button.addEventListener("click", () => {
       const action = button.dataset.taskAction!;
-      if (action === "claim" || action === "release") call("the_taskspace", id, action, []);
-      if (action.startsWith("status:")) call("the_taskspace", id, "set_status", [action.slice("status:".length)]);
+      const space = taskspaceSpace();
+      if (!space) return;
+      if (action === "claim" || action === "release") call(space, id, action, []);
+      if (action.startsWith("status:")) call(space, id, "set_status", [action.slice("status:".length)]);
     });
   });
   document.querySelector<HTMLButtonElement>("[data-add-subtask]")?.addEventListener("click", () => {
@@ -1024,36 +1241,43 @@ function bindTaskspace() {
     const title = titleInput?.value.trim() || "Subtask";
     const description = descriptionInput?.value.trim() || "";
     state.taskExpanded[id] = true;
-    call("the_taskspace", id, "add_subtask", [title, description]);
+    const space = taskspaceSpace();
+    if (space) call(space, id, "add_subtask", [title, description]);
     if (titleInput) titleInput.value = "";
     if (descriptionInput) descriptionInput.value = "";
   });
   document.querySelector<HTMLButtonElement>("[data-add-requirement]")?.addEventListener("click", () => {
     const input = document.querySelector<HTMLInputElement>("[data-requirement]");
     const text = input?.value.trim() || "Requirement";
-    call("the_taskspace", id, "add_requirement", [text]);
+    const space = taskspaceSpace();
+    if (space) call(space, id, "add_requirement", [text]);
     if (input) input.value = "";
   });
   document.querySelectorAll<HTMLInputElement>("[data-check-req]").forEach((input) => {
-    input.addEventListener("change", () => call("the_taskspace", id, "check_requirement", [Number(input.dataset.checkReq), input.checked]));
+    input.addEventListener("change", () => {
+      const space = taskspaceSpace();
+      if (space) call(space, id, "check_requirement", [Number(input.dataset.checkReq), input.checked]);
+    });
   });
   document.querySelector<HTMLButtonElement>("[data-add-message]")?.addEventListener("click", () => {
     const input = document.querySelector<HTMLInputElement>("[data-message]");
     const body = input?.value.trim() || "Update";
-    call("the_taskspace", id, "add_message", [body]);
+    const space = taskspaceSpace();
+    if (space) call(space, id, "add_message", [body]);
     if (input) input.value = "";
   });
   document.querySelector<HTMLButtonElement>("[data-add-artifact]")?.addEventListener("click", () => {
     const input = document.querySelector<HTMLInputElement>("[data-artifact]");
     const ref = input?.value.trim() || "https://example.com";
-    call("the_taskspace", id, "add_artifact", [{ kind: ref.startsWith("http") ? "url" : "external", ref }]);
+    const space = taskspaceSpace();
+    if (space) call(space, id, "add_artifact", [{ kind: ref.startsWith("http") ? "url" : "external", ref }]);
     if (input) input.value = "";
   });
 }
 
 function renderIde() {
   const objects = Object.keys(state.world?.objects ?? {}).sort();
-  const installTarget = state.selectedObject || "delay_1";
+  const installTarget = state.selectedObject || defaultSelectedObject();
   return `
     <section class="toolbar">
       <h1>IDE</h1>
@@ -1103,7 +1327,8 @@ function bindIde() {
   });
   document.querySelector<HTMLButtonElement>("[data-test-verb]")?.addEventListener("click", () => {
     const name = document.querySelector<HTMLInputElement>("[data-verb-name]")!.value.trim();
-    call("the_dubspace", state.selectedObject, name, [0.62]);
+    const space = dubspaceSpace();
+    if (space) call(space, state.selectedObject, name, [0.62]);
   });
 }
 
@@ -1127,9 +1352,9 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function defaultLoopFreq(id: string) {
-  const freqs: Record<string, number> = { slot_1: 110, slot_2: 146.83, slot_3: 196, slot_4: 261.63 };
-  return freqs[id] ?? 220;
+function defaultLoopFreq(index: number) {
+  const freqs = [110, 146.83, 196, 261.63];
+  return freqs[index - 1] ?? 220;
 }
 
 class DubAudio {
@@ -1181,9 +1406,10 @@ class DubAudio {
     this.dubspace = dubspace;
     this.clockOffset = clockOffset;
     this.syncEffects(dubspace);
-    for (const id of ["slot_1", "slot_2", "slot_3", "slot_4"]) {
+    const slots = Array.isArray(state.world?.dubspaceMeta?.slots) ? state.world.dubspaceMeta.slots : [];
+    for (const [index, id] of slots.entries()) {
       const props = dubspace[id]?.props ?? {};
-      const freq = clamp(Number(props.freq ?? defaultLoopFreq(id)), 40, 1200);
+      const freq = clamp(Number(props.freq ?? defaultLoopFreq(index + 1)), 40, 1200);
       if (props.playing && !this.oscillators.has(id)) {
         const osc = this.context.createOscillator();
         const gain = this.context.createGain();
@@ -1208,9 +1434,10 @@ class DubAudio {
 
   private syncEffects(dubspace: any) {
     const now = this.context.currentTime;
-    const delay = dubspace.delay_1?.props ?? {};
-    const filter = dubspace.filter_1?.props ?? {};
-    const channel = dubspace.channel_1?.props ?? {};
+    const meta = state.world?.dubspaceMeta ?? {};
+    const delay = dubspace[meta.delay]?.props ?? {};
+    const filter = dubspace[meta.filter]?.props ?? {};
+    const channel = dubspace[meta.channel]?.props ?? {};
     this.filter.frequency.setTargetAtTime(clamp(Number(filter.cutoff ?? 5000), 80, 5000), now, 0.02);
     this.filter.Q.setTargetAtTime(0.8, now, 0.02);
     this.channel.gain.setTargetAtTime(clamp(Number(channel.gain ?? 0.8), 0, 1.2), now, 0.02);
@@ -1227,7 +1454,7 @@ class DubAudio {
 
   private tickSequencer() {
     if (this.context.state !== "running") return;
-    const drum = this.dubspace?.drum_1?.props;
+    const drum = this.dubspace?.[state.world?.dubspaceMeta?.drum]?.props;
     if (!drum?.playing) {
       this.lastStep = -1;
       return;

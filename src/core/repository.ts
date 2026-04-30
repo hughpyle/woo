@@ -272,7 +272,8 @@ export interface ObjectRepository {
 
   /**
    * Sessions on this host that are eligible for reap: `last_detach_at + grace < now`
-   * or `now > expires_at`. The runtime's reap loop calls this and processes results.
+   * or `now > expires_at`. The runtime's reap loop ignores attached in-memory
+   * connections; storage never persists socket ids.
    * Implementations may return all sessions and let the caller filter; or filter
    * at the storage layer for efficiency.
    */

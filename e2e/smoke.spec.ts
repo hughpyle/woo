@@ -75,7 +75,7 @@ test("dubspace cue keeps loop controls local", async ({ page, request }) => {
 
   const headers = await authHeaders(request);
   const before = await request.get("/api/state", { headers }).then((response) => response.json());
-  const beforeSlot = before.dubspace.slot_1.props;
+  const beforeSlot = before.objects.slot_1.props;
   const localFreq = Number(beforeSlot.freq ?? 110) === 432.5 ? 433.5 : 432.5;
   const localGain = Number(beforeSlot.gain ?? 0.75) === 0.11 ? 0.22 : 0.11;
 
@@ -99,8 +99,8 @@ test("dubspace cue keeps loop controls local", async ({ page, request }) => {
 
   expect(sentFrames.some((frame) => frame.includes("preview_control") || frame.includes("set_control"))).toBe(false);
   const after = await request.get("/api/state", { headers }).then((response) => response.json());
-  expect(after.dubspace.slot_1.props.freq ?? 110).toBe(beforeSlot.freq ?? 110);
-  expect(after.dubspace.slot_1.props.gain).toBe(beforeSlot.gain);
+  expect(after.objects.slot_1.props.freq ?? 110).toBe(beforeSlot.freq ?? 110);
+  expect(after.objects.slot_1.props.gain).toBe(beforeSlot.gain);
 
   sentFrames.length = 0;
   await page.locator('[data-cue-slot="slot_1"]').click();
@@ -109,7 +109,7 @@ test("dubspace cue keeps loop controls local", async ({ page, request }) => {
   await expect
     .poll(async () => {
       const current = await request.get("/api/state", { headers }).then((response) => response.json());
-      return current.dubspace.slot_1.props;
+      return current.objects.slot_1.props;
     })
     .toMatchObject({ freq: localFreq, gain: localGain });
 });

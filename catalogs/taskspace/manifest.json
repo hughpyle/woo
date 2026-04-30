@@ -61,7 +61,7 @@
     { "on": "$task", "type": "artifact_attached", "shape": { "task": "obj", "ref": "map" } }
   ],
   "seed_hooks": [
-    { "kind": "create_instance", "class": "$taskspace", "as": "the_taskspace", "name": "Taskspace", "description": "The first runnable task coordination space. It owns the sequenced timeline and anchored task tree used by people or agents to create, claim, discuss, and complete work.", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0, "root_tasks": [] } },
+    { "kind": "create_instance", "class": "$taskspace", "as": "the_taskspace", "name": "Taskspace", "description": "The first runnable task coordination space. It owns the sequenced timeline and anchored task tree used by people or agents to create, claim, discuss, and complete work.", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0, "root_tasks": [], "auto_presence": true, "host_placement": "self" } },
     { "kind": "attach_feature", "consumer": "the_taskspace", "feature": "chat:$conversational" }
   ]
 }

@@ -29,7 +29,7 @@ The runtime distinguishes three things that look similar but have different life
 | Layer | Concept | Lifetime | Persisted? | Identifier |
 |---|---|---|---|---|
 | **Actor** | A `$player` (or other `$actor`-descended) object in the world. The principal that authors calls and is checked for `progr`. | Indefinite — lives in the world. Guests are recycled, not deleted. | **Yes**, in object storage. | objref / ULID |
-| **Session** | A reconnect credential bound to an actor. Lets a client re-attach without re-auth. | Bounded TTL with grace after the last connection detaches; reaped on expiry. | Credential metadata only (id, actor, expires_at, last_detach_at). **Not** the list of attached sockets. | random 128-bit id |
+| **Session** | A reconnect credential bound to an actor. Lets a client re-attach without re-auth. | Live while one or more connections are attached; then bounded by grace/TTL after the last connection detaches. | Credential metadata only (id, actor, expires_at, last_detach_at). **Not** the list of attached sockets. | random 128-bit id |
 | **Connection** | A live transport attachment — one websocket, or one in-flight REST request. | Open-to-close of the transport. | **No** — in-memory only on the player host. Lost on host restart by design. | host-local socket id |
 
 Concretely:
@@ -47,7 +47,7 @@ The persisted session record carries:
 | `session_id` | opaque random identifier; the client uses this to reconnect |
 | `actor` | objref of the bound actor |
 | `started_at` | ms timestamp |
-| `expires_at` | absolute deadline; session is unconditionally reaped after this |
+| `expires_at` | deadline for an unattached/resumable session. Active websocket connections keep the session attached; implementations may renew or extend `expires_at` while attached. |
 | `last_detach_at` | ms timestamp of the most recent connection close (null while connected). Drives the grace-period reap path. |
 
 It does **not** carry a list of attached sockets — those live in the in-memory connection registry on the player host. Persisting socket ids creates the failure mode where a server restart leaves orphaned "attached" entries that never clear.
@@ -104,7 +104,7 @@ The lifecycle has three steps, in this order:
 
 1. The connection record is dropped from the host's in-memory registry.
 2. If other connections remain on the same session, broadcast continues to them; the session stays *attached*.
-3. If this was the last connection: set `session.last_detach_at = now`. The session enters *detached* state. No reap yet.
+3. If this was the last connection: set `session.last_detach_at = now`, and ensure `expires_at` is no earlier than `now + grace`. The session enters *detached* state. No reap yet.
 
 `READ` tasks waiting for input from this player ([tasks.md §16.6](tasks.md#166-read-tasks)) continue to wait — they belong to the actor, not the connection. They are killed at session reap (§I6.3), not connection close.
 
@@ -116,15 +116,15 @@ Grace defaults are token-class dependent:
 
 | Token class | Default grace | Default total session TTL |
 |---|---|---|
-| `guest:` | 60 seconds | 5 minutes after `started_at`, or 60s after detach, whichever is sooner |
+| `guest:` | 60 seconds | 5 minutes while unattached; active connections keep the session alive |
 | `session:` (renewing) | inherits from underlying token class | unchanged on resume |
-| `bearer:` / `apikey:` (v1-ops) | 5 minutes | 24 hours rolling |
+| `bearer:` / `apikey:` (v1-ops) | 5 minutes | 24 hours rolling while attached |
 
 Operators may override per world via `$server_options.session_*`.
 
 ### I6.3 Reap
 
-When `session.last_detach_at + grace < now` *or* `now > session.expires_at`, the runtime reaps:
+While at least one live connection is attached, the session is not reaped for ordinary timeout. When no live connections are attached and either `session.last_detach_at + grace < now` or `now > session.expires_at`, the runtime reaps:
 
 1. Kill any `READ` tasks for this actor (`E_INTRPT`).
 2. Remove the actor from every space's `subscribers` list and from `actor.presence_in`. Pair the two; they're a mirror.

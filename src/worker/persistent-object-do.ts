@@ -1,13 +1,12 @@
 // PersistentObjectDO — Cloudflare host for the world gateway or an anchor cluster.
 //
-// The "world" instance is still the gateway for auth, WebSockets, global
+// The "world" host remains the gateway for auth, WebSockets, global
 // catalog/admin surfaces, and bundled state aggregation. Directory-routed
-// anchor clusters (currently dubspace and taskspace) use the same class and
-// storage schema, but receive forwarded calls through the internal routes
-// below. The runtime is not fully host-scoped yet: cluster DOs still bootstrap
-// the seed graph locally for class/verb availability, so they contain shadow
-// copies of classes/global objects until remote definition lookup replaces that
-// compatibility path.
+// anchor clusters use the same storage schema, but initialize from a
+// host-scoped world slice exported by the gateway: hosted objects, their
+// parent/feature/bytecode support objects, hosted logs, snapshots, and tasks.
+// They do not auto-install the bundled catalogs or claim independent bootstrap
+// authority.
 //
 // What's wired through fetch() / the WS handlers:
 // - REST routing ported from src/server/dev-server.ts: auth, describe (with
@@ -30,11 +29,19 @@
 // - Worker-side GitHub tap install (/api/tap/install) — local catalogs
 //   cover the demos; remote-tap install is local-Node only for now.
 
-import { createWorld } from "../core/bootstrap";
+import { createWorld, createWorldFromSerialized, scopeSerializedWorldToHost } from "../core/bootstrap";
 import { parseAutoInstallCatalogs } from "../core/local-catalogs";
+import {
+  handleRestProtocolRequest,
+  handleWsProtocolFrame,
+  parseWsProtocolFrame,
+  statusForError,
+  type RestProtocolRequest
+} from "../core/protocol";
 import type { ObjRef, Session, WooValue } from "../core/types";
 import { wooError } from "../core/types";
-import type { AppliedFrame, DirectResultFrame, ErrorFrame, ErrorValue, LiveEventFrame, Message } from "../core/types";
+import type { AppliedFrame, DirectResultFrame, ErrorFrame, LiveEventFrame, Message } from "../core/types";
+import type { SerializedWorld } from "../core/repository";
 import { normalizeError, type ParkedTaskRun } from "../core/world";
 import { CFObjectRepository } from "./cf-repository";
 
@@ -60,6 +67,7 @@ export class PersistentObjectDO {
   private repo: CFObjectRepository;
   private world: WooWorld | null = null;
   private routeCache = new Map<ObjRef, string>();
+  private routesRegistered = false;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -76,9 +84,16 @@ export class PersistentObjectDO {
       );
     }
 
-    const world = await this.getWorld();
     const url = new URL(request.url);
     const pathname = url.pathname;
+    const hostKey = request.headers.get("x-woo-host-key") || this.durableHostKey();
+    const gatewayHost = hostKey === WORLD_HOST;
+
+    if (!gatewayHost && (pathname === "/api/auth" || pathname === "/ws")) {
+      return jsonResponse({ error: { code: "E_NOTAPPLICABLE", message: `${pathname} is only available on the world gateway host` } }, 404);
+    }
+
+    const world = await this.getWorld(hostKey);
 
     if (pathname.startsWith("/__internal/")) {
       return this.handleInternal(request, world, pathname);
@@ -104,119 +119,24 @@ export class PersistentObjectDO {
         return jsonResponse({ ok: true, ts: Date.now(), objects: world.objects.size });
       }
 
-      if (request.method === "GET" && pathname === "/api/state") {
-        // Demo aggregate state. Object descriptions are actor-filtered, but
-        // the app payloads include raw demo state; production REST clients
-        // should use describe/property/log rather than this bundled-client API.
-        const session = this.requireRestSession(world, request);
-        return jsonResponse(await this.aggregateState(world, session.actor));
-      }
-
-      if (request.method === "POST" && pathname === "/api/auth") {
-        const body = await readJsonBody(request);
-        const token = String(body.token ?? "");
-        if (!token.startsWith("guest:") && !token.startsWith("session:") && !token.startsWith("wizard:")) {
-          throw wooError("E_INVARG", "REST accepts guest:, session:, and wizard: tokens");
+      const protocol = await handleRestProtocolRequest(workerRestRequest(request, pathname), {
+        world,
+        authenticateToken: (token) => this.authenticateToken(world, token),
+        requireSession: () => this.requireRestSession(world, request),
+        state: (actor) => this.aggregateState(world, actor),
+        installTap: async () => {
+          throw wooError("E_NOT_IMPLEMENTED", "GitHub tap install on CF Worker is pending Phase 7; use @local catalogs for now");
+        },
+        resolveObject: (id, session) => this.resolveRestObject(world, id, session),
+        resolveActor: (_protocolRequest, actorValue, session) => this.resolveRestActor(world, request, actorValue, session),
+        broadcastApplied: (frame) => this.broadcastApplied(world, frame),
+        broadcastLiveEvents: (result) => this.broadcastLiveEvents(world, result)
+      });
+      if (protocol.handled) {
+        if ("raw" in protocol) {
+          return jsonResponse({ error: { code: "E_NOT_IMPLEMENTED", message: "raw REST response not supported on CF Worker" } }, 501);
         }
-        const session = this.authenticateToken(world, token);
-        return jsonResponse({ actor: session.actor, session: session.id, expires_at: session.expiresAt, token_class: session.tokenClass });
-      }
-
-      if (request.method === "POST" && pathname === "/api/tap/install") {
-        const session = this.requireRestSession(world, request);
-        this.requireWizard(world, session.actor);
-        // GitHub fetch is deferred to a later phase on CF (the helper in
-        // src/server/github-taps.ts uses node:fetch + GitHub API, all of
-        // which work on Workers — but it imports node-specific bits in
-        // dev-server. Phase 7 ports those into the worker).
-        return jsonResponse(
-          { error: { code: "E_NOT_IMPLEMENTED", message: "GitHub tap install on CF Worker is pending Phase 7; use @local catalogs for now" } },
-          501
-        );
-      }
-
-      if (request.method === "GET" && pathname === "/api/taps") {
-        const session = this.requireRestSession(world, request);
-        this.requireWizard(world, session.actor);
-        return jsonResponse({ catalogs: world.getProp("$catalog_registry", "installed_catalogs") });
-      }
-
-      if (request.method === "GET" && pathname === "/api/object") {
-        const session = this.requireRestSession(world, request);
-        const target = this.resolveRestObject(world, String(url.searchParams.get("id") ?? ""), session);
-        return jsonResponse({
-          description: world.describeForActor(target, session.actor),
-          verbs: world.verbs(target).map((name) => world.verbInfo(target, String(name))),
-          properties: world.properties(target).map((name) => world.propertyInfo(target, String(name)))
-        });
-      }
-
-      const route = parseObjectRoute(pathname);
-      if (route) {
-        const session = this.requireRestSession(world, request);
-        const target = this.resolveRestObject(world, route.id, session);
-
-        if (request.method === "GET" && route.rest.length === 0) {
-          // Permission-filtered: a non-readable property's name is visible
-          // but its value isn't (per rest.md §R4 / world.describeForActor).
-          return jsonResponse(world.describeForActor(target, session.actor));
-        }
-
-        if (request.method === "GET" && route.rest.length === 2 && route.rest[0] === "properties") {
-          const name = route.rest[1];
-          const value = world.getPropForActor(session.actor, target, name);
-          const info = this.restPropertyInfo(world, target, name);
-          const ownVersion = world.object(target).propertyVersions.get(name);
-          return jsonResponse({ ...info, value, version: ownVersion ?? info.version });
-        }
-
-        if (request.method === "POST" && route.rest.length === 2 && route.rest[0] === "calls") {
-          const body = await readJsonBody(request);
-          const verb = route.rest[1];
-          const args = Array.isArray(body.args) ? (body.args as WooValue[]) : [];
-          const actor = this.resolveRestActor(world, request, body.actor, session);
-          const frameId = typeof body.id === "string" ? body.id : undefined;
-
-          if (Object.prototype.hasOwnProperty.call(body, "space") && body.space !== null) {
-            const space = this.resolveRestObject(world, String(body.space), session);
-            const message: Message = {
-              actor,
-              target,
-              verb,
-              args,
-              body: body.body && typeof body.body === "object" && !Array.isArray(body.body) ? (body.body as Record<string, WooValue>) : undefined
-            };
-            const result = world.call(frameId, session.id, space, message);
-            if (result.op === "error") return jsonResponse({ error: result.error }, statusForError(result.error));
-            // REST callers don't have a WS, but other connected clients do
-            // — fan out the applied frame so a chat browser sees a REST
-            // agent's actions in real time.
-            this.broadcastApplied(world, result);
-            return jsonResponse(result);
-          }
-
-          const forceDirect = request.headers.get("x-woo-force-direct") === "1";
-          const result = world.directCall(frameId, actor, target, verb, args, { forceDirect, forceReason: "REST X-Woo-Force-Direct" });
-          if (result.op === "error") return jsonResponse({ error: result.error }, statusForError(result.error));
-          this.broadcastLiveEvents(world, result);
-          return jsonResponse({ result: result.result, observations: result.observations });
-        }
-
-        if (request.method === "GET" && route.rest.length === 1 && route.rest[0] === "log") {
-          if (!isSpaceLike(world, target)) throw wooError("E_NOTAPPLICABLE", `${target} does not have a sequenced log`, target);
-          if (!world.hasPresence(session.actor, target)) throw wooError("E_PERM", `${session.actor} is not present in ${target}`);
-          const from = Math.max(1, Number(url.searchParams.get("from") ?? 1));
-          const limit = Math.min(Math.max(1, Number(url.searchParams.get("limit") ?? 100)), 1000);
-          const entries = world.replay(target, from, limit + 1);
-          const messages = entries.slice(0, limit);
-          const lastSeq = messages.length > 0 ? messages[messages.length - 1].seq : from - 1;
-          return jsonResponse({ messages, next_seq: lastSeq + 1, has_more: entries.length > limit });
-        }
-
-        if (request.method === "GET" && route.rest.length === 1 && route.rest[0] === "stream") {
-          // SSE streams deferred — Worker needs Web ReadableStream wiring + presence-driven event routing.
-          return jsonResponse({ error: { code: "E_NOT_IMPLEMENTED", message: "SSE streams pending on CF Worker" } }, 501);
-        }
+        return jsonResponse(protocol.body, protocol.status);
       }
 
       return jsonResponse({ error: { code: "E_OBJNF", message: `no route for ${request.method} ${pathname}` } }, 404);
@@ -229,27 +149,32 @@ export class PersistentObjectDO {
   // ---- world lifecycle ----
 
   /**
-   * Lazy-init the in-memory WooWorld. Storage is hydrated via repo.load() if
-   * objects exist; otherwise bootstrap + auto-install runs and writes through
-   * the per-object incremental persistence path.
+   * Lazy-init the in-memory WooWorld. The gateway host runs normal bootstrap
+   * and catalog auto-install; cluster hosts load/prune a host-scoped serialized
+   * world and write that slice through the same repository path.
    *
    * The init is wrapped in blockConcurrencyWhile to ensure no fetch handler
    * interleaves with the bootstrap; once init completes, the same `world`
    * instance handles all subsequent requests until DO hibernation.
    */
-  private async getWorld(): Promise<WooWorld> {
-    if (this.world) return this.world;
+  private durableHostKey(): string {
+    return this.state.id.name ?? WORLD_HOST;
+  }
+
+  private async getWorld(hostKey = this.durableHostKey()): Promise<WooWorld> {
+    if (this.world) {
+      if (hostKey === WORLD_HOST) await this.registerObjectRoutes(this.world);
+      return this.world;
+    }
     let initialized: WooWorld | null = null;
     await this.state.blockConcurrencyWhile(async () => {
       if (this.world) {
         initialized = this.world;
         return;
       }
-      // createWorld:
-      // - load() on a fresh DO returns null → bootstrap + auto-install.
-      // - load() on a hydrated DO returns the SerializedWorld → importWorld → re-run bootstrap idempotently.
-      const catalogs = parseAutoInstallCatalogs(this.env.WOO_AUTO_INSTALL_CATALOGS);
-      const world = createWorld({ repository: this.repo, catalogs });
+      const world = hostKey === WORLD_HOST
+        ? createWorld({ repository: this.repo, catalogs: parseAutoInstallCatalogs(this.env.WOO_AUTO_INSTALL_CATALOGS) })
+        : await this.createHostScopedWorld(hostKey as ObjRef);
       // Rehydrate live WebSocket attachments. After DO wake-from-hibernation,
       // state.getWebSockets() returns sockets whose serializeAttachment
       // payload survived hibernation; the in-memory world.sessions, however,
@@ -266,24 +191,105 @@ export class PersistentObjectDO {
       this.world = world;
       initialized = world;
     });
-    return initialized!;
+    const world = initialized!;
+    if (hostKey === WORLD_HOST) await this.registerObjectRoutes(world);
+    return world;
+  }
+
+  private async createHostScopedWorld(hostKey: ObjRef): Promise<WooWorld> {
+    const stored = this.repo.load();
+    const source = stored ?? await this.fetchHostSeed(hostKey);
+    const scoped = scopeSerializedWorldToHost(source, hostKey);
+    if (scoped.objects.length === 0) throw wooError("E_OBJNF", `no host-scoped seed for ${hostKey}`, hostKey);
+    return createWorldFromSerialized(scoped, { repository: this.repo });
+  }
+
+  private async fetchHostSeed(hostKey: ObjRef): Promise<SerializedWorld> {
+    const id = this.env.WOO.idFromName(WORLD_HOST);
+    const response = await this.env.WOO.get(id).fetch(new Request(`${INTERNAL_ORIGIN}/__internal/host-seed`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "x-woo-host-key": WORLD_HOST
+      },
+      body: JSON.stringify({ host: hostKey })
+    }));
+    const body = await response.json();
+    if (!response.ok) throw wooError("E_STORAGE", `failed to load host seed for ${hostKey}`, body as WooValue);
+    return body as SerializedWorld;
+  }
+
+  private async registerObjectRoutes(world: WooWorld): Promise<void> {
+    if (this.routesRegistered) return;
+    await this.registerRoutes(world.objectRoutes());
+    this.routesRegistered = true;
+  }
+
+  private async registerRoutes(routes: Array<{ id: ObjRef; host: string; anchor: ObjRef | null }>): Promise<void> {
+    if (routes.length === 0) return;
+    try {
+      const id = this.env.DIRECTORY.idFromName(DIRECTORY_HOST);
+      await this.env.DIRECTORY.get(id).fetch(new Request(`${INTERNAL_ORIGIN}/register-objects`, {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ routes })
+      }));
+      for (const route of routes) this.routeCache.set(route.id, route.host);
+    } catch {
+      // Directory acceleration is best-effort. Fallback routing still sends
+      // unknown objects to the world host or the caller-provided space host.
+    }
+  }
+
+  private async registerRemoteObjectRoutes(host: string): Promise<void> {
+    try {
+      const routes = await this.forwardInternal<Array<{ id: ObjRef; host: string; anchor: ObjRef | null }>>(host, "/__internal/object-routes", {});
+      await this.registerRoutes(routes.filter((route) => route.host === host));
+    } catch {
+      // The applied frame is already durable on the target host; route
+      // registration can be retried by a later state read or call.
+    }
   }
 
   private async aggregateState(world: WooWorld, actor: ObjRef): Promise<Record<string, unknown>> {
     const state = world.state(actor) as unknown as Record<string, unknown>;
-    for (const space of ["the_dubspace", "the_taskspace"] as const) {
-      const host = await this.resolveObjectHost(space, WORLD_HOST);
-      if (host === WORLD_HOST) continue;
+    const routes = Array.isArray(state.object_routes)
+      ? state.object_routes.filter((route): route is { id: string; host: string; anchor: string | null } => (
+          route !== null &&
+          typeof route === "object" &&
+          !Array.isArray(route) &&
+          typeof (route as Record<string, unknown>).id === "string" &&
+          typeof (route as Record<string, unknown>).host === "string"
+        ))
+      : [];
+    const remoteHosts = Array.from(new Set(routes.map((route) => route.host).filter((host) => host && host !== WORLD_HOST)));
+    for (const host of remoteHosts) {
       const remote = await this.fetchHostState(host, actor);
       if (!remote) continue;
-      const remoteSpaces = readMap(remote.spaces);
-      if (remoteSpaces[space]) {
-        const spaces = { ...readMap(state.spaces), [space]: remoteSpaces[space] };
-        state.spaces = spaces;
+      const remoteRoutes = Array.isArray(remote.object_routes)
+        ? remote.object_routes.filter((route): route is { id: string; host: string; anchor: string | null } => (
+            route !== null &&
+            typeof route === "object" &&
+            !Array.isArray(route) &&
+            typeof (route as Record<string, unknown>).id === "string" &&
+            (route as Record<string, unknown>).host === host
+          ))
+        : [];
+      const hostRoutes = [...routes.filter((route) => route.host === host), ...remoteRoutes];
+      state.object_routes = uniqueRoutes([...(Array.isArray(state.object_routes) ? state.object_routes as Array<{ id: string; host: string; anchor: string | null }> : []), ...remoteRoutes]);
+      const routeIds = new Set(hostRoutes.map((route) => route.id));
+      const spaces = { ...readMap(state.spaces) };
+      for (const id of routeIds) {
+        const remoteSpace = readMap(remote.spaces)[id];
+        if (remoteSpace) spaces[id] = remoteSpace;
       }
-      if (space === "the_dubspace" && remote.dubspace) state.dubspace = remote.dubspace;
-      if (space === "the_taskspace" && remote.taskspace) state.taskspace = remote.taskspace;
-      state.objects = { ...readMap(state.objects), ...readMap(remote.objects) };
+      state.spaces = spaces;
+      const objects = { ...readMap(state.objects) };
+      const remoteObjects = readMap(remote.objects);
+      for (const id of routeIds) {
+        if (remoteObjects[id]) objects[id] = remoteObjects[id];
+      }
+      state.objects = objects;
     }
     return state;
   }
@@ -310,6 +316,16 @@ export class PersistentObjectDO {
       }
 
       const body = await readJsonBody(request);
+      if (request.method === "POST" && pathname === "/__internal/object-routes") {
+        return jsonResponse(world.objectRoutes());
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/host-seed") {
+        const host = String(body.host ?? "") as ObjRef;
+        if (!host) throw wooError("E_INVARG", "host-seed requires host");
+        return jsonResponse(world.exportHostScopedWorld(host));
+      }
+
       if (request.method === "POST" && pathname === "/__internal/broadcast-applied") {
         const frame = body.frame && typeof body.frame === "object" && !Array.isArray(body.frame)
           ? body.frame as AppliedFrame
@@ -405,8 +421,19 @@ export class PersistentObjectDO {
     rawTokenClass: unknown
   ): Session {
     if (!sessionId || !actor) throw wooError("E_NOSESSION", "internal forwarded call requires session and actor");
+    this.ensureInternalActor(world, actor);
     const tokenClass: Session["tokenClass"] = rawTokenClass === "guest" || rawTokenClass === "apikey" ? rawTokenClass : "bearer";
     return world.ensureSessionForActor(sessionId, actor, tokenClass, Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : undefined);
+  }
+
+  private ensureInternalActor(world: WooWorld, actor: ObjRef): void {
+    if (world.objects.has(actor)) return;
+    const parent = world.objects.has("$player") ? "$player" : world.objects.has("$actor") ? "$actor" : null;
+    world.createObject({ id: actor, name: actor, parent, owner: actor });
+    if (world.objects.has(actor)) {
+      world.setProp(actor, "presence_in", []);
+      world.setProp(actor, "session_id", null);
+    }
   }
 
   // ---- auth helpers (port from dev-server.ts) ----
@@ -436,10 +463,6 @@ export class PersistentObjectDO {
       // result remains authoritative for this host; routed object calls fail
       // closed if the Directory cannot resolve the session.
     }
-  }
-
-  private requireWizard(world: WooWorld, actor: ObjRef): void {
-    if (!world.object(actor).flags.wizard) throw wooError("E_PERM", "wizard authority required", actor);
   }
 
   private requireRestSession(world: WooWorld, request: Request): Session {
@@ -494,114 +517,63 @@ export class PersistentObjectDO {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const world = await this.getWorld();
-    const text = typeof message === "string" ? message : new TextDecoder().decode(message);
-    let frame: Record<string, unknown>;
-    try {
-      frame = JSON.parse(text);
-    } catch {
-      ws.send(JSON.stringify({ op: "error", error: { code: "E_INVARG", message: "invalid JSON frame" } }));
+    const frame = parseWsProtocolFrame(message);
+    if (frame.op === "error") {
+      ws.send(JSON.stringify(frame));
       return;
     }
-
-    try {
-      const op = String(frame.op ?? "");
-
-      if (op === "auth") {
-        const session = this.authenticateToken(world, String(frame.token ?? ""));
+    await handleWsProtocolFrame(ws, frame, {
+      authenticate: async (token) => {
+        const session = this.authenticateToken(world, token);
         await this.registerSessionRoute(session);
+        return session;
+      },
+      attach: (_connection, session) => {
         const previous = this.attachment(ws);
         if (previous) world.detachSocket(previous.sessionId, previous.socketId);
         const socketId = `ws-${session.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         world.attachSocket(session.id, socketId);
         ws.serializeAttachment({ sessionId: session.id, actor: session.actor, socketId });
-        ws.send(JSON.stringify({ op: "session", actor: session.actor, session: session.id }));
-        return;
-      }
-
-      if (op === "ping") {
-        ws.send(JSON.stringify({ op: "pong" }));
-        return;
-      }
-
-      const session = this.requireWsSession(ws, frame.id);
-      if (!session) return;
-
-      if (op === "call") {
-        const m = (frame.message ?? {}) as Record<string, unknown>;
-        const message: Message = {
-          actor: session.actor,
-          target: String(m.target ?? "") as ObjRef,
-          verb: String(m.verb ?? ""),
-          args: Array.isArray(m.args) ? (m.args as WooValue[]) : [],
-          body: m.body && typeof m.body === "object" && !Array.isArray(m.body)
-            ? (m.body as Record<string, WooValue>)
-            : undefined
-        };
-        const space = String(frame.space ?? "") as ObjRef;
+      },
+      session: () => this.liveAttachment(world, ws),
+      send: (_connection, frameValue) => ws.send(JSON.stringify(frameValue)),
+      call: async (frameId, session, space, messageValue) => {
         const host = await this.resolveObjectHost(space, WORLD_HOST);
         const result = host === WORLD_HOST
-          ? world.call(typeof frame.id === "string" ? frame.id : undefined, session.sessionId, space, message)
-          : await this.forwardWsCall(world, host, typeof frame.id === "string" ? frame.id : undefined, session, space, message);
-        if (result.op === "applied") this.broadcastApplied(world, result, ws);
-        else ws.send(JSON.stringify(result));
-        return;
-      }
-
-      if (op === "direct") {
-        const args = Array.isArray(frame.args) ? (frame.args as WooValue[]) : [];
-        const target = String(frame.target ?? "") as ObjRef;
+          ? world.call(frameId, session.sessionId, space, messageValue)
+          : await this.forwardWsCall(world, host, frameId, session, space, messageValue);
+        if (result.op === "applied") {
+          if (host !== WORLD_HOST) await this.registerRemoteObjectRoutes(host);
+        }
+        return result;
+      },
+      direct: async (frameId, session, target, verb, args) => {
         const host = await this.resolveObjectHost(target, WORLD_HOST);
-        const result = host === WORLD_HOST
+        return host === WORLD_HOST
           ? world.directCall(
-              typeof frame.id === "string" ? frame.id : undefined,
+              frameId,
               session.actor,
               target,
-              String(frame.verb ?? ""),
+              verb,
               args
             )
-          : await this.forwardWsDirect(world, host, typeof frame.id === "string" ? frame.id : undefined, session, target, String(frame.verb ?? ""), args);
-        if (result.op === "result") {
-          ws.send(JSON.stringify({ op: "result", id: result.id, result: result.result }));
-          this.broadcastLiveEvents(world, result);
-        } else {
-          ws.send(JSON.stringify(result));
-        }
-        return;
-      }
-
-      if (op === "input") {
-        const input = Object.prototype.hasOwnProperty.call(frame, "value") ? frame.value : (frame.text ?? "");
-        const result = world.deliverInput(session.actor, input as WooValue);
-        if (!result) {
-          ws.send(JSON.stringify({ op: "input", id: frame.id, accepted: false }));
-          return;
-        }
-        if (result.frame?.op === "applied") this.broadcastApplied(world, result.frame, ws);
-        else {
-          ws.send(JSON.stringify({ op: "input", id: frame.id, accepted: true, task: result.task.id, observations: result.observations }));
-          this.broadcastTaskResult(world, result);
-        }
-        return;
-      }
-
-      if (op === "replay") {
-        const space = String(frame.space ?? "") as ObjRef;
+          : await this.forwardWsDirect(world, host, frameId, session, target, verb, args);
+      },
+      replay: async (frameId, session, space, fromValue, limitValue) => {
         const host = await this.resolveObjectHost(space, WORLD_HOST);
         if (host !== WORLD_HOST) {
-          ws.send(JSON.stringify(await this.forwardWsReplay(world, host, typeof frame.id === "string" ? frame.id : undefined, session, space, frame.from, frame.limit)));
-          return;
+          return this.forwardWsReplay(world, host, frameId, session, space, fromValue, limitValue);
         }
         if (!world.hasPresence(session.actor, space)) throw wooError("E_PERM", `${session.actor} is not present in ${space}`);
-        const from = Math.max(1, Number(frame.from ?? 1));
-        const limit = Math.min(Math.max(1, Number(frame.limit ?? 100)), 500);
-        ws.send(JSON.stringify({ op: "replay", id: frame.id, space, from, entries: world.replay(space, from, limit) }));
-        return;
-      }
-
-      ws.send(JSON.stringify({ op: "error", error: { code: "E_INVARG", message: `unknown op ${op}` } }));
-    } catch (err) {
-      ws.send(JSON.stringify({ op: "error", error: normalizeError(err) }));
-    }
+        const from = Math.max(1, Number(fromValue ?? 1));
+        const limit = Math.min(Math.max(1, Number(limitValue ?? 100)), 500);
+        return { op: "replay", id: frameId, space, from, entries: world.replay(space, from, limit) };
+      },
+      deliverInput: (session, input) => world.deliverInput(session.actor, input),
+      broadcastApplied: (frameValue, originator) => this.broadcastApplied(world, frameValue, originator),
+      broadcastTaskResult: (result) => this.broadcastTaskResult(world, result),
+      broadcastLiveEvents: (result) => this.broadcastLiveEvents(world, result)
+    });
   }
 
   async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {
@@ -631,13 +603,10 @@ export class PersistentObjectDO {
     return { sessionId: a.sessionId, actor: a.actor as ObjRef, socketId: a.socketId };
   }
 
-  private requireWsSession(ws: WebSocket, frameId: unknown): { sessionId: string; actor: ObjRef; socketId: string } | null {
+  private liveAttachment(world: WooWorld, ws: WebSocket): { sessionId: string; actor: ObjRef; socketId: string } | null {
     const att = this.attachment(ws);
-    if (!att) {
-      ws.send(JSON.stringify({ op: "error", id: frameId, error: { code: "E_NOSESSION", message: "auth required before this op" } }));
-      return null;
-    }
-    return att;
+    if (!att) return null;
+    return world.sessionAlive(att.sessionId) ? att : null;
   }
 
   private async resolveObjectHost(id: ObjRef, fallbackHost: string): Promise<string> {
@@ -777,24 +746,6 @@ export class PersistentObjectDO {
     }
   }
 
-  private restPropertyInfo(world: WooWorld, obj: ObjRef, name: string): Record<string, WooValue> {
-    try {
-      return world.propertyInfo(obj, name);
-    } catch (err) {
-      const error = normalizeError(err);
-      const target = world.object(obj);
-      if (error.code !== "E_PROPNF" || !target.properties.has(name)) throw err;
-      return {
-        name,
-        owner: target.owner,
-        perms: "rw",
-        defined_on: obj,
-        type_hint: null,
-        version: target.propertyVersions.get(name) ?? 1,
-        has_value: true
-      };
-    }
-  }
 }
 
 // ---- module-scoped helpers ----
@@ -808,46 +759,15 @@ function taskResultSpace(result: ParkedTaskRun): ObjRef {
   return result.task.parked_on;
 }
 
-function parseObjectRoute(pathname: string): { id: string; rest: string[] } | null {
-  const parts = pathname.split("/").filter(Boolean);
-  if (parts[0] !== "api" || parts[1] !== "objects" || !parts[2]) return null;
+function workerRestRequest(request: Request, pathname: string): RestProtocolRequest {
+  const url = new URL(request.url);
   return {
-    id: decodeURIComponent(parts[2]),
-    rest: parts.slice(3).map((part) => decodeURIComponent(part))
+    method: request.method,
+    pathname,
+    query: (name) => url.searchParams.get(name),
+    header: (name) => request.headers.get(name),
+    readJson: () => readJsonBody(request)
   };
-}
-
-function isSpaceLike(world: WooWorld, obj: ObjRef): boolean {
-  try {
-    world.getProp(obj, "next_seq");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function statusForError(error: ErrorValue): number {
-  switch (error.code) {
-    case "E_INVARG": return 400;
-    case "E_NOSESSION": return 401;
-    case "E_TOKEN_CONSUMED": return 401;
-    case "E_PERM": return 403;
-    case "E_DIRECT_DENIED": return 403;
-    case "E_OBJNF":
-    case "E_VERBNF":
-    case "E_PROPNF":
-    case "E_NOTAPPLICABLE":
-      return 404;
-    case "E_CONFLICT": return 409;
-    case "E_TRANSITION":
-    case "E_TRANSITION_ROLE_UNSET":
-    case "E_TRANSITION_REQUIRES":
-      return 422;
-    case "E_RATE": return 429;
-    case "E_NOT_IMPLEMENTED": return 501;
-    case "E_NOT_SUPPORTED": return 501;
-    default: return 500;
-  }
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -870,4 +790,13 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
 
 function readMap(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function uniqueRoutes(routes: Array<{ id: string; host: string; anchor: string | null }>): Array<{ id: string; host: string; anchor: string | null }> {
+  const byId = new Map<string, { id: string; host: string; anchor: string | null }>();
+  for (const route of routes) {
+    if (!route?.id || !route.host) continue;
+    byId.set(route.id, route);
+  }
+  return Array.from(byId.values()).sort((a, b) => a.id.localeCompare(b.id));
 }

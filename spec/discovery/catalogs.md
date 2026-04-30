@@ -240,6 +240,11 @@ already-installed local catalog verbs from their manifest source and replaces
 stale trusted-local native/fixture rows. This repairs worlds that still contain
 old `native` handler names after the demo catalogs moved to source-only verbs.
 
+The second is `2026-04-30-catalog-placement-metadata`: it applies seed-hook
+properties that older worlds are missing, including generic `auto_presence` and
+`host_placement` metadata. These are catalog data values; runtime code must not
+branch on the seeded object names that happen to receive them.
+
 ### CT5.5 Manifest shape
 
 ```jsonc

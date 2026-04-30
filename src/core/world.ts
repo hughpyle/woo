@@ -55,9 +55,8 @@ export type WorldSnapshot = {
   server_time: number;
   actorCount: number;
   spaces: Record<string, { next_seq: number; log_count: number }>;
-  dubspace: ReturnType<WooWorld["dubspaceState"]>;
-  taskspace: ReturnType<WooWorld["taskspaceState"]>;
-  chat: ReturnType<WooWorld["chatState"]>;
+  catalogs: { installed: WooValue[] };
+  object_routes: Array<{ id: ObjRef; host: string; anchor: ObjRef | null }>;
   objects: Record<string, unknown>;
 };
 
@@ -440,8 +439,7 @@ export class WooWorld {
       this.sessions.set(id, session);
       this.persistSession(session);
       this.setProp(actor, "session_id", id);
-      if (this.objects.has("the_dubspace")) this.ensurePresence(actor, "the_dubspace");
-      if (this.objects.has("the_taskspace")) this.ensurePresence(actor, "the_taskspace");
+      this.ensureAutoPresence(actor);
     });
     return session;
   }
@@ -469,8 +467,7 @@ export class WooWorld {
       this.sessions.set(id, session);
       this.persistSession(session);
       this.setProp(actor, "session_id", id);
-      if (this.objects.has("the_dubspace")) this.ensurePresence(actor, "the_dubspace");
-      if (this.objects.has("the_taskspace")) this.ensurePresence(actor, "the_taskspace");
+      this.ensureAutoPresence(actor);
     });
     return session;
   }
@@ -493,6 +490,7 @@ export class WooWorld {
     this.withPersistenceDeferred(() => {
       session.attachedSockets.add(socketId);
       session.lastDetachAt = null;
+      session.expiresAt = Math.max(session.expiresAt, Date.now() + this.sessionTtl(session.tokenClass));
       this.persistSession(session);
       this.persist();
     });
@@ -503,7 +501,11 @@ export class WooWorld {
     if (!session) return;
     this.withPersistenceDeferred(() => {
       session.attachedSockets.delete(socketId);
-      if (session.attachedSockets.size === 0) session.lastDetachAt = Date.now();
+      if (session.attachedSockets.size === 0) {
+        const now = Date.now();
+        session.lastDetachAt = now;
+        session.expiresAt = Math.max(session.expiresAt, now + this.sessionGrace(session.tokenClass));
+      }
       this.persistSession(session);
       this.persist();
     });
@@ -804,75 +806,65 @@ export class WooWorld {
 
   state(actor?: ObjRef): WorldSnapshot {
     const spaces: WorldSnapshot["spaces"] = {};
-    for (const id of ["the_dubspace", "the_taskspace", "the_chatroom"]) {
-      if (this.objects.has(id)) spaces[id] = { next_seq: Number(this.getProp(id, "next_seq")), log_count: this.logs.get(id)?.length ?? 0 };
+    for (const id of Array.from(this.objects.keys()).sort()) {
+      if (!this.inheritsFrom(id, "$space")) continue;
+      const nextSeq = Number(this.propOrNull(id, "next_seq"));
+      if (!Number.isFinite(nextSeq)) continue;
+      spaces[id] = { next_seq: nextSeq, log_count: this.logs.get(id)?.length ?? 0 };
     }
-    const describeOne = actor
-      ? (id: ObjRef) => this.describeForActor(id, actor)
-      : (id: ObjRef) => this.describe(id);
     return {
       server_time: Date.now(),
       actorCount: Array.from(this.objects.values()).filter((obj) => this.inheritsFrom(obj.id, "$player")).length,
       spaces,
-      dubspace: this.dubspaceState(),
-      taskspace: this.taskspaceState(),
-      chat: this.chatState(),
-      objects: Object.fromEntries(Array.from(this.objects.keys()).map((id) => [id, describeOne(id)]))
+      catalogs: this.catalogState(),
+      object_routes: this.objectRoutes(),
+      objects: Object.fromEntries(Array.from(this.objects.keys()).sort().map((id) => [id, this.stateObject(id, actor)]))
     };
   }
 
-  dubspaceState() {
-    const controls = ["slot_1", "slot_2", "slot_3", "slot_4", "channel_1", "filter_1", "delay_1", "drum_1", "default_scene"];
-    return Object.fromEntries(
-      controls.filter((id) => this.objects.has(id)).map((id) => [
-        id,
-        {
-          id,
-          name: this.object(id).name,
-          props: Object.fromEntries(this.object(id).properties)
-        }
-      ])
-    );
-  }
-
-  taskspaceState() {
-    if (!this.objects.has("the_taskspace")) return { root_tasks: [], tasks: {} };
-    const taskIds = Array.from(this.objects.values())
-      .filter((obj) => obj.parent === "$task")
-      .map((obj) => obj.id);
-    const tasks = Object.fromEntries(
-      taskIds.map((id) => [
-        id,
-        {
-          id,
-          name: this.object(id).name,
-          props: Object.fromEntries(this.object(id).properties)
-        }
-      ])
-    );
-    return { root_tasks: this.getProp("the_taskspace", "root_tasks"), tasks };
-  }
-
-  chatState() {
-    if (!this.objects.has("the_chatroom")) return { room: null, present: [] as ObjRef[] };
-    const present = this.getProp("the_chatroom", "subscribers");
-    return {
-      room: {
-        id: "the_chatroom",
-        name: this.object("the_chatroom").name,
-        description: this.getProp("the_chatroom", "description")
-      },
-      present: Array.isArray(present) ? (present as ObjRef[]) : []
+  objectRoutes(): Array<{ id: ObjRef; host: string; anchor: ObjRef | null }> {
+    const selfHosted = new Set<ObjRef>();
+    for (const id of this.objects.keys()) {
+      if (this.propOrNull(id, "host_placement") === "self") selfHosted.add(id);
+    }
+    const hostFor = (id: ObjRef): string | null => {
+      if (selfHosted.has(id)) return id;
+      const obj = this.object(id);
+      if (obj.anchor && selfHosted.has(obj.anchor)) return obj.anchor;
+      if (obj.location && selfHosted.has(obj.location)) return obj.location;
+      return null;
     };
+    return Array.from(this.objects.values())
+      .map((obj) => {
+        const host = hostFor(obj.id);
+        return host ? { id: obj.id, host, anchor: obj.anchor } : null;
+      })
+      .filter((route): route is { id: ObjRef; host: string; anchor: ObjRef | null } => route !== null)
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  private catalogState(): { installed: WooValue[] } {
+    const installed = this.objects.has("$catalog_registry") ? this.propOrNull("$catalog_registry", "installed_catalogs") : [];
+    return { installed: Array.isArray(installed) ? installed : [] };
+  }
+
+  private stateObject(id: ObjRef, actor?: ObjRef): Record<string, WooValue> {
+    const described = actor ? this.describeForActor(id, actor) : this.describe(id);
+    const props: Record<string, WooValue> = {};
+    for (const name of this.properties(id)) {
+      props[String(name)] = actor ? this.propOrNullForActor(actor, id, String(name)) : this.propOrNull(id, String(name));
+    }
+    return { ...described, props };
   }
 
   createRuntimeObject(parent: ObjRef, owner: ObjRef, anchor: ObjRef | null = null): ObjRef {
     this.object(parent);
     this.object(owner);
     if (anchor) this.object(anchor);
+    const scope = runtimeObjectScope(anchor ?? parent);
     let id: ObjRef;
     do {
-      id = `obj_${this.objectCounter++}`;
+      id = `obj_${scope}_${this.objectCounter++}`;
     } while (this.objects.has(id));
     this.createObject({ id, parent, owner, anchor });
     this.persistCounters();
@@ -1012,6 +1004,29 @@ export class WooWorld {
     };
   }
 
+  exportHostScopedWorld(host: ObjRef): SerializedWorld {
+    const scope = this.hostScope(host);
+    return {
+      version: 1,
+      objectCounter: this.objectCounter,
+      parkedTaskCounter: this.parkedTaskCounter,
+      sessionCounter: this.sessionCounter,
+      objects: Array.from(scope.objects)
+        .sort()
+        .map((id) => this.serializeScopedObject(this.object(id), scope.objects)),
+      sessions: [],
+      logs: Array.from(this.logs.entries())
+        .filter(([space]) => scope.hostedSpaces.has(space))
+        .map(([space, entries]) => [space, cloneValue(entries as unknown as WooValue) as unknown as SpaceLogEntry[]]),
+      snapshots: (this.snapshots ?? [])
+        .filter((snapshot) => scope.hostedSpaces.has(snapshot.space_id))
+        .map((snapshot) => cloneValue(snapshot as unknown as WooValue) as unknown as SpaceSnapshotRecord),
+      parkedTasks: Array.from(this.parkedTasks.values())
+        .filter((task) => this.taskBelongsToHostScope(task, scope.hostedSpaces, scope.objects))
+        .map((task) => cloneValue(task as unknown as WooValue) as unknown as ParkedTaskRecord)
+    };
+  }
+
   importWorld(serialized: SerializedWorld): void {
     this.withPersistencePaused(() => {
       this.objects.clear();
@@ -1076,6 +1091,120 @@ export class WooWorld {
       contents: Array.from(obj.contents),
       eventSchemas: Array.from(obj.eventSchemas.entries()).map(([type, schema]) => [type, cloneValue(schema as WooValue) as Record<string, WooValue>])
     };
+  }
+
+  private serializeScopedObject(obj: WooObject, scope: Set<ObjRef>): SerializedObject {
+    const serialized = this.serializeObject(obj);
+    serialized.children = serialized.children.filter((id) => scope.has(id));
+    serialized.contents = serialized.contents.filter((id) => scope.has(id));
+    return serialized;
+  }
+
+  private hostScope(host: ObjRef): { objects: Set<ObjRef>; hostedSpaces: Set<ObjRef> } {
+    const routes = this.objectRoutes().filter((route) => route.host === host);
+    const hosted = new Set(routes.map((route) => route.id));
+    const hostedSpaces = new Set<ObjRef>();
+    const objects = new Set<ObjRef>();
+    const queue: Array<{ id: ObjRef; scanRefs: boolean }> = [];
+
+    const add = (id: ObjRef | null | undefined, scanRefs = true): void => {
+      if (!id || !this.objects.has(id) || objects.has(id)) return;
+      objects.add(id);
+      queue.push({ id, scanRefs });
+    };
+
+    const addCatalogSupportFor = (ids: Set<ObjRef>): void => {
+      for (const record of this.installedCatalogRecords()) {
+        const objectsMap = isPlainValueMap(record.objects) ? record.objects : {};
+        const seedsMap = isPlainValueMap(record.seeds) ? record.seeds : {};
+        const objectRefs = Object.values(objectsMap).filter((id): id is ObjRef => typeof id === "string");
+        const seedRefs = Object.values(seedsMap).filter((id): id is ObjRef => typeof id === "string");
+        if (![...objectRefs, ...seedRefs].some((id) => ids.has(id))) continue;
+        for (const id of objectRefs) add(id);
+      }
+    };
+
+    for (const id of hosted) {
+      add(id);
+      if (this.objects.has(id) && this.inheritsFrom(id, "$space")) hostedSpaces.add(id);
+    }
+    addCatalogSupportFor(hosted);
+
+    for (let i = 0; i < queue.length; i++) {
+      const { id, scanRefs } = queue[i];
+      const obj = this.object(id);
+      add(obj.parent);
+      add(obj.owner, false);
+      if (hosted.has(id)) {
+        add(obj.anchor);
+        add(obj.location);
+      }
+      if (this.canCarryFeaturesIfKnown(id)) {
+        const rawFeatures = obj.properties.get("features");
+        if (Array.isArray(rawFeatures)) {
+          for (const feature of rawFeatures) if (typeof feature === "string") add(feature);
+        }
+      }
+      if (hostedSpaces.has(id)) {
+        const rawSubscribers = obj.properties.get("subscribers");
+        if (Array.isArray(rawSubscribers)) {
+          for (const actor of rawSubscribers) if (typeof actor === "string") add(actor, false);
+        }
+      }
+      if (scanRefs) this.scanObjectRefs(obj, add);
+    }
+
+    return { objects, hostedSpaces };
+  }
+
+  private canCarryFeaturesIfKnown(objRef: ObjRef): boolean {
+    try {
+      return this.canCarryFeatures(objRef);
+    } catch {
+      return false;
+    }
+  }
+
+  private scanObjectRefs(obj: WooObject, add: (id: ObjRef | null | undefined, scanRefs?: boolean) => void): void {
+    for (const value of obj.properties.values()) this.scanValueRefs(value, add);
+    for (const def of obj.propertyDefs.values()) this.scanValueRefs(def.defaultValue, add);
+    for (const [, schema] of obj.eventSchemas) this.scanValueRefs(schema as WooValue, add);
+    for (const verb of obj.verbs.values()) {
+      this.scanValueRefs(verb.arg_spec as WooValue, add);
+      if (verb.kind === "bytecode") this.scanValueRefs(verb.bytecode.literals as WooValue, add);
+    }
+  }
+
+  private scanValueRefs(value: WooValue, add: (id: ObjRef | null | undefined, scanRefs?: boolean) => void): void {
+    if (typeof value === "string") {
+      if (this.objects.has(value)) add(value);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) this.scanValueRefs(item, add);
+      return;
+    }
+    for (const item of Object.values(value)) this.scanValueRefs(item, add);
+  }
+
+  private installedCatalogRecords(): Array<Record<string, WooValue>> {
+    if (!this.objects.has("$catalog_registry")) return [];
+    const raw = this.propOrNull("$catalog_registry", "installed_catalogs");
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(isPlainValueMap);
+  }
+
+  private taskBelongsToHostScope(task: ParkedTaskRecord, hostedSpaces: Set<ObjRef>, objects: Set<ObjRef>): boolean {
+    if (objects.has(task.parked_on)) return true;
+    const serialized = task.serialized;
+    if (serialized && typeof serialized === "object" && !Array.isArray(serialized)) {
+      const raw = serialized as Record<string, WooValue>;
+      if (typeof raw.space === "string" && hostedSpaces.has(raw.space)) return true;
+      if (typeof raw.target === "string" && objects.has(raw.target)) return true;
+      if (typeof raw.origin === "string" && objects.has(raw.origin)) return true;
+    }
+    return false;
   }
 
   private serializeSession(session: Session): SerializedSession {
@@ -1285,12 +1414,17 @@ export class WooWorld {
     now: number
   ): Session {
     const tokenClass = session.tokenClass ?? (this.inheritsFrom(session.actor, "$guest") ? "guest" : "bearer");
+    const lastDetachAt = session.lastDetachAt ?? now;
+    const expiresAt = Math.max(
+      session.expiresAt ?? session.started + this.sessionTtl(tokenClass),
+      lastDetachAt + this.sessionGrace(tokenClass)
+    );
     return {
       id: session.id,
       actor: session.actor,
       started: session.started,
-      expiresAt: session.expiresAt ?? session.started + this.sessionTtl(tokenClass),
-      lastDetachAt: session.lastDetachAt ?? now,
+      expiresAt,
+      lastDetachAt,
       tokenClass,
       attachedSockets: new Set()
     };
@@ -1311,6 +1445,7 @@ export class WooWorld {
   }
 
   private sessionExpired(session: Session, now: number): boolean {
+    if (session.attachedSockets.size > 0) return false;
     if (now >= session.expiresAt) return true;
     if (session.lastDetachAt === null) return false;
     return now >= session.lastDetachAt + this.sessionGrace(session.tokenClass);
@@ -1526,6 +1661,13 @@ export class WooWorld {
 
   private ensurePresence(actor: ObjRef, space: ObjRef): void {
     this.updatePresence(actor, space, true);
+  }
+
+  private ensureAutoPresence(actor: ObjRef): void {
+    for (const obj of this.objects.values()) {
+      if (!this.inheritsFrom(obj.id, "$space")) continue;
+      if (this.propOrNull(obj.id, "auto_presence") === true) this.ensurePresence(actor, obj.id);
+    }
   }
 
   private removePresence(actor: ObjRef, space: ObjRef): boolean {
@@ -1862,7 +2004,7 @@ export class WooWorld {
     }
     const id = `guest_${this.objects.size}`;
     this.createObject({ id, name: id, parent: this.objects.has("$guest") ? "$guest" : "$player", owner: "$wiz", location: this.objects.has("$nowhere") ? "$nowhere" : null });
-    this.setProp(id, "description", "Dynamically allocated guest player. It can be bound to a temporary session, gains presence in demo spaces on auth, and gives a local user or agent a stable actor for first-light testing.");
+    this.setProp(id, "description", "Dynamically allocated guest player. It can be bound to a temporary session and gives a local user or agent a stable actor for first-light testing.");
     this.setProp(id, "presence_in", []);
     this.setProp(id, "session_id", null);
     if (this.objects.has("$nowhere")) this.setProp(id, "home", "$nowhere");
@@ -2067,6 +2209,15 @@ export function normalizeError(err: unknown): ErrorValue {
 
 function addUnique<T>(items: T[], item: T): T[] {
   return items.includes(item) ? items : [...items, item];
+}
+
+function runtimeObjectScope(value: ObjRef): string {
+  const cleaned = value.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return cleaned || "world";
+}
+
+function isPlainValueMap(value: WooValue | undefined): value is Record<string, WooValue> {
+  return value !== null && value !== undefined && typeof value === "object" && !Array.isArray(value);
 }
 
 function hashCanonical(value: WooValue): string {

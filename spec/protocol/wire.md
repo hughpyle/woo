@@ -37,7 +37,9 @@ WebSockets between client and player host. JSON frames. UTF-8. Values are encode
 // Space-owned continuations resume as an applied $resume frame.
 { op: "input", id?: string, value: Value }
 
-// Heartbeat.
+// Heartbeat. Clients should send this periodically while idle so transport
+// failures are detected promptly; active attached sessions do not time out
+// solely because no calls are being made.
 { op: "ping" }
 ```
 
@@ -54,7 +56,8 @@ Reserved for transient hosts (see [browser-host.md](browser-host.md)):
 
 ```ts
 // Session established; the client is bound to this actor.
-{ op: "session", actor: ObjRef }
+// The client stores session and presents it as session:<id> on reconnect.
+{ op: "session", actor: ObjRef, session: string }
 
 // A sequenced call has been applied. Carries the canonical seq and any
 // observations emitted during apply. Replayable: the same frame is reproduced
