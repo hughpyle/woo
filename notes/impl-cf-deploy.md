@@ -91,7 +91,7 @@ Substrate landed (works in-process):
 - Wire ops `direct`/`result`/`event` over WebSocket.
 - Identity three-layer model (actor/session/connection); session table is credential-only, connection state in-memory.
 - Local + GitHub catalog install path; manifests for chat/dubspace/taskspace ship in `catalogs/`. GitHub tap helper lives in `src/server/github-taps.ts` and is wired through `POST /api/tap/install` and `GET /api/taps`. Wizard auth via `wizard:<WOO_INITIAL_WIZARD_TOKEN>`.
-- 94/94 tests pass; typecheck clean (split: main + `tsconfig.worker.json`).
+- 98/98 tests pass; typecheck clean (split: main + `tsconfig.worker.json`).
 
 Phase 0 (toolchain smoke test) — landed:
 
@@ -118,13 +118,38 @@ Phase 2 (Worker entry + DO class) — landed:
 - `tsconfig.worker.json` adds `node` to `types` so the worker tsconfig sees `node:crypto` types.
 - **Live deploy**: `https://woo.hughpyle.workers.dev/`. `WOO_INITIAL_WIZARD_TOKEN` and `WOO_SEED_PHRASE` set via `wrangler secret put`. Smoke-tested end to end: 50 objects bootstrapped (universal classes + chat/dubspace/taskspace local catalogs auto-installed), wizard claim returns `$wiz` session, second claim returns `E_TOKEN_CONSUMED`, describe + REST routing work, `the_chatroom` (parent `$chatroom`) has 17 verbs and 10 properties matching the local manifest. Permission gates (`E_DIRECT_DENIED` for non-`direct_callable` verbs) enforced.
 
+Phase 2.1 (bundled SPA via Workers Assets) — landed:
+
+- `wrangler.toml` `[assets] directory = "./dist", binding = "ASSETS", not_found_handling = "single-page-application"`. Deploy now requires `npm run build` first to populate `dist/` (Vite outputs ~50 KiB gzipped: index.html + assets/index-*.{js,css}).
+- `src/worker/index.ts` routes `/api/*`, `/healthz`, `/ws` to the DO; falls through to `env.ASSETS.fetch(request)` for everything else. 503 `E_NO_ASSETS` if the binding is missing (operator forgot to build).
+- `Env` interface gains optional `ASSETS: Fetcher`.
+- Live verification: `https://woo.hughpyle.workers.dev/` serves the SPA shell; navigating the four tabs (chat / dubspace / taskspace / IDE) renders against the live world.
+
+Phase 2.2 (WebSocket upgrade with hibernation) — landed:
+
+- Pulled forward from Phase 4 because the chat tab opened a WS to `/ws` and saw the connection refused on the Phase 2 deploy.
+- `src/worker/persistent-object-do.ts` `fetch()` handles `GET /ws` with `Upgrade: websocket`: creates a `WebSocketPair`, accepts the server side via `state.acceptWebSocket()` (CF hibernation API), returns the client side in a 101.
+- Per-socket state `{sessionId, actor, socketId}` lives in `ws.serializeAttachment()` so it survives DO hibernation.
+- `webSocketMessage(ws, msg)`: ports the dev-server WS frame dispatch — handles `op: auth, ping, call, direct, input, replay`. Same shape as `dev-server.ts` lines 95–179.
+- `webSocketClose` / `webSocketError`: cleanup detaches from the world's `attachedSockets` registry.
+- Broadcast helpers (`broadcastApplied`, `broadcastTaskResult`, `broadcastLiveEvents`, `broadcastLiveEvent`) iterate `state.getWebSockets()` instead of the in-memory `Map` the local dev-server uses; presence-filtered fan-out for applied frames; directed-to/from filtering for live observations.
+- Live verification: chat works end-to-end. Two browser tabs see each other's `enter`/`leave`/`said`/`emoted` events broadcast correctly.
+
+Verb-flag persistence fix (storage-layer bug, both backends) — landed:
+
+- Both `LocalSQLiteRepository` and `CFObjectRepository` had a pre-existing schema bug: the `verb` table had no `flags` column, so `direct_callable` and `skip_presence_check` were silently dropped on save and reset to undefined on load. Locally invisible because the in-memory state from initial bootstrap survived in the same process; on CF every fresh DO instance re-hydrated from storage and lost the flags, so calls to chat verbs returned `E_DIRECT_DENIED`.
+- Schema gains `flags TEXT NOT NULL DEFAULT '{}'`. `save()` and `saveVerb()` write `verbFlagsJson(verb)`; `verbFromRow` reads the JSON and sets the booleans on the reconstituted `VerbDef`.
+- `ensureColumn` migration adds the column on existing local SQLite databases.
+- CFObjectRepository.migrate() detects "verb table exists without flags column" and drops every table; the next `createWorld()` sees empty storage and runs fresh bootstrap + catalog auto-install. One-time wipe; operator re-claims wizard via the same `WOO_INITIAL_WIZARD_TOKEN` secret. (Local SQLite dev databases keep their data but with empty flags — operator can `rm .woo/dev.sqlite` and restart for a clean re-bootstrap if needed.)
+
 ## Still open
 
 In dependency order:
 
 - **`DirectoryDO`** singleton. Deferred until cross-DO routing exists; v1 collapses corename lookup into the single world DO.
-- **Alarms** for parked tasks. Replaces the 250ms `setInterval` only on the CF target; local dev keeps the poll.
-- **WS hibernation** with attachment shape `{session_id, actor, socket_id}`. The Worker-side `acceptWebSocket` path is unwired; SSE stream `/stream` returns 501 placeholder.
+- **Alarms** for parked tasks. Replaces the 250ms `setInterval` only on the CF target; local dev keeps the poll. (WS hibernation landed in Phase 2.2; alarms are the remaining piece of original Phase 4.)
+- **SSE stream** (`/api/objects/{id}/stream`) on the Worker. Returns 501 placeholder; browser clients use the WebSocket path. SSE matters for HTTP-only agent integrations.
+- **Authoring REST endpoints** in the Worker: `/api/compile`, `/api/install`, `/api/property`. The IDE tab can read object descriptions but cannot author verbs against the deployed world. dev-server has the Node implementations; needs Web-standard ports.
 - **`wiz:rotate_bootstrap_token` verb** on `$system`. Spec'd in §R14.4; impl pending.
 - **Cross-DO RPC layer**: `RemoteHost.rpc(target, method, args)` stub used by `world.dispatch` when target is on a different anchor cluster. Currently `world.ts` assumes single-process; needs an "is target hosted here?" check before dispatch.
 - **Verb-lookup cache** (`ancestor_verb_cache`, `ancestor_prop_cache`). Schema exists in `persistence.md §14.1`; population on cross-DO miss is unimplemented.
