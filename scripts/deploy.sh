@@ -166,9 +166,11 @@ ok "auth: session=$sid"
 # below without hardcoding any catalog name.
 state_body=$(curl -sS --max-time 10 \
   "$WORKER_URL/api/state" -H "authorization: Session $sid")
-echo "$state_body" | head -c 2 | grep -q '{' \
-  || fail "/api/state did not return JSON: $state_body"
-ok "/api/state: 200"
+# Avoid `echo … | head -c 2 | grep` here — pipefail trips when the body is
+# large enough that echo gets SIGPIPE before head closes the pipe.
+[[ "${state_body:0:1}" == "{" ]] \
+  || fail "/api/state did not return JSON: $(printf '%s' "$state_body" | head -c 200)"
+ok "/api/state: 200 ($(printf '%s' "$state_body" | wc -c | tr -d ' ') bytes)"
 
 # universal-class describe via gateway (no catalog assumption)
 wiz_body=$(curl -sS --max-time 10 "$WORKER_URL/api/objects/\$wiz" \
