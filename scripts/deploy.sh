@@ -202,5 +202,38 @@ else
   warn "no non-universal object in /api/state; skipped cluster-route check"
 fi
 
+# WebSocket handshake: upgrade, auth as guest, await op:session, close.
+# Read-only — auth creates a guest session row but mutates nothing else.
+# Catches WS regressions that REST routes happen to bypass (Phase 2.2 class).
+ws_url="${WORKER_URL/https:/wss:}/ws"
+ws_session=$(node --input-type=module -e "
+  import { WebSocket } from 'ws';
+  const ws = new WebSocket('$ws_url');
+  const t = setTimeout(() => { console.error('timeout'); process.exit(1); }, 8000);
+  ws.on('open', () => ws.send(JSON.stringify({ op: 'auth', token: 'guest:postflight' })));
+  ws.on('message', (data) => {
+    try {
+      const f = JSON.parse(String(data));
+      if (f.op === 'session') { clearTimeout(t); console.log(f.session); ws.close(); process.exit(0); }
+      if (f.op === 'error') { clearTimeout(t); console.error('ws error frame: ' + JSON.stringify(f.error)); process.exit(1); }
+    } catch {}
+  });
+  ws.on('error', (err) => { clearTimeout(t); console.error('socket: ' + err.message); process.exit(1); });
+" 2>&1) || fail "ws handshake failed: $ws_session"
+[[ "$ws_session" =~ ^session- ]] || fail "ws handshake unexpected reply: $ws_session"
+ok "ws handshake: session=$ws_session"
+
+# Wizard claim with a decoy token. On a claimed world this returns
+# E_TOKEN_CONSUMED; on a fresh world it returns a token-rejected error.
+# Either way the real WOO_INITIAL_WIZARD_TOKEN is not consumed and the
+# response is 401 — proves the bootstrap-claim path is wired.
+wiz_status=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+  -X POST "$WORKER_URL/api/auth" \
+  -H 'content-type: application/json' \
+  -d '{"token":"wizard:woo-postflight-decoy"}')
+[[ "$wiz_status" == "401" ]] \
+  || fail "wizard decoy claim returned $wiz_status (expected 401; if 200, the real token was consumed!)"
+ok "wizard claim path: 401 (decoy rejected, real token untouched)"
+
 echo
 echo "${GREEN}${BOLD}deploy ok${NC} version=$version_id url=$WORKER_URL"
