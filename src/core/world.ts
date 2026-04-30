@@ -35,6 +35,29 @@ type ResolvedVerb = {
   verb: VerbDef;
 };
 
+type ParsedToken = {
+  value: string;
+  start: number;
+  end: number;
+};
+
+type ObjectMatch = {
+  value: ObjRef;
+  status: "ok" | "failed" | "ambiguous";
+};
+
+type CommandMap = {
+  verb: string;
+  dobj: ObjRef | null;
+  dobjstr: string;
+  prep: string | null;
+  iobj: ObjRef | null;
+  iobjstr: string;
+  args: string[];
+  argstr: string;
+  text: string;
+};
+
 export type CallContext = {
   world: WooWorld;
   space: ObjRef;
@@ -249,8 +272,11 @@ export class WooWorld {
     let current: ObjRef | null = startRef;
     while (current) {
       const obj = this.object(current);
-      const verb = obj.verbs.get(name);
-      if (verb) return { definer: current, verb };
+      const exact = obj.verbs.get(name);
+      if (exact) return { definer: current, verb: exact };
+      for (const verb of obj.verbs.values()) {
+        if (verb.aliases.some((alias) => verbAliasMatches(alias, name))) return { definer: current, verb };
+      }
       current = obj.parent;
     }
     if (!required) return null;
@@ -2160,34 +2186,220 @@ export class WooWorld {
       }) as unknown as WooValue;
     });
     this.nativeHandlers.set("catalog_registry_list", () => this.propOrNull("$catalog_registry", "installed_catalogs"));
-    this.nativeHandlers.set("match_object", (_ctx, args) => {
-      const wanted = assertString(args[0] ?? "").toLowerCase();
-      const location = typeof args[1] === "string" && this.objects.has(args[1]) ? args[1] : null;
-      const candidates = location ? Array.from(this.object(location).contents) : Array.from(this.objects.keys());
-      const matches = candidates.filter((id) => {
-        const obj = this.object(id);
-        const aliases = this.propOrNull(id, "aliases");
-        return obj.name.toLowerCase() === wanted || id.toLowerCase() === wanted || (Array.isArray(aliases) && aliases.some((alias) => String(alias).toLowerCase() === wanted));
-      });
-      if (matches.length === 0) return this.objects.has("$failed_match") ? "$failed_match" : null;
-      if (matches.length > 1) return this.objects.has("$ambiguous_match") ? "$ambiguous_match" : matches[0];
-      return matches[0];
+    this.nativeHandlers.set("match_object", (ctx, args) => {
+      const match = this.matchObjectForActor(assertString(args[0] ?? ""), ctx.actor, typeof args[1] === "string" ? args[1] : ctx.space);
+      return match.value;
     });
     this.nativeHandlers.set("match_verb", (_ctx, args) => {
       const name = assertString(args[0] ?? "");
       const target = assertObj(args[1]);
       try {
-        this.resolveVerb(target, name);
-        return name;
+        const { definer, verb } = this.resolveVerb(target, name);
+        return { name: verb.name, definer, direct_callable: verb.direct_callable === true };
       } catch {
         return this.objects.has("$failed_match") ? "$failed_match" : null;
       }
+    });
+    this.nativeHandlers.set("parse_command", (ctx, args) => this.parseCommandMap(assertString(args[0] ?? ""), ctx.actor, ctx.space) as unknown as WooValue);
+    this.nativeHandlers.set("chat_command_plan", (ctx, args) => this.chatCommandPlan(ctx, assertString(args[0] ?? "")));
+    this.nativeHandlers.set("chat_command", (ctx, args) => {
+      const plan = this.chatCommandPlan(ctx, assertString(args[0] ?? ""));
+      if (!isCommandPlanOk(plan) || plan.route !== "direct") return plan;
+      return this.dispatch(ctx, assertObj(plan.target), assertString(plan.verb), Array.isArray(plan.args) ? plan.args : []);
     });
   }
 
   private chatPresent(room: ObjRef): WooValue[] {
     const present = this.getProp(room, "subscribers");
     return Array.isArray(present) ? [...present] : [];
+  }
+
+  private chatCommandPlan(ctx: CallContext, rawText: string): WooValue {
+    const text = rawText.trim();
+    if (!text) return this.huhPlan(ctx, rawText, "empty command");
+
+    const speech = this.speechPlan(ctx, text);
+    if (speech) return speech;
+
+    const parsed = this.parseCommandMap(text, ctx.actor, ctx.thisObj);
+    const roomMatch = this.tryResolveVerb(ctx.thisObj, parsed.verb);
+    if (!parsed.argstr && roomMatch?.verb.direct_callable === true) {
+      return this.routePlan("direct", ctx.thisObj, roomMatch.verb.name, [], parsed);
+    }
+
+    const tokens = tokenizeCommand(parsed.argstr);
+    const prefix = this.longestObjectPrefix(tokens, ctx.actor, ctx.thisObj);
+    if (prefix) {
+      const resolved = this.tryResolveVerb(prefix.object, parsed.verb);
+      if (!resolved) return this.huhPlan(ctx, text, `${prefix.object} does not understand "${parsed.verb}".`);
+      const rest = tokenPhrase(tokens.slice(prefix.length));
+      return this.routePlan(resolved.verb.direct_callable === true ? "direct" : "sequenced", prefix.object, resolved.verb.name, rest ? [rest] : [], parsed, ctx.thisObj);
+    }
+
+    if (roomMatch?.verb.direct_callable === true) {
+      return this.routePlan("direct", ctx.thisObj, roomMatch.verb.name, parsed.argstr ? [parsed.argstr] : [], parsed);
+    }
+
+    if (!text.startsWith("/")) return this.routePlan("direct", ctx.thisObj, "say", [text], parsed);
+    return this.huhPlan(ctx, text, `I don't see "${parsed.argstr}".`);
+  }
+
+  private speechPlan(ctx: CallContext, text: string): WooValue | null {
+    const room = ctx.thisObj;
+    if (text.startsWith("/me ")) return this.routePlan("direct", room, "emote", [text.slice(4).trim()], this.parseCommandMap(`emote ${text.slice(4).trim()}`, ctx.actor, room));
+    if (text.startsWith(":") && text.length > 1) return this.routePlan("direct", room, "emote", [text.slice(1).trim()], this.parseCommandMap(`emote ${text.slice(1).trim()}`, ctx.actor, room));
+    if (text.startsWith("]") && text.length > 1) return this.routePlan("direct", room, "pose", [text.slice(1).trim()], this.parseCommandMap(`pose ${text.slice(1).trim()}`, ctx.actor, room));
+    if (text.startsWith("|") && text.length > 1) return this.routePlan("direct", room, "quote", [text.slice(1).trim()], this.parseCommandMap(`quote ${text.slice(1).trim()}`, ctx.actor, room));
+    if (text.startsWith("<") && text.length > 1) return this.routePlan("direct", room, "self", [text.slice(1).trim()], this.parseCommandMap(`self ${text.slice(1).trim()}`, ctx.actor, room));
+    if (text.startsWith("\"") && text.length > 1) return this.routePlan("direct", room, "say", [text.slice(1).trim()], this.parseCommandMap(`say ${text.slice(1).trim()}`, ctx.actor, room));
+
+    if (text.startsWith("`") && text.length > 1) {
+      return this.directedSpeechPlan(ctx, text.slice(1).trim(), "say_to") ?? this.huhPlan(ctx, text, "Directed speech needs a recipient and text.");
+    }
+
+    const bracket = /^\[([^\]]+)\]\s*:?\s*(.*)$/.exec(text);
+    if (bracket) {
+      const style = bracket[1].trim();
+      const message = bracket[2].trim();
+      if (!style || !message) return this.huhPlan(ctx, text, "Styled speech needs a style and text.");
+      return this.routePlan("direct", room, "say_as", [style, message], this.parseCommandMap(`say_as ${message}`, ctx.actor, room));
+    }
+
+    const tokens = tokenizeCommand(text);
+    const verb = tokens[0]?.value.toLowerCase();
+    const argstr = tokens.length > 0 ? text.slice(tokens[0].end).trim() : "";
+    if (verb === "say") return argstr ? this.routePlan("direct", room, "say", [argstr], this.parseCommandMap(text, ctx.actor, room)) : this.huhPlan(ctx, text, "Say what?");
+    if (verb === "emote" || verb === "pose") return argstr ? this.routePlan("direct", room, verb, [argstr], this.parseCommandMap(text, ctx.actor, room)) : this.huhPlan(ctx, text, `${verb} needs text.`);
+    if (verb === "tell" || verb === "whisper" || verb === "page" || text.startsWith("/tell ")) {
+      const rest = text.startsWith("/tell ") ? text.slice(6).trim() : argstr;
+      return this.directedSpeechPlan(ctx, rest, "tell") ?? this.huhPlan(ctx, text, "Tell needs a recipient and text.");
+    }
+    if ((verb === "who" || verb === "look") && !argstr) return this.routePlan("direct", room, verb, [], this.parseCommandMap(text, ctx.actor, room));
+    return null;
+  }
+
+  private directedSpeechPlan(ctx: CallContext, rest: string, verb: "say_to" | "tell"): WooValue | null {
+    const tokens = tokenizeCommand(rest);
+    const prefix = this.longestObjectPrefix(tokens, ctx.actor, ctx.thisObj);
+    if (!prefix) return null;
+    const message = tokenPhrase(tokens.slice(prefix.length));
+    if (!message) return null;
+    return this.routePlan("direct", ctx.thisObj, verb, [prefix.object, message], this.parseCommandMap(`${verb} ${rest}`, ctx.actor, ctx.thisObj));
+  }
+
+  private tryResolveVerb(target: ObjRef, verb: string): ResolvedVerb | null {
+    try {
+      return this.resolveVerb(target, verb);
+    } catch {
+      return null;
+    }
+  }
+
+  private routePlan(route: "direct" | "sequenced", target: ObjRef, verb: string, args: WooValue[], cmd: CommandMap, space: ObjRef | null = null): WooValue {
+    return {
+      ok: true,
+      route,
+      space: route === "sequenced" ? space ?? target : null,
+      target,
+      verb,
+      args,
+      cmd: cmd as unknown as WooValue
+    };
+  }
+
+  private huhPlan(ctx: CallContext, text: string, reason: string): WooValue {
+    try {
+      this.dispatch(ctx, ctx.thisObj, "huh", [text, reason]);
+    } catch (err) {
+      if (!isErrorValue(err) || err.code !== "E_VERBNF") throw err;
+      ctx.observe({ type: "huh", actor: ctx.actor, text, reason, ts: Date.now() });
+    }
+    return { ok: false, route: "huh", target: ctx.thisObj, verb: "huh", args: [text, reason], error: reason, text };
+  }
+
+  private parseCommandMap(text: string, actor: ObjRef, location: ObjRef | null): CommandMap {
+    const trimmed = text.trim();
+    if (!trimmed) throw wooError("E_INVARG", "empty command");
+    const tokens = tokenizeCommand(trimmed);
+    const verbToken = tokens[0];
+    if (!verbToken) throw wooError("E_INVARG", "empty command");
+    const argstr = trimmed.slice(verbToken.end).trim();
+    const restTokens = tokens.slice(1);
+    const prepMatch = findPreposition(restTokens);
+    const dobjTokens = prepMatch ? restTokens.slice(0, prepMatch.index) : restTokens;
+    const iobjTokens = prepMatch ? restTokens.slice(prepMatch.index + prepMatch.length) : [];
+    const dobjstr = tokenPhrase(dobjTokens);
+    const iobjstr = tokenPhrase(iobjTokens);
+    const dobjMatch = dobjstr ? this.matchObjectForActor(dobjstr, actor, location) : null;
+    const iobjMatch = iobjstr ? this.matchObjectForActor(iobjstr, actor, location) : null;
+    return {
+      verb: verbToken.value,
+      dobj: dobjMatch?.status === "ok" ? dobjMatch.value : null,
+      dobjstr,
+      prep: prepMatch?.prep ?? null,
+      iobj: iobjMatch?.status === "ok" ? iobjMatch.value : null,
+      iobjstr,
+      args: restTokens.map((token) => token.value),
+      argstr,
+      text: trimmed
+    };
+  }
+
+  private longestObjectPrefix(tokens: ParsedToken[], actor: ObjRef, location: ObjRef | null): { object: ObjRef; end: number; length: number } | null {
+    for (let length = tokens.length; length >= 1; length--) {
+      const phrase = tokenPhrase(tokens.slice(0, length));
+      const match = this.matchObjectForActor(phrase, actor, location);
+      if (match.status === "ok") return { object: match.value, end: tokens[length - 1].end, length };
+    }
+    return null;
+  }
+
+  private matchObjectForActor(name: string, actor: ObjRef, location: ObjRef | null): ObjectMatch {
+    const wanted = name.trim();
+    if (!wanted) return this.matchSentinel("failed");
+    const lower = wanted.toLowerCase();
+    if (lower === "me") return { status: "ok", value: actor };
+    if (lower === "here" && location && this.objects.has(location)) return { status: "ok", value: location };
+    if (this.objects.has(wanted)) return { status: "ok", value: wanted };
+
+    const candidates: ObjRef[] = [];
+    const add = (id: unknown): void => {
+      if (typeof id === "string" && this.objects.has(id) && !candidates.includes(id)) candidates.push(id);
+    };
+    if (location && this.objects.has(location)) {
+      for (const id of this.object(location).contents) add(id);
+      const present = this.propOrNull(location, "subscribers");
+      if (Array.isArray(present)) for (const id of present) add(id);
+    }
+    if (this.objects.has(actor)) for (const id of this.object(actor).contents) add(id);
+
+    const exact: ObjRef[] = [];
+    const alias: ObjRef[] = [];
+    const prefix: ObjRef[] = [];
+    for (const id of candidates) {
+      const obj = this.object(id);
+      const names = [id, obj.name].filter(Boolean).map((item) => String(item).toLowerCase());
+      const aliases = this.propOrNull(id, "aliases");
+      const aliasValues = Array.isArray(aliases) ? aliases.map((item) => String(item).toLowerCase()) : [];
+      if (names.includes(lower)) exact.push(id);
+      else if (aliasValues.includes(lower)) alias.push(id);
+      else if (wanted.length >= 2 && [...names, ...aliasValues].some((item) => item.startsWith(lower))) prefix.push(id);
+    }
+    return this.resolveObjectMatch(exact.length > 0 ? exact : alias.length > 0 ? alias : prefix);
+  }
+
+  private resolveObjectMatch(matches: ObjRef[]): ObjectMatch {
+    const unique = Array.from(new Set(matches));
+    if (unique.length === 1) return { status: "ok", value: unique[0] };
+    if (unique.length > 1) return this.matchSentinel("ambiguous");
+    return this.matchSentinel("failed");
+  }
+
+  private matchSentinel(kind: "failed" | "ambiguous"): ObjectMatch {
+    const value = kind === "failed"
+      ? (this.objects.has("$failed_match") ? "$failed_match" : "#-1")
+      : (this.objects.has("$ambiguous_match") ? "$ambiguous_match" : "#-1");
+    return { status: kind, value };
   }
 
   private sweepIdempotency(): void {
@@ -2206,6 +2418,114 @@ export function normalizeError(err: unknown): ErrorValue {
   if (err instanceof SyntaxError) return wooError("E_INVARG", err.message);
   if (err instanceof Error) return wooError("E_INTERNAL", err.message);
   return wooError("E_INTERNAL", "unknown error", String(err));
+}
+
+function isCommandPlanOk(value: WooValue): value is Record<string, WooValue> & { route: "direct"; target: ObjRef; verb: string; args: WooValue[] } {
+  return value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    value.ok === true &&
+    value.route === "direct" &&
+    typeof value.target === "string" &&
+    typeof value.verb === "string" &&
+    Array.isArray(value.args);
+}
+
+function tokenizeCommand(text: string): ParsedToken[] {
+  const tokens: ParsedToken[] = [];
+  let i = 0;
+  while (i < text.length) {
+    while (i < text.length && /\s/.test(text[i])) i += 1;
+    if (i >= text.length) break;
+    const start = i;
+    if (text[i] === "\"") {
+      i += 1;
+      let value = "";
+      while (i < text.length) {
+        const ch = text[i];
+        if (ch === "\\" && i + 1 < text.length) {
+          value += text[i + 1];
+          i += 2;
+          continue;
+        }
+        if (ch === "\"") {
+          i += 1;
+          break;
+        }
+        value += ch;
+        i += 1;
+      }
+      tokens.push({ value, start, end: i });
+      continue;
+    }
+    while (i < text.length && !/\s/.test(text[i])) i += 1;
+    tokens.push({ value: text.slice(start, i), start, end: i });
+  }
+  return tokens;
+}
+
+function tokenPhrase(tokens: ParsedToken[]): string {
+  return tokens.map((token) => token.value).join(" ").trim();
+}
+
+const PREPOSITIONS = [
+  ["in", "front", "of"],
+  ["on", "top", "of"],
+  ["out", "of"],
+  ["off", "of"],
+  ["with"],
+  ["using"],
+  ["at"],
+  ["to"],
+  ["in"],
+  ["inside"],
+  ["into"],
+  ["on"],
+  ["upon"],
+  ["from"],
+  ["over"],
+  ["through"],
+  ["under"],
+  ["underneath"],
+  ["behind"],
+  ["beside"],
+  ["for"],
+  ["about"],
+  ["is"],
+  ["as"],
+  ["off"]
+].sort((a, b) => b.length - a.length);
+
+function findPreposition(tokens: ParsedToken[]): { index: number; length: number; prep: string } | null {
+  for (let i = 0; i < tokens.length; i++) {
+    for (const prep of PREPOSITIONS) {
+      if (i + prep.length > tokens.length) continue;
+      const matches = prep.every((part, offset) => tokens[i + offset].value.toLowerCase() === part);
+      if (matches) return { index: i, length: prep.length, prep: prep.join(" ") === "into" ? "in" : prep.join(" ") };
+    }
+  }
+  return null;
+}
+
+function verbAliasMatches(pattern: string, name: string): boolean {
+  for (const segment of pattern.split("|")) {
+    const trimmed = segment.trim();
+    if (!trimmed) continue;
+    const star = trimmed.indexOf("*");
+    if (star === trimmed.length - 1) {
+      const literal = trimmed.slice(0, -1);
+      if (literal && name.startsWith(literal)) return true;
+      continue;
+    }
+    const abbreviation = star >= 0 ? star : trimmed.indexOf("@");
+    if (abbreviation >= 0) {
+      const literal = trimmed.slice(0, abbreviation) + trimmed.slice(abbreviation + 1);
+      if (literal && literal.startsWith(name) && name.length >= Math.max(1, abbreviation)) return true;
+      continue;
+    }
+    if (trimmed === name) return true;
+  }
+  return false;
 }
 
 function addUnique<T>(items: T[], item: T): T[] {

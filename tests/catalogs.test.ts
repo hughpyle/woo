@@ -1,9 +1,11 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { installVerb } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
 import { installCatalogManifest, type CatalogManifest as RuntimeCatalogManifest } from "../src/core/catalog-installer";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
+import type { VerbDef } from "../src/core/types";
 
 type CatalogManifest = {
   name: string;
@@ -94,6 +96,8 @@ describe("local catalogs", () => {
     expect(world.object("$conversational").verbs.get("say")?.kind).toBe("bytecode");
     expect(world.object("$conversational").verbs.get("enter")?.kind).toBe("bytecode");
     expect(world.object("$conversational").verbs.get("leave")?.kind).toBe("bytecode");
+    expect(world.object("$conversational").verbs.get("command_plan")?.kind).toBe("bytecode");
+    expect(world.object("$match").verbs.get("parse_command")?.kind).toBe("bytecode");
 
     const first = world.auth("guest:catalog-chat-1");
     const second = world.auth("guest:catalog-chat-2");
@@ -255,6 +259,94 @@ describe("local catalogs", () => {
     const wizTitle = world.directCall("wiz-title", session.actor, "$wiz", "title", []);
     expect(wizTitle.op).toBe("result");
     if (wizTitle.op === "result") expect(wizTitle.result).toBe(world.object("$wiz").name);
+  });
+
+  it("plans chat speech and object commands through the room parser", () => {
+    const world = createWorld();
+    const first = world.auth("guest:chat-command-first");
+    const second = world.auth("guest:chat-command-second");
+    expect(world.object("$conversational").verbs.get("command_plan")?.kind).toBe("native");
+    expect(world.object("$match").verbs.get("parse_command")?.kind).toBe("native");
+    world.directCall("enter-first", first.actor, "the_chatroom", "enter", []);
+    world.directCall("enter-second", second.actor, "the_chatroom", "enter", []);
+
+    const emotePlan = world.directCall("plan-emote", first.actor, "the_chatroom", "command_plan", [":waves"]);
+    expect(emotePlan.op).toBe("result");
+    if (emotePlan.op === "result") {
+      expect(emotePlan.result).toMatchObject({ ok: true, route: "direct", target: "the_chatroom", verb: "emote", args: ["waves"] });
+    }
+
+    const tellPlan = world.directCall("plan-tell", first.actor, "the_chatroom", "command_plan", [`tell ${second.actor} psst`]);
+    expect(tellPlan.op).toBe("result");
+    if (tellPlan.op === "result") {
+      expect(tellPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_chatroom", verb: "tell", args: [second.actor, "psst"] });
+    }
+
+    const lookPlan = world.directCall("plan-look-cockatoo", first.actor, "the_chatroom", "command_plan", ["l cock"]);
+    expect(lookPlan.op).toBe("result");
+    if (lookPlan.op === "result") {
+      expect(lookPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_cockatoo", verb: "look", args: [] });
+    }
+
+    const prepPlan = world.directCall("plan-long-prep", first.actor, "the_chatroom", "command_plan", ["look cock in front of me"]);
+    expect(prepPlan.op).toBe("result");
+    if (prepPlan.op === "result") {
+      const cmd = (prepPlan.result as Record<string, any>).cmd as Record<string, any>;
+      expect(cmd).toMatchObject({ dobj: "the_cockatoo", dobjstr: "cock", prep: "in front of", iobj: first.actor, iobjstr: "me" });
+    }
+
+    const squawkPlan = world.directCall("plan-squawk-cockatoo", first.actor, "the_chatroom", "command_plan", ["sq bird"]);
+    expect(squawkPlan.op).toBe("result");
+    if (squawkPlan.op === "result") {
+      expect(squawkPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_cockatoo", verb: "squawk", args: [] });
+    }
+
+    const teachPlan = world.directCall("plan-teach-cockatoo", first.actor, "the_chatroom", "command_plan", ["teach duck \"object worlds\""]);
+    expect(teachPlan.op).toBe("result");
+    if (teachPlan.op === "result") {
+      const plan = teachPlan.result as Record<string, any>;
+      expect(plan).toMatchObject({ ok: true, route: "sequenced", space: "the_chatroom", target: "the_cockatoo", verb: "teach", args: ["object worlds"] });
+      const applied = world.call("teach-cockatoo-command", first.id, String(plan.space), {
+        actor: first.actor,
+        target: String(plan.target),
+        verb: String(plan.verb),
+        args: plan.args
+      });
+      expect(applied.op).toBe("applied");
+      expect((world.getProp("the_cockatoo", "phrases") as string[]).at(-1)).toBe("object worlds");
+    }
+
+    world.addVerb("the_cockatoo", {
+      kind: "native",
+      name: "preen",
+      aliases: ["p*reen"],
+      owner: "$wiz",
+      perms: "rxd",
+      arg_spec: {},
+      source: "verb :preen() rxd { ... }",
+      source_hash: "test-preen",
+      version: 1,
+      line_map: {},
+      native: "describe",
+      direct_callable: true
+    } satisfies VerbDef);
+    const middleStarPlan = world.directCall("plan-middle-star-alias", first.actor, "the_chatroom", "command_plan", ["p bird"]);
+    expect(middleStarPlan.op).toBe("result");
+    if (middleStarPlan.op === "result") {
+      expect(middleStarPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_cockatoo", verb: "preen", args: [] });
+    }
+
+    const override = installVerb(world, "the_chatroom", "huh", `verb :huh(text, reason) rxd {
+  observe({ type: "custom_huh", source: this, actor: actor, text: text, reason: reason, ts: now() });
+  return false;
+}`, null);
+    expect(override.ok).toBe(true);
+    const huh = world.directCall("plan-huh-override", first.actor, "the_chatroom", "command_plan", ["/doesnotexist"]);
+    expect(huh.op).toBe("result");
+    if (huh.op === "result") {
+      expect(huh.result).toMatchObject({ ok: false, route: "huh", target: "the_chatroom", verb: "huh" });
+      expect(huh.observations).toMatchObject([{ type: "custom_huh", source: "the_chatroom", actor: first.actor, text: "/doesnotexist" }]);
+    }
   });
 
   it("migrates the cockatoo into worlds installed before it landed", () => {

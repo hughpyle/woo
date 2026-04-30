@@ -89,6 +89,7 @@ export type InstallCatalogOptions = {
 
 export type RepairCatalogOptions = {
   actor?: ObjRef;
+  allowImplementationHints?: boolean;
 };
 
 export function installCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: InstallCatalogOptions = {}): InstalledCatalogRecord {
@@ -160,6 +161,7 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
 
 export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: RepairCatalogOptions = {}): void {
   const actor = options.actor ?? "$wiz";
+  const allowImplementationHints = options.allowImplementationHints ?? false;
   const existing = installedCatalogs(world);
   const localObjects = new Map<string, ObjRef>();
   const localSeeds = new Map<string, ObjRef>();
@@ -173,7 +175,7 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
     }
     setDescriptionIfEmpty(world, def.local_name, catalogDescription(def.description, def.local_name, manifest.name));
     for (const property of def.properties ?? []) installProperty(world, def.local_name, property, actor);
-    for (const verb of def.verbs ?? []) installVerbDef(world, def.local_name, verb, actor, false, true);
+    for (const verb of def.verbs ?? []) installVerbDef(world, def.local_name, verb, actor, allowImplementationHints, true);
   }
   for (const schema of manifest.schemas ?? []) {
     if (world.objects.has(schema.on)) world.defineEventSchema(schema.on, schema.type, schema.shape);
@@ -222,11 +224,13 @@ function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner
       if (next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
       return;
     }
-    const repaired = compileCatalogVerb(obj, def, owner, existing.version + 1);
+    const repaired = compileCatalogVerbDef(obj, def, owner, existing.version + 1, allowImplementationHints);
     const changed =
-      existing.kind !== "bytecode" ||
+      existing.kind !== repaired.kind ||
+      (existing.kind === "native" && repaired.kind === "native" && existing.native !== repaired.native) ||
       existing.source !== repaired.source ||
       existing.source_hash !== repaired.source_hash ||
+      JSON.stringify(existing.aliases ?? []) !== JSON.stringify(repaired.aliases ?? []) ||
       existing.perms !== repaired.perms ||
       JSON.stringify(existing.arg_spec ?? {}) !== JSON.stringify(repaired.arg_spec ?? {}) ||
       existing.direct_callable !== repaired.direct_callable ||
@@ -236,6 +240,10 @@ function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner
     return;
   }
 
+  world.addVerb(obj, compileCatalogVerbDef(obj, def, owner, 1, allowImplementationHints));
+}
+
+function compileCatalogVerbDef(obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, version: number, allowImplementationHints: boolean): VerbDef {
   const base = {
     name: def.name,
     aliases: def.aliases ?? [],
@@ -244,25 +252,23 @@ function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner
     arg_spec: def.arg_spec ?? {},
     source: def.source,
     source_hash: hashSource(def.source),
-    version: 1,
+    version,
     line_map: {},
     direct_callable: def.direct_callable === true,
     skip_presence_check: def.skip_presence_check === true
   };
 
   if (allowImplementationHints && def.implementation?.kind === "native") {
-    world.addVerb(obj, { ...base, kind: "native", native: def.implementation.handler });
-    return;
+    return { ...base, kind: "native", native: def.implementation.handler };
   }
 
   if (allowImplementationHints && def.implementation?.kind === "fixture") {
     const bytecode = fixtureByName[def.implementation.name] as TinyBytecode | undefined;
     if (!bytecode) throw wooError("E_CATALOG", `unknown fixture implementation: ${def.implementation.name}`);
-    world.addVerb(obj, { ...base, kind: "bytecode", bytecode: { ...bytecode, version: 1 } });
-    return;
+    return { ...base, kind: "bytecode", bytecode: { ...bytecode, version } };
   }
 
-  world.addVerb(obj, compileCatalogVerb(obj, def, owner, 1));
+  return compileCatalogVerb(obj, def, owner, version);
 }
 
 function compileCatalogVerb(obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, version: number): VerbDef {

@@ -13,7 +13,7 @@ This is the demo that retires the question "do feature objects pull their weight
 - Two or more actors connected to a shared room.
 - Free-text input bar; output is a chronological text feed.
 - Presence list visible.
-- `:say`, `:emote`, `:tell` (directed), `:look`, `:who` callable from the input. The first installable slice lowers slash commands client-side; the full `$match:parse_command` pipeline remains the text-command target.
+- MOO-like text input parsed by the room: speech forms (`"hi`, `:waves`, `/tell`, backtick directed speech), room commands (`look`, `who`), and object commands (`look cockatoo`, `teach bird "hello"`).
 - Enter/exit notifications when actors join or leave.
 - A "join taskspace as room" mode where the same chat client renders against `the_taskspace` instead of a standalone `$chatroom`. Same verbs, same observations.
 
@@ -27,9 +27,10 @@ The chat verbs use the **direct live interaction** pattern from [core.md §C13](
 | `:tell` | direct | none — delivered only to recipient |
 | `:look` / `:who` | direct (read) | none |
 | `:enter` / `:leave` | direct | session/presence (persistent state on `$actor.presence_in` and `$space.subscribers`) |
-| `:command` | direct dispatcher | currently lowers to `:say`; full `$match` dispatch is deferred |
+| `:command_plan` | direct parser | none; returns the concrete route/target/verb/args |
+| `:command` | direct dispatcher | compatibility wrapper for direct-only plans |
 
-Because every row routes directly, every observation these verbs emit is live-only by [events.md §12.6](../../spec/semantics/events.md#126-observation-durability-follows-invocation-route): pushed to subscribers, never stored. A late-joining client sees no scrollback. This matches MOO's `notify()` semantics.
+Because the chat verbs route directly, every observation they emit is live-only by [events.md §12.6](../../spec/semantics/events.md#126-observation-durability-follows-invocation-route): pushed to subscribers, never stored. A late-joining client sees no scrollback. This matches MOO's `notify()` semantics. Object commands that mutate state can still route through the room's sequenced log; for example `teach bird "hello"` plans as a `$space:call` against the cockatoo, so the mutation and observation are replay-visible.
 
 **Why direct, not sequenced.** Real-time chat is fire-and-forget; replaying the log to reconstruct utterances would impose a coordinated-write cost on every message. The space's sequenced log remains for state mutations that *do* need replay (a taskspace's `:claim`, `:transition`); chat traffic flows past it.
 
@@ -49,15 +50,20 @@ A feature object (per [features.md](../../spec/semantics/features.md)) carrying 
 | Verb | Args | Purpose |
 |---|---|---|
 | `:say(text)` | str | Public utterance. Emits `said {actor, text}` to subscribers (live; not stored). |
+| `:say_to(recipient, text)` | obj, str | Directed public utterance from backtick syntax. Emits `said_to`. |
+| `:say_as(style, text)` | str, str | Styled public utterance from `[style] text`. Emits `said_as`. |
 | `:emote(text)` | str | Third-person action. Emits `emoted {actor, text}`. |
+| `:pose(text)` / `:quote(text)` / `:self(text)` | str | Small LambdaCore-flavored speech forms for `]`, `|`, and `<`. |
 | `:tell(recipient, text)` | obj, str | Directed message; emits `told {from: actor, to: recipient, text}` to recipient only. |
 | `:look()` rxd | — | Returns `{description, present_actors, contents}`. `contents` lists everything in the room (`location == this`) as `{id, title, description}`, MOO-style — so e.g. `the_cockatoo` shows up to anyone who looks at `the_chatroom` even though it isn't a subscriber. `title` is the result of calling `:title()` on each content item; default `$root:title` returns `name`, but `$cockatoo:title()` overrides to add LambdaCore-style flair (*"the_cockatoo, a sulphur-crested cockatoo perched on the mantelpiece"*). |
 | `:who()` rxd | — | Returns the present-actor list. |
 | `:enter(actor?)` | obj? | Adds actor (defaults `actor`) to subscribers and to its `presence_in`. Emits `entered {actor}`. |
 | `:leave(actor?)` | obj? | Removes presence. Emits `left {actor}`. |
-| `:command(text)` | str | Installable-source fallback: calls `this:say(text)`. The full free-text dispatcher remains the next `$match` milestone. |
+| `:huh(text, reason?)` | str, str? | Emits a parse-failure observation. |
+| `:command_plan(text)` | str | Parses text into `{route, space?, target, verb, args, cmd}`. |
+| `:command(text)` | str | Compatibility wrapper for direct plans; richer clients should call `:command_plan` and then execute the plan. |
 
-The current manifest intentionally keeps `$conversational` source-only: these verbs compile during catalog install without trusted native implementation hints. That is the first platform proof. `$match` is still present as a scaffold, but full command parsing and feature-aware verb matching are deferred until the DSL/runtime exposes the necessary matching primitives.
+Most `$conversational` verbs remain portable source. `$match` and the command planner use trusted local native implementation hints until the DSL grows enough string/pattern primitives to express the parser cleanly as catalog code. Public tap installs ignore those hints and still compile the source fallback.
 
 Inside each verb body: `this` = the consumer space (the room being talked in), `definer` = the `$conversational` feature, `progr` = the feature's owner. Observations are emitted to `this.subscribers`, not to the feature's own subscribers (which would be empty).
 
@@ -67,20 +73,27 @@ Inside each verb body: `this` = the consumer space (the room being talked in), `
 
 ```woo
 declare_event $conversational "said"    { source: obj, actor: obj, text: str };
+declare_event $conversational "said_to" { source: obj, actor: obj, to: obj, text: str };
+declare_event $conversational "said_as" { source: obj, actor: obj, style: str, text: str };
 declare_event $conversational "emoted"  { source: obj, actor: obj, text: str };
+declare_event $conversational "posed"   { source: obj, actor: obj, text: str };
+declare_event $conversational "quoted"  { source: obj, actor: obj, text: str };
+declare_event $conversational "self_pointed" { source: obj, actor: obj, text: str };
 declare_event $conversational "told"    { source: obj, from:  obj, to:   obj, text: str };
 declare_event $conversational "entered" { source: obj, actor: obj };
 declare_event $conversational "left"    { source: obj, actor: obj };
-declare_event $conversational "huh"     { source: obj, actor: obj, text: str, suggestion?: str };
+declare_event $conversational "huh"     { source: obj, actor: obj, text: str, reason?: str };
 ```
 
 | Type | Payload | Notes |
 |---|---|---|
 | `said` | `{source, actor, text}` | Public utterance. |
+| `said_to` / `said_as` | directed/styled speech payloads | Backtick and `[style]` forms. |
 | `emoted` | `{source, actor, text}` | Third-person action. |
+| `posed` / `quoted` / `self_pointed` | `{source, actor, text}` | Alternate speech forms. |
 | `told` | `{source, from, to, text}` | Delivered only to `to`. |
 | `entered` / `left` | `{source, actor}` | Presence transitions. |
-| `huh` | `{source, actor, text, suggestion?}` | Unparseable input. |
+| `huh` | `{source, actor, text, reason?}` | Unparseable input. |
 
 Live observations flow over the wire as `op: "event"` frames ([wire.md §17.2](../../spec/protocol/wire.md#172-server--client)) or as SSE `event: event` entries; clients render them in the same chronological feed as applied frames but they are not part of `:replay` history.
 
@@ -129,39 +142,39 @@ A transient browser host that:
    - `told {from, text}` → `from.name tells you, "text"` (only delivered to recipient)
    - `entered/left` → `actor.name has entered/left.`
    - `huh {text}` → `I don't understand "text".`
-5. Sends free-text input as `target_room:command(text)` calls.
+5. Sends free-text input as `target_room:command_plan(text)`, then executes the returned route. Direct plans use `op:"direct"`; sequenced plans use `$space:call`.
 
 Same client speaks against `$chatroom` and against `$taskspace` — the verb set is identical, the renderer doesn't care.
 
 ## $match interaction
 
-Free-text input goes through `$match:parse_command(text, actor)` per [match.md §MA4](../../spec/semantics/match.md#ma4-command-parsing). `:command` then explicitly **lowers** the parsed `cmd` map into the right argument shape per verb — the parsed map is not the right call signature for `:say`, `:tell`, etc., so the dispatcher unpacks it:
+Free-text input goes through the `$match`-shaped parser per [match.md §MA4](../../spec/semantics/match.md#ma4-command-parsing). `:command_plan` explicitly **lowers** the parsed `cmd` map into the right argument shape per verb — the parsed map is not the right call signature for `:say`, `:tell`, etc., so the dispatcher unpacks it:
 
 ```woo
-verb $conversational:command(text) {
+verb $conversational:command_plan(text) {
   let cmd = $match:parse_command(text, actor);
 
   // Built-in chat verbs: explicit lowering per signature.
   if (cmd.verb == "say") {
-    return this:say(cmd.argstr);
+    return {route: "direct", target: this, verb: "say", args: [cmd.argstr]};
   }
   if (cmd.verb == "emote") {
-    return this:emote(cmd.argstr);
+    return {route: "direct", target: this, verb: "emote", args: [cmd.argstr]};
   }
   if (cmd.verb == "look") {
-    return this:look();
+    return {route: "direct", target: this, verb: "look", args: []};
   }
   if (cmd.verb == "who") {
-    return this:who();
+    return {route: "direct", target: this, verb: "who", args: []};
   }
   if (cmd.verb == "tell") {
     // Grammar: tell <recipient> <message...>
     // dobj resolves the recipient; the message is argstr after the recipient.
     if (cmd.dobj == $failed_match || cmd.dobj == $ambiguous_match) {
-      return emit(actor, {type: "huh", source: this, actor, text});
+      return {route: "huh", text};
     }
     let message = trim_prefix(cmd.argstr, cmd.dobjstr);
-    return this:tell(cmd.dobj, message);
+    return {route: "direct", target: this, verb: "tell", args: [cmd.dobj, message]};
   }
 
   // Fall through: try to dispatch on the direct object using runtime lookup
@@ -169,13 +182,12 @@ verb $conversational:command(text) {
   if (cmd.dobj != $failed_match && cmd.dobj != $ambiguous_match) {
     let v = $match:match_verb(cmd.verb, cmd.dobj);
     if (v != null) {
-      // Pass cmd as the verb's single argument; verbs that take cmd-shaped
-      // input opt into the parser convention by accepting it.
-      return cmd.dobj:(cmd.verb)(cmd);
+      let route = v.direct_callable ? "direct" : "sequenced";
+      return {route, space: this, target: cmd.dobj, verb: v.name, args: lower_args(cmd)};
     }
   }
 
-  emit(actor, {type: "huh", source: this, actor, text});
+  return {route: "huh", text};
 }
 ```
 

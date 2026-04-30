@@ -87,7 +87,7 @@ Pipeline:
 
 1. **Tokenize.** Split `text` on whitespace, respecting quotes (`"hello world"` is one token). Preserve original substrings for `argstr`/`dobjstr`/`iobjstr`.
 2. **Verb extraction.** First token is the verb name.
-3. **Preposition split.** Scan remaining tokens for the first preposition from §MA5. Tokens before it form the direct-object phrase; tokens after form the indirect-object phrase.
+3. **Preposition split.** Scan remaining tokens for the first preposition from §MA5, preferring the longest matching preposition when two entries begin at the same token (`in front of` before `in`). Tokens before it form the direct-object phrase; tokens after form the indirect-object phrase.
 4. **Object resolution.** Run `:match_object(dobjstr, actor.location)` and `:match_object(iobjstr, actor.location)` if present.
 5. **Return** the structured map.
 
@@ -135,6 +135,7 @@ Custom worlds can extend this list by overriding `$match.prepositions` (a list p
 - **Spell correction or fuzzy matching.** Prefix matching is the only forgiveness offered. Worlds that want Damerau-Levenshtein or phonetic matching layer it on top.
 - **Verb suggestion (`:huh`).** When `:match_verb` returns null, the caller can choose to call `room:huh(cmd)` (a convention, not a built-in). LambdaMOO's `:huh` lives on rooms; same here.
 - **Cross-room search.** `:match_object` only walks `location.contents` and `actor.contents`. A world that wants global search adds a verb that walks an index.
+- **Arg-pattern overload selection.** LambdaMOO's `do_command` chooses among same-named verb candidates by matching `(dobj kind, preposition, iobj kind)` against each verb's arg spec. The v0 woo parser resolves by verb name only and lowers to the target verb's current argument shape. Full arg-pattern dispatch is deferred until the object model supports same-name verb candidates and the authoring surface exposes the grammar clearly.
 
 These deferrals keep `$match` small. The pattern is "scaffolding for the 80% case"; the 20% extends it.
 

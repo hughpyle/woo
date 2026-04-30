@@ -10,6 +10,7 @@ const LOCAL_CATALOG_SOURCE_MIGRATION = "2026-04-30-source-catalog-verbs";
 const LOCAL_CATALOG_PLACEMENT_MIGRATION = "2026-04-30-catalog-placement-metadata";
 const LOCAL_CATALOG_CHAT_COCKATOO_MIGRATION = "2026-04-30-chat-cockatoo";
 const LOCAL_CATALOG_CHAT_LOOK_CONTENTS_MIGRATION = "2026-04-30-chat-look-contents";
+const LOCAL_CATALOG_CHAT_COMMAND_PARSER_MIGRATION = "2026-04-30-chat-command-parser";
 
 export const DEFAULT_LOCAL_CATALOGS = bundledCatalogAliases();
 
@@ -67,13 +68,14 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): v
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_PLACEMENT_MIGRATION);
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_COCKATOO_MIGRATION);
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_LOOK_CONTENTS_MIGRATION);
+  runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_COMMAND_PARSER_MIGRATION, { allowImplementationHints: true });
 }
 
-function runLocalCatalogMigration(world: WooWorld, names: readonly string[], id: string): void {
+function runLocalCatalogMigration(world: WooWorld, names: readonly string[], id: string, options: { allowImplementationHints?: boolean } = {}): void {
   if (migrationApplied(world, id)) return;
   for (const name of names) {
     if (!localCatalogInstalled(world, name)) continue;
-    repairCatalogManifest(world, LOCAL_CATALOGS.get(name)!, { actor: "$wiz" });
+    repairCatalogManifest(world, LOCAL_CATALOGS.get(name)!, { actor: "$wiz", allowImplementationHints: options.allowImplementationHints });
   }
   markMigrationApplied(world, id);
 }

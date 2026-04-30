@@ -24,10 +24,12 @@ type AppState = {
 };
 
 type ChatLine = {
-  kind: "said" | "emoted" | "told" | "entered" | "left" | "system" | "error";
+  kind: "said" | "said_to" | "said_as" | "emoted" | "posed" | "quoted" | "self_pointed" | "told" | "entered" | "left" | "huh" | "system" | "error";
   actor?: string;
   from?: string;
   to?: string;
+  style?: string;
+  reason?: string;
   text?: string;
   ts?: number;
 };
@@ -98,6 +100,7 @@ function connect() {
     if (frame.op === "applied") {
       forgetLiveControls(frame.observations ?? []);
       rememberTaskObservations(frame.observations ?? []);
+      for (const observation of frame.observations ?? []) if (isChatObservation(observation)) receiveChatEvent(observation, false);
       state.observations.unshift({ seq: frame.seq, space: frame.space, observations: frame.observations, message: frame.message });
       state.observations = state.observations.slice(0, 30);
       rememberSeq(frame.space, frame.seq);
@@ -788,11 +791,31 @@ function enterChat() {
 }
 
 function isChatObservation(observation: any) {
-  return ["said", "emoted", "told", "entered", "left"].includes(String(observation?.type ?? ""));
+  return [
+    "said",
+    "said_to",
+    "said_as",
+    "emoted",
+    "posed",
+    "quoted",
+    "self_pointed",
+    "told",
+    "entered",
+    "left",
+    "huh",
+    "cockatoo_squawk",
+    "cockatoo_muffled",
+    "cockatoo_taught",
+    "cockatoo_gagged",
+    "cockatoo_ungagged",
+    "cockatoo_fed",
+    "cockatoo_pluck",
+    "cockatoo_shake"
+  ].includes(String(observation?.type ?? ""));
 }
 
-function receiveChatEvent(observation: any) {
-  const kind = String(observation.type) as ChatLine["kind"];
+function receiveChatEvent(observation: any, shouldRender = true) {
+  const kind = chatLineKind(observation);
   if (kind === "entered" && typeof observation.actor === "string" && !state.chatPresent.includes(observation.actor)) {
     state.chatPresent = [...state.chatPresent, observation.actor];
   }
@@ -804,14 +827,33 @@ function receiveChatEvent(observation: any) {
     actor: typeof observation.actor === "string" ? observation.actor : undefined,
     from: typeof observation.from === "string" ? observation.from : undefined,
     to: typeof observation.to === "string" ? observation.to : undefined,
-    text: typeof observation.text === "string" ? observation.text : undefined,
+    style: typeof observation.style === "string" ? observation.style : undefined,
+    reason: typeof observation.reason === "string" ? observation.reason : undefined,
+    text: typeof observation.text === "string" ? observation.text : chatSystemText(observation),
     ts: typeof observation.ts === "number" ? observation.ts : undefined
-  });
+  }, shouldRender);
 }
 
-function pushChatLine(line: ChatLine) {
+function chatLineKind(observation: any): ChatLine["kind"] {
+  const type = String(observation?.type ?? "");
+  if (type === "cockatoo_squawk" || type === "cockatoo_muffled" || type === "cockatoo_taught" || type === "cockatoo_gagged" || type === "cockatoo_ungagged" || type === "cockatoo_fed" || type === "cockatoo_pluck" || type === "cockatoo_shake") return "system";
+  return type as ChatLine["kind"];
+}
+
+function chatSystemText(observation: any): string | undefined {
+  const type = String(observation?.type ?? "");
+  if (type === "cockatoo_taught") return `The cockatoo learned "${String(observation.phrase ?? "")}".`;
+  if (type === "cockatoo_gagged") return "The cockatoo is gagged.";
+  if (type === "cockatoo_ungagged") return "The cockatoo is ungagged.";
+  if (type === "cockatoo_fed") return `The cockatoo eats ${String(observation.food ?? "something")}.`;
+  if (type === "cockatoo_pluck") return "*EEEEEEK!*";
+  if (type === "cockatoo_shake") return `The cockatoo ${String(observation.reaction ?? "reacts")}.`;
+  return undefined;
+}
+
+function pushChatLine(line: ChatLine, shouldRender = true) {
   state.chatFeed = [...state.chatFeed, line].slice(-160);
-  if (state.tab === "chat") render();
+  if (shouldRender && state.tab === "chat") render();
 }
 
 function setChatPresent(result: any) {
@@ -867,11 +909,29 @@ function renderChatLine(line: ChatLine) {
   if (line.kind === "said") {
     return `<div class="chat-line said"><span class="chat-time">${escapeHtml(time)}</span><strong>${escapeHtml(actorLabel(line.actor))}</strong><span>${escapeHtml(line.text ?? "")}</span></div>`;
   }
+  if (line.kind === "said_to") {
+    return `<div class="chat-line said"><span class="chat-time">${escapeHtml(time)}</span><strong>${escapeHtml(actorLabel(line.actor))} [to ${escapeHtml(actorLabel(line.to))}]</strong><span>${escapeHtml(line.text ?? "")}</span></div>`;
+  }
+  if (line.kind === "said_as") {
+    return `<div class="chat-line said"><span class="chat-time">${escapeHtml(time)}</span><strong>${escapeHtml(actorLabel(line.actor))} [${escapeHtml(line.style ?? "says")}]</strong><span>${escapeHtml(line.text ?? "")}</span></div>`;
+  }
   if (line.kind === "emoted") {
     return `<div class="chat-line emote"><span class="chat-time">${escapeHtml(time)}</span><span>${escapeHtml(actorLabel(line.actor))} ${escapeHtml(line.text ?? "")}</span></div>`;
   }
+  if (line.kind === "posed") {
+    return `<div class="chat-line emote"><span class="chat-time">${escapeHtml(time)}</span><span>[${escapeHtml(actorLabel(line.actor))} ${escapeHtml(line.text ?? "")}]</span></div>`;
+  }
+  if (line.kind === "quoted") {
+    return `<div class="chat-line said"><span class="chat-time">${escapeHtml(time)}</span><strong>${escapeHtml(actorLabel(line.actor))} |</strong><span>${escapeHtml(line.text ?? "")}</span></div>`;
+  }
+  if (line.kind === "self_pointed") {
+    return `<div class="chat-line emote"><span class="chat-time">${escapeHtml(time)}</span><span>${escapeHtml(actorLabel(line.actor))} &lt;- ${escapeHtml(line.text ?? "")}</span></div>`;
+  }
   if (line.kind === "told") {
     return `<div class="chat-line told"><span class="chat-time">${escapeHtml(time)}</span><strong>${escapeHtml(actorLabel(line.from))} -> ${escapeHtml(actorLabel(line.to))}</strong><span>${escapeHtml(line.text ?? "")}</span></div>`;
+  }
+  if (line.kind === "huh") {
+    return `<div class="chat-line system"><span class="chat-time">${escapeHtml(time)}</span><span>I don't understand "${escapeHtml(line.text ?? "")}".</span></div>`;
   }
   if (line.kind === "entered" || line.kind === "left") {
     return `<div class="chat-line system"><span class="chat-time">${escapeHtml(time)}</span><span>${escapeHtml(actorLabel(line.actor))} ${line.kind === "entered" ? "entered" : "left"}.</span></div>`;
@@ -926,37 +986,46 @@ function focusChatInput() {
 }
 
 function sendChatInput(text: string) {
-  if (text === "/who" || text === "who") {
-    refreshChatWho();
-    return;
-  }
-  if (text === "/look" || text === "look") {
-    refreshChatLook();
-    return;
-  }
-  if (text.startsWith("/me ")) {
-    const room = chatRoom();
-    if (room) direct(room, "emote", [text.slice(4).trim()]);
-    return;
-  }
-  if (text.startsWith(":")) {
-    const room = chatRoom();
-    if (room) direct(room, "emote", [text.slice(1).trim()]);
-    return;
-  }
-  if (text.startsWith("/tell ")) {
-    const rest = text.slice("/tell ".length).trim();
-    const split = rest.indexOf(" ");
-    if (split <= 0) {
-      pushChatLine({ kind: "error", text: "Tell needs a recipient and text." });
-      return;
-    }
-    const room = chatRoom();
-    if (room) direct(room, "tell", [rest.slice(0, split), rest.slice(split + 1).trim()]);
-    return;
-  }
   const room = chatRoom();
-  if (room) direct(room, "say", [text]);
+  if (!room) return;
+  direct(room, "command_plan", [text], (plan) => executeChatPlan(plan, text));
+}
+
+function executeChatPlan(plan: any, originalText: string) {
+  if (!plan || plan.ok !== true) return;
+  const route = String(plan.route ?? "");
+  const target = String(plan.target ?? "");
+  const verb = String(plan.verb ?? "");
+  const args = Array.isArray(plan.args) ? plan.args : [];
+  if (!target || !verb) return;
+  if (route === "sequenced") {
+    const space = String(plan.space ?? chatRoom());
+    if (space) call(space, target, verb, args);
+    return;
+  }
+  if (route === "direct") {
+    direct(target, verb, args, (result) => renderChatCommandResult(plan, result, originalText));
+  }
+}
+
+function renderChatCommandResult(plan: any, result: any, originalText: string) {
+  const verb = String(plan?.verb ?? "");
+  if (verb === "who") {
+    setChatPresent(result);
+    const names = state.chatPresent.map(actorLabel).join(", ") || "nobody";
+    pushChatLine({ kind: "system", text: `Present: ${names}` });
+    return;
+  }
+  if (verb === "look") {
+    renderLookResult(result);
+    return;
+  }
+  if (result === true || result === null || result === undefined) return;
+  if (typeof result === "string" || typeof result === "number" || typeof result === "boolean") {
+    pushChatLine({ kind: "system", text: String(result) });
+    return;
+  }
+  pushChatLine({ kind: "system", text: `${originalText}: ${JSON.stringify(result)}` });
 }
 
 function refreshChatWho() {
@@ -972,18 +1041,22 @@ function refreshChatWho() {
 function refreshChatLook() {
   const room = chatRoom();
   if (!room) return;
-  direct(room, "look", [], (result) => {
-    const present = Array.isArray(result?.present_actors) ? result.present_actors.map(String) : [];
-    state.chatPresent = present;
-    const names = present.map(actorLabel).join(", ") || "nobody";
-    const contents = Array.isArray(result?.contents) ? result.contents : [];
-    const things = contents
-      .map((item: any) => String(item?.title ?? item?.name ?? item?.id ?? ""))
-      .filter(Boolean);
-    const lines = [String(result?.description ?? ""), `Present: ${names}.`];
-    if (things.length > 0) lines.push(`You see ${things.join(", ")}.`);
-    pushChatLine({ kind: "system", text: lines.join(" ") });
-  });
+  direct(room, "look", [], renderLookResult);
+}
+
+function renderLookResult(result: any) {
+  const present = Array.isArray(result?.present_actors) ? result.present_actors.map(String) : [];
+  if (present.length > 0) state.chatPresent = present;
+  const names = present.map(actorLabel).join(", ") || "nobody";
+  const contents = Array.isArray(result?.contents) ? result.contents : [];
+  const things = contents
+    .map((item: any) => String(item?.title ?? item?.name ?? item?.id ?? ""))
+    .filter(Boolean);
+  const lines = [String(result?.description ?? "")];
+  if (Array.isArray(result?.present_actors)) lines.push(`Present: ${names}.`);
+  if (things.length > 0) lines.push(`You see ${things.join(", ")}.`);
+  if (typeof result?.mood === "string") lines.push(`Mood: ${result.mood}.`);
+  pushChatLine({ kind: "system", text: lines.filter(Boolean).join(" ") || JSON.stringify(result) });
 }
 
 function actorLabel(id: string | undefined) {
