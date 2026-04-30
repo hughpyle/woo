@@ -466,7 +466,7 @@ function resolveRestActor(req: http.IncomingMessage, actorValue: unknown, sessio
   if (requested === session.actor) return requested;
   if (world.object(session.actor).flags.wizard) {
     world.object(requested);
-    world.recordWizardAction(session.actor, "impersonate", { actor: requested, via: "REST X-Woo-Impersonate-Actor" });
+    world.recordWizardAction(session.actor, "impersonate", { actor: requested, via: typeof impersonated === "string" ? "REST X-Woo-Impersonate-Actor" : "REST actor field" });
     return requested;
   }
   throw wooError("E_PERM", "actor does not match session actor", { actor: requested, session_actor: session.actor });

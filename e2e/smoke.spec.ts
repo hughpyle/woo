@@ -243,6 +243,24 @@ test("REST runtime API supports auth, calls, properties, and logs", async ({ req
   expect(rootProperty.name).toBe("root_tasks");
   expect(Array.isArray(rootProperty.value)).toBe(true);
 
+  const privateName = `private_rest_${suffix}`;
+  const definePrivate = await request.post("/api/property", {
+    data: {
+      object: "the_taskspace",
+      name: privateName,
+      default: "classified",
+      perms: "w",
+      expected_version: null,
+      type_hint: "str"
+    }
+  });
+  expect(definePrivate.ok()).toBe(true);
+  const privateDescribe = await request.get("/api/objects/the_taskspace", { headers });
+  expect((await privateDescribe.json()).properties).toContain(privateName);
+  const privateRead = await request.get(`/api/objects/the_taskspace/properties/${privateName}`, { headers });
+  expect(privateRead.status()).toBe(403);
+  expect((await privateRead.json()).error.code).toBe("E_PERM");
+
   const denied = await request.post("/api/objects/the_taskspace/calls/create_task", {
     headers,
     data: { args: [`REST denied ${suffix}`, "missing space"] }
@@ -289,6 +307,20 @@ test("REST runtime API supports auth, calls, properties, and logs", async ({ req
   expect(logged.messages).toHaveLength(1);
   expect(logged.messages[0].seq).toBe(frame.seq);
   expect(logged.messages[0].message.verb).toBe("create_task");
+  expect(logged.messages[0].observations[0].type).toBe("task_created");
+
+  const compat = await request.post("/api/objects/the_taskspace/calls/call", {
+    headers,
+    data: {
+      id: `rest-compat-${suffix}`,
+      args: [{ target: "the_taskspace", verb: "create_task", args: [`REST compat ${suffix}`, "created through $space:call route"] }]
+    }
+  });
+  expect(compat.ok()).toBe(true);
+  const compatFrame = await compat.json();
+  expect(compatFrame.op).toBe("applied");
+  expect(compatFrame.space).toBe("the_taskspace");
+  expect(compatFrame.message.verb).toBe("create_task");
 
   const enter = await request.post("/api/objects/the_chatroom/calls/enter", { headers, data: { args: [] } });
   expect(enter.ok()).toBe(true);
@@ -330,6 +362,15 @@ test("REST SSE stream receives sequenced applied frames", async ({ request }) =>
   expect(text).toContain(`id: the_taskspace:${frame.seq}`);
   expect(text).toContain("event: applied");
   expect(text).toContain(`REST SSE ${suffix}`);
+
+  const replay = await fetch(`${baseUrl}/api/objects/the_taskspace/stream`, { headers: { ...headers, "Last-Event-ID": `the_taskspace:${frame.seq - 1}` } });
+  expect(replay.status).toBe(200);
+  expect(replay.body).not.toBeNull();
+  const replayReader = replay.body!.getReader();
+  const replayText = await readSseUntil(replayReader, `id: the_taskspace:${frame.seq}`, 5_000);
+  await replayReader.cancel();
+  expect(replayText).toContain("event: applied");
+  expect(replayText).toContain("task_created");
 });
 
 async function readSseUntil(reader: ReadableStreamDefaultReader<Uint8Array>, pattern: string, timeoutMs: number): Promise<string> {

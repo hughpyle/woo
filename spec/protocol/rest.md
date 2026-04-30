@@ -139,7 +139,7 @@ GET /api/objects/{id-or-name}/log?from=N&limit=M
 returns: { messages: [...], next_seq, has_more }
 ```
 
-If `{id-or-name}` is a `$space`-descended object, returns the message log per [events.md §12.7](../semantics/events.md#127-sequenced-calls-with-gap-recovery). Pagination via `from` (default 1) and `limit` (default 100, max 1000).
+If `{id-or-name}` is a `$space`-descended object, returns the message log per [events.md §12.7](../semantics/events.md#127-sequenced-calls-with-gap-recovery). Each entry carries the accepted message, final outcome, and applied observations so an HTTP/SSE client can reconstruct the same applied frames it would have received live. Pagination via `from` (default 1) and `limit` (default 100, max 1000).
 
 If the target is not a space, returns `404 E_NOTAPPLICABLE`.
 

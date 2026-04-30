@@ -149,12 +149,12 @@ describe.each(backends)("ObjectRepository contract: $name", ({ make }) => {
           })
         ).toThrow();
         expect(repo.loadProperty("space", "temporary")).toBeNull();
-        repo.recordLogOutcome("space", seq, false, [], error);
+        repo.recordLogOutcome("space", seq, false, [{ type: "$error", code: "E_TEST" }], error);
       });
 
       expect(repo.currentSeq("space")).toBe(2);
       const read = repo.readLog("space", 1, 10);
-      expect(read.messages).toMatchObject([{ seq: 1, applied_ok: false, error }]);
+      expect(read.messages).toMatchObject([{ seq: 1, applied_ok: false, observations: [{ type: "$error", code: "E_TEST" }], error }]);
       expect(read.next_seq).toBe(2);
     } finally {
       cleanup();
@@ -185,11 +185,11 @@ describe.each(backends)("ObjectRepository contract: $name", ({ make }) => {
 
       repo.transaction(() => {
         const { seq } = repo.appendLog("space", "$actor", msg("$actor", "space", "finish"));
-        repo.recordLogOutcome("space", seq, true);
+        repo.recordLogOutcome("space", seq, true, [{ type: "finished" }]);
         expect(() => repo.recordLogOutcome("space", seq, false, [], error)).toThrow(/log outcome already recorded/);
       });
 
-      expect(repo.readLog("space", 1, 10).messages).toMatchObject([{ seq: 1, applied_ok: true }]);
+      expect(repo.readLog("space", 1, 10).messages).toMatchObject([{ seq: 1, applied_ok: true, observations: [{ type: "finished" }] }]);
     } finally {
       cleanup();
     }

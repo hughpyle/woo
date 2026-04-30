@@ -287,7 +287,7 @@ export class WooWorld {
   }
 
   describeForActor(objRef: ObjRef, actor: ObjRef): Record<string, WooValue> {
-    const description = this.canReadProperty(actor, objRef, "description") ? this.getProp(objRef, "description") : null;
+    const description = this.propOrNullForActor(actor, objRef, "description");
     return {
       ...this.describe(objRef),
       description
@@ -314,6 +314,14 @@ export class WooWorld {
   canReadProperty(actor: ObjRef, objRef: ObjRef, name: string): boolean {
     const info = this.propertyInfo(objRef, name);
     return Boolean(this.object(actor).flags.wizard) || info.owner === actor || String(info.perms).includes("r");
+  }
+
+  propOrNullForActor(actor: ObjRef, objRef: ObjRef, name: string): WooValue {
+    try {
+      return this.getPropForActor(actor, objRef, name);
+    } catch {
+      return null;
+    }
   }
 
   propOrNull(objRef: ObjRef, name: string): WooValue {
@@ -1008,7 +1016,8 @@ export class WooWorld {
         this.sessions.set(session.id, this.hydrateSession(session, Date.now()));
       }
       for (const [space, entries] of serialized.logs) {
-        this.logs.set(space, cloneValue(entries as unknown as WooValue) as unknown as SpaceLogEntry[]);
+        const hydrated = cloneValue(entries as unknown as WooValue) as unknown as SpaceLogEntry[];
+        this.logs.set(space, hydrated.map((entry) => ({ ...entry, observations: entry.observations ?? [] })));
       }
       this.snapshots = serialized.snapshots ?? [];
       for (const task of serialized.parkedTasks ?? []) {

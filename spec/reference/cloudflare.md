@@ -112,10 +112,11 @@ interface ObjectRepository {
 
   // $sequenced_log surface ---------------------------------------------------
   // Two-step: appendLog inserts a pending row; recordLogOutcome updates it with
-  // applied_ok and (optional) error before the same outer transaction commits.
+  // observations, applied_ok, and (optional) error before the same outer
+  // transaction commits.
   // See §R3.2 below.
   appendLog(space: ObjRef, actor: ObjRef, message: Message): { seq: number; ts: number };
-  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, error?: ErrorValue): void;
+  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, observations?: Observation[], error?: ErrorValue): void;
   readLog(space: ObjRef, from: number, limit: number): LogReadResult;
   currentSeq(space: ObjRef): number;
   saveSpaceSnapshot(snapshot: SpaceSnapshotRecord): void;
@@ -150,7 +151,7 @@ interface ObjectRepository {
 `$space:call` ([space.md §S2](../semantics/space.md#s2-the-call-lifecycle)) allocates a `seq` and inserts the message before its behavior runs (step 3); the behavior's outcome is determined later (step 7 or 8). The repository surfaces this with two operations inside one outer `transaction(fn)`:
 
 1. **`appendLog(space, actor, message)`** — atomic seq allocation + pending message-row insert. Returns `{seq, ts}`. The row has no outcome yet (`applied_ok IS NULL` in SQL terms).
-2. **`recordLogOutcome(space, seq, applied_ok, error?)`** — called after the behavior savepoint completes (success path) or rolls back (failure path), updating the same row with the outcome before the outer transaction commits.
+2. **`recordLogOutcome(space, seq, applied_ok, observations?, error?)`** — called after the behavior savepoint completes (success path) or rolls back (failure path), updating the same row with the replayable observations and outcome before the outer transaction commits.
 
 The pending state is an implementation detail of the still-open transaction. A committed log row always has `applied_ok = true` or `applied_ok = false`; replay never sees a pending row.
 
@@ -165,18 +166,20 @@ With the savepoint model, a host crash before `recordLogOutcome` aborts the whol
 ```
 repo.transaction(() => {
   const { seq, ts } = repo.appendLog(space, actor, message);
+  const observations = [];
   try {
     repo.savepoint(() => {
-      runVerbBody(...);                   // mutations land in this savepoint
+      runVerbBody(..., observations);     // mutations land in this savepoint
     });
-    repo.recordLogOutcome(space, seq, true);
+    repo.recordLogOutcome(space, seq, true, observations);
   } catch (err) {
-    repo.recordLogOutcome(space, seq, false, normalizeError(err));
+    const error = normalizeError(err);
+    repo.recordLogOutcome(space, seq, false, [errorObservation(error)], error);
   }
 });
 ```
 
-`appendLog` is outside the behavior savepoint but inside the outer transaction. A successful behavior releases the savepoint and records `applied_ok = true`. A failed behavior rolls back to the savepoint, preserving the pending log row and `next_seq`, then records `applied_ok = false` with the normalized error. The outer transaction commits the log row and its final outcome in one write boundary.
+`appendLog` is outside the behavior savepoint but inside the outer transaction. A successful behavior releases the savepoint and records `applied_ok = true` plus the resulting observations. A failed behavior rolls back to the savepoint, preserving the pending log row and `next_seq`, then records `applied_ok = false`, the `$error` observation, and the normalized error. The outer transaction commits the log row and its final outcome in one write boundary.
 
 Cross-anchor-cluster mutations (cross-DO RPCs from inside the verb body) are **not** in the rollback scope, per [space.md §S3.4](../semantics/space.md#s3-failure-rules-normative). Verb authors avoid them in sequenced flows; if they must, they accept the torn-state risk.
 

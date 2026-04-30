@@ -41,6 +41,23 @@ describe("woo core", () => {
     expect(description.description).toContain("sound-space");
     expect(description.flags).toEqual({ wizard: false, programmer: false, fertile: false, recyclable: false });
     expect(description.verbs).toContain("set_control");
+    expect(description.schemas).toContain("control_changed");
+  });
+
+  it("enforces property read permissions for actor-facing introspection", () => {
+    const { world, actor } = authedWorld();
+    const name = "private_rest_probe";
+    world.defineProperty("the_taskspace", {
+      name,
+      defaultValue: "secret",
+      owner: "$wiz",
+      perms: "w",
+      typeHint: "str"
+    });
+
+    expect(world.describeForActor("the_taskspace", actor).properties).toContain(name);
+    expect(() => world.getPropForActor(actor, "the_taskspace", name)).toThrow(/cannot read/);
+    expect(world.getPropForActor("$wiz", "the_taskspace", name)).toBe("secret");
   });
 
   it("seeds readable descriptions for every bootstrap object", () => {

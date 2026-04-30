@@ -158,6 +158,7 @@ CREATE TABLE space_message (
   ts          INTEGER NOT NULL,            -- ms epoch when sequenced
   actor       TEXT NOT NULL,               -- objref
   message     TEXT NOT NULL,               -- canonical V2-encoded message map
+  observations TEXT NOT NULL DEFAULT '[]', -- canonical V2-encoded applied observations
   applied_ok  INTEGER,                     -- 1 = success; 0 = rolled back; NULL = in-flight
   error       TEXT,                        -- canonical V2-encoded err if applied_ok = 0
   PRIMARY KEY (space_id, seq)

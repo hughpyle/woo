@@ -398,7 +398,9 @@ export class InMemoryObjectRepository implements ObjectRepository, WorldReposito
       this.meta.set("sessionCounter", String(world.sessionCounter));
       for (const obj of world.objects) this.objects.set(obj.id, cloneSerializedObject(obj));
       for (const session of world.sessions) this.sessions.set(session.id, cloneRepoValue(session));
-      for (const [space, entries] of world.logs) this.logs.set(space, entries.map((entry) => ({ ...cloneRepoValue(entry), applied_ok: entry.applied_ok })));
+      for (const [space, entries] of world.logs) {
+        this.logs.set(space, entries.map((entry) => ({ ...cloneRepoValue(entry), observations: entry.observations ?? [], applied_ok: entry.applied_ok })));
+      }
       this.snapshots = world.snapshots.map((snapshot) => cloneRepoValue(snapshot));
       for (const task of world.parkedTasks) this.tasks.set(task.id, cloneRepoValue(task));
     });
