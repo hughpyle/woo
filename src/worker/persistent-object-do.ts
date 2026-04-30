@@ -30,17 +30,13 @@
 // - Worker-side GitHub tap install (/api/tap/install) — local catalogs
 //   cover the demos; remote-tap install is local-Node only for now.
 
-import type { CatalogManifest } from "../core/catalog-installer";
 import { createWorld } from "../core/bootstrap";
+import { parseAutoInstallCatalogs } from "../core/local-catalogs";
 import type { ObjRef, Session, WooValue } from "../core/types";
 import { wooError } from "../core/types";
 import type { AppliedFrame, DirectResultFrame, ErrorFrame, ErrorValue, LiveEventFrame, Message } from "../core/types";
 import { normalizeError, type ParkedTaskRun } from "../core/world";
 import { CFObjectRepository } from "./cf-repository";
-
-import chatManifest from "../../catalogs/chat/manifest.json";
-import dubspaceManifest from "../../catalogs/dubspace/manifest.json";
-import taskspaceManifest from "../../catalogs/taskspace/manifest.json";
 
 // Re-import WooWorld type. Note `import type` must reach the world module
 // without dragging Node-only deps into the Worker bundle.
@@ -54,12 +50,6 @@ export interface Env {
   WOO_SEED_PHRASE?: string;
   WOO_AUTO_INSTALL_CATALOGS?: string;
 }
-
-const LOCAL_CATALOGS: Record<string, CatalogManifest> = {
-  chat: chatManifest as unknown as CatalogManifest,
-  taskspace: taskspaceManifest as unknown as CatalogManifest,
-  dubspace: dubspaceManifest as unknown as CatalogManifest
-};
 
 const WORLD_HOST = "world";
 
@@ -867,12 +857,6 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
   } catch {
     return {};
   }
-}
-
-function parseAutoInstallCatalogs(value: string | undefined): string[] {
-  if (value === undefined) return ["chat", "taskspace", "dubspace"];
-  if (value.trim() === "") return [];
-  return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 function readMap(value: unknown): Record<string, unknown> {

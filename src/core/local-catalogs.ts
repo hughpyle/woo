@@ -1,21 +1,20 @@
-import chatManifest from "../../catalogs/chat/manifest.json";
-import dubspaceManifest from "../../catalogs/dubspace/manifest.json";
-import taskspaceManifest from "../../catalogs/taskspace/manifest.json";
+import { BUNDLED_CATALOGS } from "../generated/bundled-catalogs";
 import { installCatalogManifest, type CatalogManifest } from "./catalog-installer";
 import { wooError, type Message, type WooValue } from "./types";
 import type { WooWorld } from "./world";
 
-export const DEFAULT_LOCAL_CATALOGS = ["chat", "taskspace", "dubspace"] as const;
-export type LocalCatalogName = (typeof DEFAULT_LOCAL_CATALOGS)[number];
+export type LocalCatalogName = string;
 
-const LOCAL_CATALOGS: Record<LocalCatalogName, CatalogManifest> = {
-  chat: chatManifest as unknown as CatalogManifest,
-  taskspace: taskspaceManifest as unknown as CatalogManifest,
-  dubspace: dubspaceManifest as unknown as CatalogManifest
-};
+const LOCAL_CATALOGS = new Map(BUNDLED_CATALOGS.map((entry) => [entry.manifest.name, entry.manifest] as const));
+
+export const DEFAULT_LOCAL_CATALOGS = bundledCatalogAliases();
+
+export function bundledCatalogAliases(): string[] {
+  return sortCatalogNames(Array.from(LOCAL_CATALOGS.keys()));
+}
 
 export function parseAutoInstallCatalogs(value: string | undefined): string[] {
-  if (value === undefined) return [...DEFAULT_LOCAL_CATALOGS];
+  if (value === undefined) return bundledCatalogAliases();
   if (value.trim() === "") return [];
   return value
     .split(",")
@@ -24,7 +23,7 @@ export function parseAutoInstallCatalogs(value: string | undefined): string[] {
 }
 
 export function installLocalCatalogs(world: WooWorld, names: readonly string[] = DEFAULT_LOCAL_CATALOGS): void {
-  for (const name of names) installLocalCatalog(world, name);
+  for (const name of sortCatalogNames(names)) installLocalCatalog(world, name);
 }
 
 export function installLocalCatalog(world: WooWorld, name: string): void {
@@ -32,7 +31,7 @@ export function installLocalCatalog(world: WooWorld, name: string): void {
   // Boot auto-install is idempotent: the first install is sequenced through
   // $catalog_registry, while later boot passes skip without adding no-op log rows.
   if (localCatalogInstalled(world, name)) return;
-  const manifest = LOCAL_CATALOGS[name];
+  const manifest = LOCAL_CATALOGS.get(name)!;
   const provenance: Record<string, WooValue> = {
     tap: "@local",
     catalog: name,
@@ -58,7 +57,36 @@ export function installLocalCatalog(world: WooWorld, name: string): void {
 }
 
 function isLocalCatalogName(name: string): name is LocalCatalogName {
-  return Object.prototype.hasOwnProperty.call(LOCAL_CATALOGS, name);
+  return LOCAL_CATALOGS.has(name);
+}
+
+function sortCatalogNames(names: readonly string[]): string[] {
+  const selected = new Set(names);
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const sorted: string[] = [];
+
+  const visit = (name: string) => {
+    if (visited.has(name)) return;
+    if (visiting.has(name)) throw new Error(`local catalog dependency cycle at ${name}`);
+    const manifest = LOCAL_CATALOGS.get(name);
+    if (!manifest) throw new Error(`unknown local catalog: ${name}`);
+    visiting.add(name);
+    for (const dependency of manifest.depends ?? []) {
+      const dependencyName = localDependencyName(dependency);
+      if (selected.has(dependencyName)) visit(dependencyName);
+    }
+    visiting.delete(name);
+    visited.add(name);
+    sorted.push(name);
+  };
+
+  for (const name of names) visit(name);
+  return sorted;
+}
+
+function localDependencyName(dependency: string): string {
+  return dependency.startsWith("@local:") ? dependency.slice("@local:".length) : dependency;
 }
 
 function localCatalogInstalled(world: WooWorld, name: string): boolean {

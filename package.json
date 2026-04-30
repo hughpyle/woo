@@ -4,12 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "catalog:index": "node scripts/generate-bundled-catalog-index.mjs",
+    "predev": "npm run catalog:index",
     "dev": "tsx src/server/dev-server.ts",
     "dump:json": "tsx src/server/dump-json.ts",
+    "pretest": "npm run catalog:index",
     "test": "vitest run tests",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
+    "pretypecheck": "npm run catalog:index",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.worker.json",
+    "prebuild": "npm run catalog:index",
     "build": "vite build"
   },
   "dependencies": {

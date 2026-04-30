@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compileVerb, definePropertyVersioned, installVerb } from "../src/core/authoring";
 import { bootstrap, createWorld } from "../src/core/bootstrap";
-import { installLocalCatalogs } from "../src/core/local-catalogs";
+import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
 import type { Message, VerbDef } from "../src/core/types";
 
 function message(actor: string, target: string, verb: string, args: unknown[] = []): Message {
@@ -72,10 +72,11 @@ describe("woo core", () => {
   it("installs first-light demos from local catalog manifests", () => {
     const world = createWorld();
     const installed = world.getProp("$catalog_registry", "installed_catalogs") as Record<string, unknown>[];
-    expect(installed.map((record) => record.alias)).toEqual(["chat", "taskspace", "dubspace"]);
-    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(["install", "install", "install"]);
+    const aliases = bundledCatalogAliases();
+    expect(installed.map((record) => record.alias)).toEqual(aliases);
+    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(aliases.map(() => "install"));
     bootstrap(world);
-    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(["install", "install", "install"]);
+    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(aliases.map(() => "install"));
     expect(world.object("catalog_dubspace").parent).toBe("$catalog");
     expect(world.object("$space").parent).toBe("$sequenced_log");
     expect(world.object("$dubspace").parent).toBe("$space");

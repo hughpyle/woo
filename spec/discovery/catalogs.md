@@ -206,11 +206,14 @@ A deployment's bundled `catalogs/` directory ships with the world's source. The 
 
 Boot-time auto-install is controlled by `WOO_AUTO_INSTALL_CATALOGS` (a comma-separated list, see [reference/cloudflare.md §R14](../reference/cloudflare.md#r14-deploying-your-own-world)):
 
-- `WOO_AUTO_INSTALL_CATALOGS=chat,taskspace,dubspace` — the default for this repository's dev configuration. The v0.5 runtime seeds universal objects, then installs these local catalogs.
+- unset — install every bundled catalog discovered at `<deployment>/catalogs/*/manifest.json`, dependency-sorted using `depends`. A catalog is bundled because it lives in the bundled catalog tap location, not because the runtime recognizes its name, classes, seed objects, UI, or app role.
+- `WOO_AUTO_INSTALL_CATALOGS=chat,taskspace,dubspace` — install only the named local catalogs from the same bundled tap location. This is an operator filter over discovered local catalogs, not a hardcoded application list.
 - `WOO_AUTO_INSTALL_CATALOGS=` (empty) — clean world; operators install what they want.
 - Each entry is a catalog name resolved against `@local:<name>`.
 
 Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the boot-time pass skips it without appending a no-op registry log row. The first successful auto-install of each catalog is sequenced through `$catalog_registry`, so the install history records the mutation rather than every later reboot.
+
+Implementation rule: source code must not contain catalog-specific install policy. Adding, removing, or renaming a bundled catalog is a filesystem/catalog operation: place or remove a manifest directory under `catalogs/`, regenerate the bundled catalog index for non-filesystem deployment targets, and let install ordering follow declared dependencies. Runtime code that branches on demo object names or catalog names is a bug unless it is explicitly part of a temporary demo UI adapter.
 
 ### CT5.5 Manifest shape
 

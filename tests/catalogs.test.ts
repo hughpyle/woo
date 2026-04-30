@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createWorld } from "../src/core/bootstrap";
 import { installCatalogManifest, type CatalogManifest as RuntimeCatalogManifest } from "../src/core/catalog-installer";
+import { bundledCatalogAliases } from "../src/core/local-catalogs";
 
 type CatalogManifest = {
   name: string;
@@ -37,12 +38,14 @@ function readFrontmatter(name: string): Record<string, string> {
 }
 
 describe("local catalogs", () => {
-  it("ships chat, taskspace, and dubspace catalogs", () => {
-    expect(readdirSync(root).filter((name) => existsSync(join(root, name, "manifest.json"))).sort()).toEqual(["chat", "dubspace", "taskspace"]);
+  it("discovers bundled catalogs from manifest locations", () => {
+    const catalogDirs = readdirSync(root).filter((name) => existsSync(join(root, name, "manifest.json"))).sort();
+    const manifestNames = catalogDirs.map((name) => readManifest(name).name).sort();
+    expect([...bundledCatalogAliases()].sort()).toEqual(manifestNames);
   });
 
   it("keeps README frontmatter aligned with manifests", () => {
-    for (const name of ["chat", "dubspace", "taskspace"]) {
+    for (const name of readdirSync(root).filter((entry) => existsSync(join(root, entry, "manifest.json")))) {
       const manifest = readManifest(name);
       const frontmatter = readFrontmatter(name);
       expect(manifest.name).toBe(name);
@@ -54,7 +57,7 @@ describe("local catalogs", () => {
   });
 
   it("keeps each catalog's app design with the catalog", () => {
-    for (const name of ["chat", "dubspace", "taskspace"]) {
+    for (const name of readdirSync(root).filter((entry) => existsSync(join(root, entry, "manifest.json")))) {
       const design = readFileSync(join(root, name, "DESIGN.md"), "utf8");
       expect(design).toMatch(/^# .+ Demo/m);
       expect(readFileSync(join(root, name, "README.md"), "utf8")).toContain("[DESIGN.md](DESIGN.md)");
@@ -80,7 +83,7 @@ describe("local catalogs", () => {
   });
 
   it("declares source for every catalog verb", () => {
-    for (const name of ["chat", "dubspace", "taskspace"]) {
+    for (const name of readdirSync(root).filter((entry) => existsSync(join(root, entry, "manifest.json")))) {
       const manifest = readManifest(name);
       const defs = [...(manifest.classes ?? []), ...(manifest.features ?? [])];
       for (const def of defs) {
