@@ -110,6 +110,8 @@ Now `the_taskspace:say("starting standup")` works. The utterance is a direct cal
 
 What's intentionally not (yet) here: **self-driven timer chatter**. The canonical LambdaMOO cockatoo activated and squawked on a fork loop with a random delay. Woo's runtime supports parked/forked tasks, but the DSL does not yet expose `fork(seconds) { ... }` or a `schedule(seconds, target, verb, args)` builtin. Once it does, the cockatoo will become the first useful demo of woo's parked-task system: install a watchdog verb that schedules itself, with random interval and random phrase pick. Until then, squawking is actor-driven only.
 
+**When the timer lands, gate it on presence.** A cockatoo that schedules a wakeup every N seconds against an empty room would keep the chatroom DO out of CF hibernation indefinitely — DO billing is by active wall time, so a continuously-self-squawking bird in an unattended room is a money-burning bird. Cheap mitigation, also true to the LambdaMOO `@activate` pattern: start the fork loop on `:enter` when subscribers transition from 0 → 1, cancel the next scheduled fork on `:leave` when subscribers go back to 0. That keeps DO wake-ups proportional to *actor presence* rather than wall clock; an empty chatroom hibernates as it would without the cockatoo.
+
 ## Renderer
 
 A transient browser host that:
