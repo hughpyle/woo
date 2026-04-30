@@ -161,10 +161,13 @@ sid=$(echo "$auth_out" | node -e \
 [[ -n "$sid" ]] || fail "auth failed: $auth_out"
 ok "auth: session=$sid"
 
-# /api/state — exercises gateway + cluster aggregate
-state_status=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+# /api/state — exercises gateway + cluster aggregate. Capture the body so
+# we can pick a live non-universal object id for the cluster-route check
+# below without hardcoding any catalog name.
+state_body=$(curl -sS --max-time 10 \
   "$WORKER_URL/api/state" -H "authorization: Session $sid")
-[[ "$state_status" == "200" ]] || fail "/api/state returned $state_status (expected 200)"
+echo "$state_body" | head -c 2 | grep -q '{' \
+  || fail "/api/state did not return JSON: $state_body"
 ok "/api/state: 200"
 
 # universal-class describe via gateway (no catalog assumption)
@@ -174,21 +177,21 @@ echo "$wiz_body" | grep -q '"id":"$wiz"' \
   || fail "describe \$wiz failed: $wiz_body"
 ok "describe \$wiz: ok"
 
-# Cluster routing: pick the first seed instance from any bundled catalog and
-# describe it. If the directory routes it to a non-world host, this exercises
-# the cluster path; if not, it's still a valid gateway round-trip.
+# Cluster routing: discover one non-universal id from /api/state's objects
+# map and describe it. Skips $-prefixed core classes and the actor itself,
+# so it lands on a catalog-installed instance if any are present. No
+# catalog-name literal anywhere in this script (per F050).
 sample_target=$(node -e '
-  const fs = require("node:fs");
-  const path = require("node:path");
-  const root = "catalogs";
-  for (const dir of fs.readdirSync(root).sort()) {
-    const file = path.join(root, dir, "manifest.json");
-    if (!fs.existsSync(file)) continue;
-    const m = JSON.parse(fs.readFileSync(file, "utf8"));
-    const seed = (m.seeds ?? []).find(s => s && s.id);
-    if (seed) { console.log(seed.id); process.exit(0); }
-  }
-' || true)
+  let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    try {
+      const state = JSON.parse(s);
+      const actor = state.actor ?? null;
+      const ids = Object.keys(state.objects ?? {});
+      const pick = ids.find(id => !id.startsWith("$") && id !== actor);
+      if (pick) console.log(pick);
+    } catch {}
+  })
+' <<< "$state_body" || true)
 if [[ -n "$sample_target" ]]; then
   sample_body=$(curl -sS --max-time 10 \
     "$WORKER_URL/api/objects/$sample_target" -H "authorization: Session $sid")
@@ -196,7 +199,7 @@ if [[ -n "$sample_target" ]]; then
     || fail "describe $sample_target failed: $sample_body"
   ok "describe $sample_target: ok (catalog-routed describe round-trip)"
 else
-  warn "no bundled-catalog seed found; skipped cluster-route check"
+  warn "no non-universal object in /api/state; skipped cluster-route check"
 fi
 
 echo
