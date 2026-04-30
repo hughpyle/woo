@@ -235,6 +235,26 @@ describe("local catalogs", () => {
       expect(muffled.result).toBe("*muffled noises*");
       expect(muffled.observations[0]).toMatchObject({ type: "cockatoo_muffled" });
     }
+
+    // :look() composes room contents via :title() — the cockatoo is in
+    // the_chatroom, so a looker sees it without subscribing or knowing the
+    // objref ahead of time. The cockatoo overrides $root:title for flair.
+    const look = world.directCall("look", session.actor, "the_chatroom", "look", []);
+    expect(look.op).toBe("result");
+    if (look.op === "result") {
+      const room = look.result as { contents: Array<{ id: string; title: string; description: string }> };
+      expect(Array.isArray(room.contents)).toBe(true);
+      const cockatooEntry = room.contents.find((item) => item.id === "the_cockatoo");
+      expect(cockatooEntry).toBeDefined();
+      expect(cockatooEntry?.title).toMatch(/sulphur-crested cockatoo perched on the mantelpiece, gagged/);
+      expect(cockatooEntry?.description).toMatch(/sulphur-crested cockatoo/);
+    }
+
+    // $root:title default is the object's name; verify directly on a fresh
+    // object so the override-vs-default distinction is pinned.
+    const wizTitle = world.directCall("wiz-title", session.actor, "$wiz", "title", []);
+    expect(wizTitle.op).toBe("result");
+    if (wizTitle.op === "result") expect(wizTitle.result).toBe(world.object("$wiz").name);
   });
 
   it("migrates the cockatoo into worlds installed before it landed", () => {

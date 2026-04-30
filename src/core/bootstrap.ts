@@ -118,6 +118,7 @@ function seedUniversal(world: WooWorld): void {
   bytecode(world, "$root", "set_value", setValueBytecode, "verb :set_value(value) rx { ... }");
   bytecode(world, "$root", "set_prop", setPropBytecode, "verb :set_prop(name, value) rx { ... }");
   native(world, "$root", "describe", "describe", "verb :describe() rxd { ... }", { directCallable: true });
+  native(world, "$root", "title", "default_title", "verb :title() rxd { return this.name; }", { directCallable: true });
   native(world, "$player", "on_disfunc", "player_on_disfunc", "verb :on_disfunc() rx { ... }");
   native(world, "$player", "moveto", "player_moveto", "verb :moveto(target) rx { ... }");
   native(world, "$guest", "on_disfunc", "guest_on_disfunc", "verb :on_disfunc() rx { ... }");

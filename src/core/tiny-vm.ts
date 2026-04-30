@@ -103,7 +103,7 @@ const DEFAULT_TICKS = 100_000;
 const DEFAULT_MEMORY = 4 * 1024 * 1024;
 const DEFAULT_WALL_MS = 10_000;
 const MAX_VM_FRAMES = 128;
-const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "has_flag", "random"];
+const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "has_flag", "random", "contents"];
 
 export function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): WooValue {
   return runVmFrames([makeFrame(ctx, bytecode, args)]).result;
@@ -790,6 +790,10 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
         const n = numeric(builtinArgs[0], "random argument");
         if (!Number.isInteger(n) || n <= 0) throw wooError("E_INVARG", "random(n) requires a positive integer", builtinArgs[0]);
         return Math.floor(Math.random() * n);
+      }
+      case "contents": {
+        const obj = frame.ctx.world.object(assertObj(builtinArgs[0]));
+        return Array.from(obj.contents);
       }
       default:
         throw wooError("E_INVARG", `unknown builtin: ${name}`);

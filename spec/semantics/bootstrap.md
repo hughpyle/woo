@@ -63,6 +63,7 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | Verb | Returns | Purpose |
 |---|---|---|
 | `:describe()` rxd | map | Introspection (see [introspection.md](introspection.md)). |
+| `:title()` rxd | str | Short identifying phrase for `:look`-style composition; default returns `this.name`. Subclasses override to add flair (e.g. `$cockatoo:title()` decorates with *"a sulphur-crested cockatoo perched on the mantelpiece"*). MOO/LambdaCore convention. |
 | `:on_event(event)` | — | Default observation handler; no-op. |
 
 ### B2.3 `$actor` additional properties
@@ -307,7 +308,7 @@ All direct-callable (rxd). Observations are live-only by route per [chat DESIGN.
 | `:say(text)` | str | Emits `said`. |
 | `:emote(text)` | str | Emits `emoted`. |
 | `:tell(recipient, text)` | obj, str | Emits `told` to `recipient`. |
-| `:look()` | — | Returns `{description, present_actors}` in the current installable chat catalog. Richer room contents are deferred to the full `$match`/room-surface pass. |
+| `:look()` | — | Returns `{description, present_actors, contents}`. `contents` is a list of `{id, title, description}` for every object whose `location` is this space, in MOO `:look` tradition. `title` is the result of calling `:title()` on the contained object so it can decorate itself (e.g. *"a sulphur-crested cockatoo perched on the mantelpiece"*); the default `$root:title` returns the object's `name`. Richer matching/disambiguation is deferred to the full `$match`/room-surface pass. |
 | `:who()` | — | Returns the present-actor list. |
 | `:enter(actor?)` | obj? | Adds presence; emits `entered`. |
 | `:leave(actor?)` | obj? | Removes presence; emits `left`. |

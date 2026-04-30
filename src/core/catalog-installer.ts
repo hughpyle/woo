@@ -134,6 +134,7 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
       world.createObject({ id, name: hook.name ?? id, parent, owner: actor, anchor, location });
       localSeeds.set(hook.as, id);
       setDescriptionIfEmpty(world, id, catalogDescription(hook.description, hook.name ?? id, manifest.name));
+      setNameIfMissing(world, id, hook.name ?? id);
       for (const [name, value] of Object.entries(hook.properties ?? {})) setPropIfMissing(world, id, name, value);
       continue;
     }
@@ -188,6 +189,7 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
       }
       localSeeds.set(hook.as, id);
       setDescriptionIfEmpty(world, id, catalogDescription(hook.description, hook.name ?? id, manifest.name));
+      setNameIfMissing(world, id, hook.name ?? id);
       for (const [name, value] of Object.entries(hook.properties ?? {})) setPropIfMissing(world, id, name, value);
       continue;
     }
@@ -332,6 +334,13 @@ function catalogDescription(description: string | undefined, subject: string, ca
 function setPropIfMissing(world: WooWorld, obj: ObjRef, name: string, value: WooValue): void {
   if (world.object(obj).properties.has(name)) return;
   world.setProp(obj, name, value);
+}
+
+function setNameIfMissing(world: WooWorld, obj: ObjRef, name: string): void {
+  if (!name) return;
+  const existing = world.propOrNull(obj, "name");
+  if (typeof existing === "string" && existing.length > 0) return;
+  world.setProp(obj, "name", name);
 }
 
 function assertDependenciesInstalled(manifest: CatalogManifest, installed: InstalledCatalogRecord[]): void {

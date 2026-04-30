@@ -2106,6 +2106,7 @@ export class WooWorld {
 
   private registerNativeHandlers(): void {
     this.nativeHandlers.set("describe", (ctx) => this.describe(ctx.thisObj));
+    this.nativeHandlers.set("default_title", (ctx) => this.object(ctx.thisObj).name);
     this.nativeHandlers.set("player_on_disfunc", () => true);
     this.nativeHandlers.set("player_moveto", (ctx, args) => {
       const target = assertObj(args[0] ?? "$nowhere");

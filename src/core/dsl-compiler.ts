@@ -132,7 +132,7 @@ const FRAME_GLOBALS = new Map<string, string>([
   ["verb", "PUSH_VERB"]
 ]);
 
-const BUILTINS = new Set(["length", "keys", "values", "has", "typeof", "to_string", "tostr", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "has_flag", "random"]);
+const BUILTINS = new Set(["length", "keys", "values", "has", "typeof", "to_string", "tostr", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "has_flag", "random", "contents"]);
 const RESERVED_NAMES = new Set([...FRAME_GLOBALS.keys(), ...KEYWORDS]);
 
 export function compileWooSource(source: string): CompileResult {

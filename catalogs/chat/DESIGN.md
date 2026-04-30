@@ -51,7 +51,7 @@ A feature object (per [features.md](../../spec/semantics/features.md)) carrying 
 | `:say(text)` | str | Public utterance. Emits `said {actor, text}` to subscribers (live; not stored). |
 | `:emote(text)` | str | Third-person action. Emits `emoted {actor, text}`. |
 | `:tell(recipient, text)` | obj, str | Directed message; emits `told {from: actor, to: recipient, text}` to recipient only. |
-| `:look()` rxd | — | Returns `{description, present_actors}`. |
+| `:look()` rxd | — | Returns `{description, present_actors, contents}`. `contents` lists everything in the room (`location == this`) as `{id, title, description}`, MOO-style — so e.g. `the_cockatoo` shows up to anyone who looks at `the_chatroom` even though it isn't a subscriber. `title` is the result of calling `:title()` on each content item; default `$root:title` returns `name`, but `$cockatoo:title()` overrides to add LambdaCore-style flair (*"the_cockatoo, a sulphur-crested cockatoo perched on the mantelpiece"*). |
 | `:who()` rxd | — | Returns the present-actor list. |
 | `:enter(actor?)` | obj? | Adds actor (defaults `actor`) to subscribers and to its `presence_in`. Emits `entered {actor}`. |
 | `:leave(actor?)` | obj? | Removes presence. Emits `left {actor}`. |
@@ -114,7 +114,7 @@ What's intentionally not (yet) here: **self-driven timer chatter**. The canonica
 
 **Determinism if the wake path is sequenced.** If the scheduled wake fires through `the_chatroom`'s sequenced log so other clients see the same squawk on replay, calling `random()` *inside* the resumed handler breaks replay determinism (per [space.md](../../spec/semantics/space.md)). Capture randomness at *schedule time* — the scheduler picks the next phrase and the next interval and passes both as args/body to the scheduled message — rather than re-rolling on the wake. That mirrors the LambdaMOO `fork` pattern, where the next-scheduled call is itself the value chosen at this tick.
 
-**UI discovery still missing.** The cockatoo is in the room and reachable by objref, but the chat UI doesn't currently surface room contents or available verbs — a browser user won't naturally find `the_cockatoo:squawk()`. Tracked at [LATER.md](../../LATER.md): chat client should render `$conversational:look()`'s `present_actors` plus a separate "things in this room" panel sourced from `room.contents`, with verb-discovery via `:describe()` on selected objects.
+**UI discovery still partial.** As of this build `$conversational:look()` returns the room's contents alongside `present_actors`, so any REST/WS caller doing `look` sees `the_cockatoo`. The chat client doesn't yet *render* that contents list — verb-discovery via `:describe()` on a selected object is still tracked at [LATER.md](../../LATER.md). Wiring the data path was the precondition; the UI change is a follow-up.
 
 ## Renderer
 
