@@ -19,7 +19,7 @@ the design work rather than precede it.
 ## Current Status
 
 Early implementation.  Run locally, backed by in-memory or SQLite persistence.
-Next steps include finishing the [spec/discovery/catalogs.md](plugin catalog),
+Next steps include finishing the (plugin catalog)[spec/discovery/catalogs.md],
 then backing with Cloudflare Durable Objects.
 
 ## Specification
