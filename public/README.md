@@ -1,6 +1,6 @@
-# art/ — brand source assets
+# public/ — brand assets
 
-Source images. Not shipped. Build derivatives into `public/` for the SPA bundle.
+Source images, and derivatives for the SPA bundle.
 
 ## Files
 
@@ -12,7 +12,7 @@ Source images. Not shipped. Build derivatives into `public/` for the SPA bundle.
 ```sh
 # Favicon sizes (head + crest crop, lossless Lanczos resize)
 for sz in 16 32 48 64 96 180; do
-  magick art/head-crop.png -filter Lanczos -resize ${sz}x${sz} \
+  magick public/head-crop.png -filter Lanczos -resize ${sz}x${sz} \
     public/icons/favicon-${sz}.png
 done
 

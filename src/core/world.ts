@@ -65,6 +65,7 @@ export type CallContext = {
   actor: ObjRef;
   player: ObjRef;
   caller: ObjRef;
+  callerPerms: ObjRef;
   progr: ObjRef;
   thisObj: ObjRef;
   verbName: string;
@@ -191,6 +192,17 @@ export class WooWorld {
     if (obj.location) this.persistObject(obj.location);
     this.persist();
     return obj;
+  }
+
+  canAuthorObject(actor: ObjRef, objRef: ObjRef): boolean {
+    const actorObj = this.object(actor);
+    const target = this.object(objRef);
+    return actorObj.flags.wizard === true || (actorObj.flags.programmer === true && target.owner === actor);
+  }
+
+  assertCanAuthorObject(actor: ObjRef, objRef: ObjRef): void {
+    if (this.canAuthorObject(actor, objRef)) return;
+    throw wooError("E_PERM", `${actor} cannot author ${objRef}`, { actor, obj: objRef });
   }
 
   object(id: ObjRef): WooObject {
@@ -707,6 +719,7 @@ export class WooWorld {
           actor,
           player: actor,
           caller: "#-1",
+          callerPerms: actor,
           progr: actor,
           thisObj: target,
           verbName,
@@ -774,6 +787,7 @@ export class WooWorld {
         actor: message.actor,
         player: message.actor,
         caller: "#-1",
+        callerPerms: message.actor,
         progr: message.actor,
         thisObj: message.target,
         verbName: message.verb,
@@ -848,6 +862,7 @@ export class WooWorld {
           actor: message.actor,
           player: message.actor,
           caller: "#-1",
+          callerPerms: message.actor,
           progr: message.actor,
           thisObj: message.target,
           verbName: message.verb,
@@ -915,6 +930,7 @@ export class WooWorld {
         thisObj: target,
         verbName,
         definer,
+        callerPerms: ctx.progr,
         progr: verb.owner,
         player: ctx.player ?? ctx.actor,
         caller: ctx.caller ?? "#-1"
@@ -983,18 +999,71 @@ export class WooWorld {
     return { ...described, props };
   }
 
-  createRuntimeObject(parent: ObjRef, owner: ObjRef, anchor: ObjRef | null = null): ObjRef {
+  createRuntimeObject(parent: ObjRef, owner: ObjRef, anchor: ObjRef | null = null, options: { progr?: ObjRef; location?: ObjRef | null; name?: string } = {}): ObjRef {
     this.object(parent);
     this.object(owner);
     if (anchor) this.object(anchor);
+    const progr = options.progr ?? owner;
+    this.assertCanCreateObject(progr, parent, owner);
+    const location = options.location ?? null;
+    if (location) this.object(location);
     const scope = runtimeObjectScope(anchor ?? parent);
     let id: ObjRef;
     do {
       id = `obj_${scope}_${this.objectCounter++}`;
     } while (this.objects.has(id));
-    this.createObject({ id, parent, owner, anchor });
+    this.createObject({ id, parent, owner, anchor, location, name: options.name });
     this.persistCounters();
     return id;
+  }
+
+  createAuthoredObject(actor: ObjRef, input: { parent: ObjRef; name?: string; description?: string; aliases?: WooValue[]; location?: ObjRef | null }): ObjRef {
+    const parent = assertObj(input.parent);
+    const location = input.location ?? null;
+    if (location) {
+      this.object(location);
+      if (this.isSpaceLike(location) && !this.hasPresence(actor, location) && !this.isWizard(actor)) {
+        throw wooError("E_PERM", `${actor} is not present in ${location}`);
+      }
+    }
+    const anchor = location && this.isSpaceLike(location) ? location : null;
+    const id = this.createRuntimeObject(parent, actor, anchor, { progr: actor, location, name: input.name ?? undefined });
+    this.defineProperty(id, { name: "description", defaultValue: "", owner: actor, perms: "r", typeHint: "str" });
+    this.defineProperty(id, { name: "aliases", defaultValue: [], owner: actor, perms: "r", typeHint: "list<str>" });
+    if (typeof input.description === "string") this.setProp(id, "description", input.description);
+    if (Array.isArray(input.aliases)) this.setProp(id, "aliases", input.aliases);
+    return id;
+  }
+
+  moveAuthoredObject(actor: ObjRef, objRef: ObjRef, targetRef: ObjRef): void {
+    this.assertCanAuthorObject(actor, objRef);
+    this.object(targetRef);
+    this.moveObject(objRef, targetRef);
+  }
+
+  chparentAuthoredObject(actor: ObjRef, objRef: ObjRef, parentRef: ObjRef): void {
+    this.assertCanAuthorObject(actor, objRef);
+    this.assertCanCreateObject(actor, parentRef, actor);
+    if (objRef === parentRef || this.inheritsFrom(parentRef, objRef)) throw wooError("E_RECMOVE", "recursive parent change", { obj: objRef, parent: parentRef });
+    const obj = this.object(objRef);
+    if (obj.parent && this.objects.has(obj.parent)) this.object(obj.parent).children.delete(objRef);
+    obj.parent = parentRef;
+    this.object(parentRef).children.add(objRef);
+    obj.modified = Date.now();
+    this.persistObject(objRef);
+    this.persistObject(parentRef);
+    this.persist();
+  }
+
+  private assertCanCreateObject(progr: ObjRef, parent: ObjRef, owner: ObjRef): void {
+    const progrObj = this.object(progr);
+    const parentObj = this.object(parent);
+    if (progrObj.flags.wizard === true) return;
+    if (owner !== progr) throw wooError("E_PERM", `${progr} cannot create objects owned by ${owner}`, { progr, owner });
+    if (progrObj.flags.programmer !== true) throw wooError("E_PERM", `${progr} does not have programmer authority`, progr);
+    if (parentObj.owner !== progr && parentObj.flags.fertile !== true) {
+      throw wooError("E_PERM", `${progr} cannot create children of ${parent}`, { progr, parent });
+    }
   }
 
   scheduleFork(ctx: CallContext, seconds: number, target: ObjRef, verbName: string, args: WooValue[]): string {
@@ -1593,6 +1662,7 @@ export class WooWorld {
         actor: session.actor,
         player: session.actor,
         caller: "#-1",
+        callerPerms: this.object(session.actor).owner,
         progr: this.object(session.actor).owner,
         thisObj: session.actor,
         verbName: "on_disfunc",
@@ -1720,6 +1790,7 @@ export class WooWorld {
       actor,
       player: actor,
       caller: "#-1",
+      callerPerms: actor,
       progr: actor,
       thisObj: feature,
       verbName: "can_be_attached_by",
@@ -1778,6 +1849,15 @@ export class WooWorld {
     if (obj.anchor && this.inheritsFrom(obj.anchor, "$space")) return obj.anchor;
     if (obj.location && this.inheritsFrom(obj.location, "$space")) return obj.location;
     return null;
+  }
+
+  private isSpaceLike(objRef: ObjRef): boolean {
+    try {
+      this.getProp(objRef, "next_seq");
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private inheritsFrom(objRef: ObjRef, ancestorRef: ObjRef): boolean {
@@ -1867,6 +1947,7 @@ export class WooWorld {
         actor,
         player,
         caller: "#-1",
+        callerPerms: progr,
         progr,
         thisObj: target,
         verbName,
@@ -2107,6 +2188,7 @@ export class WooWorld {
       actor: assertObj(serialized.actor),
       player: assertObj(serialized.player),
       caller: "#-1",
+      callerPerms: typeof serialized.callerPerms === "string" ? serialized.callerPerms : assertObj(serialized.progr),
       progr: assertObj(serialized.progr),
       thisObj: typeof serialized.target === "string" ? serialized.target : space,
       verbName: typeof serialized.verb === "string" ? serialized.verb : "$resume",
@@ -2237,6 +2319,7 @@ export class WooWorld {
   private registerNativeHandlers(): void {
     this.nativeHandlers.set("describe", (ctx) => this.describeForActor(ctx.thisObj, ctx.actor));
     this.nativeHandlers.set("default_title", (ctx) => this.object(ctx.thisObj).name);
+    this.nativeHandlers.set("default_look_self", (ctx) => this.defaultLookSelf(ctx));
     this.nativeHandlers.set("player_on_disfunc", () => true);
     this.nativeHandlers.set("player_moveto", (ctx, args) => {
       if (ctx.thisObj !== ctx.actor && !this.isWizard(ctx.actor)) throw wooError("E_PERM", "players may only move themselves", { actor: ctx.actor, target: ctx.thisObj });
@@ -2307,6 +2390,7 @@ export class WooWorld {
       }
     });
     this.nativeHandlers.set("parse_command", (ctx, args) => this.parseCommandMap(assertString(args[0] ?? ""), ctx.actor, ctx.space) as unknown as WooValue);
+    this.nativeHandlers.set("space_look_self", (ctx) => this.spaceLookSelf(ctx));
     this.nativeHandlers.set("chat_command_plan", (ctx, args) => this.chatCommandPlan(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("chat_command", (ctx, args) => {
       const plan = this.chatCommandPlan(ctx, assertString(args[0] ?? ""));
@@ -2318,6 +2402,42 @@ export class WooWorld {
   private chatPresent(room: ObjRef): WooValue[] {
     const present = this.getProp(room, "subscribers");
     return Array.isArray(present) ? [...present] : [];
+  }
+
+  private defaultLookSelf(ctx: CallContext): WooValue {
+    return {
+      id: ctx.thisObj,
+      title: this.titleForLook(ctx, ctx.caller, ctx.thisObj),
+      description: this.propOrNullForActor(ctx.actor, ctx.thisObj, "description")
+    } as unknown as WooValue;
+  }
+
+  private spaceLookSelf(ctx: CallContext): WooValue {
+    const room = ctx.thisObj;
+    const contents = Array.from(this.object(room).contents).map((item) => ({
+      id: item,
+      title: this.titleForLook(ctx, room, item),
+      description: this.propOrNullForActor(ctx.actor, item, "description")
+    }));
+    return {
+      id: room,
+      title: this.titleForLook(ctx, ctx.caller, room),
+      description: this.propOrNullForActor(ctx.actor, room, "description"),
+      present_actors: this.chatPresent(room),
+      contents
+    } as unknown as WooValue;
+  }
+
+  private titleForLook(ctx: CallContext, room: ObjRef, item: ObjRef): string {
+    try {
+      const value = this.dispatch({ ...ctx, caller: room, progr: ctx.actor }, item, "title", []);
+      if (typeof value !== "string") throw wooError("E_TYPE", `${item}:title() must return a string`, value);
+      return value;
+    } catch (err) {
+      const error = normalizeError(err);
+      if (error.code !== "E_VERBNF") throw err;
+      return this.object(item).name;
+    }
   }
 
   private chatCommandPlan(ctx: CallContext, rawText: string): WooValue {

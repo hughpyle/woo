@@ -374,6 +374,22 @@ describe("local catalogs", () => {
   it("migrates stale local catalog native verbs to source bytecode", () => {
     const world = createWorld();
     world.setProp("$system", "applied_migrations", []);
+    const look = world.object("$conversational").verbs.get("look")!;
+    world.addVerb("$conversational", {
+      kind: "native",
+      name: look.name,
+      aliases: look.aliases,
+      owner: look.owner,
+      perms: look.perms,
+      arg_spec: look.arg_spec,
+      source: look.source,
+      source_hash: look.source_hash,
+      version: look.version + 1,
+      line_map: look.line_map,
+      native: "chat_look",
+      direct_callable: look.direct_callable,
+      skip_presence_check: look.skip_presence_check
+    });
     const enter = world.object("$conversational").verbs.get("enter")!;
     world.addVerb("$conversational", {
       kind: "native",
@@ -410,9 +426,13 @@ describe("local catalogs", () => {
     installLocalCatalogs(world, ["chat", "taskspace"]);
 
     expect(world.object("$conversational").verbs.get("enter")?.kind).toBe("bytecode");
+    const migratedLook = world.object("$conversational").verbs.get("look");
+    expect(migratedLook?.kind).toBe("bytecode");
+    expect(migratedLook?.source).toContain("look_self");
     expect(world.object("$task").verbs.get("add_subtask")?.kind).toBe("bytecode");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-source-catalog-verbs");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-catalog-placement-metadata");
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-room-look-self");
     expect(world.getProp("the_taskspace", "auto_presence")).toBe(true);
     expect(world.getProp("the_taskspace", "host_placement")).toBe("self");
 
@@ -432,6 +452,20 @@ describe("local catalogs", () => {
       args: ["Migrated subtask", ""]
     });
     expect(subtask.op).toBe("applied");
+  });
+
+  it("surfaces :title failures during room look composition", () => {
+    const world = createWorld();
+    const session = world.auth("guest:title-failure");
+    world.directCall("enter", session.actor, "the_chatroom", "enter", []);
+    world.createObject({ id: "bad_title_item", name: "Bad Title", parent: "$thing", owner: "$wiz", location: "the_chatroom" });
+    expect(installVerb(world, "bad_title_item", "title", `verb :title() rxd {
+  raise { code: "E_PERM", message: "title denied" };
+}`, null).ok).toBe(true);
+
+    const look = world.directCall("look-title-failure", session.actor, "the_chatroom", "look", []);
+    expect(look.op).toBe("error");
+    if (look.op === "error") expect(look.error.code).toBe("E_PERM");
   });
 
   it("exposes generic catalog-derived state and object routes", () => {

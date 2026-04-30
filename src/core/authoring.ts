@@ -34,6 +34,17 @@ export function compileVerb(source: string, options: AuthoringOptions = {}): Com
 
 export function installVerb(world: WooWorld, obj: ObjRef, name: string, source: string, expectedVersion: number | null, options: AuthoringOptions = {}): InstallResult {
   const target = world.object(obj);
+  return installVerbWithOwner(world, obj, name, source, expectedVersion, target.owner, options);
+}
+
+export function installVerbAs(world: WooWorld, actor: ObjRef, obj: ObjRef, name: string, source: string, expectedVersion: number | null, options: AuthoringOptions = {}): InstallResult {
+  world.assertCanAuthorObject(actor, obj);
+  return installVerbWithOwner(world, obj, name, source, expectedVersion, actor, options);
+}
+
+function installVerbWithOwner(world: WooWorld, obj: ObjRef, name: string, source: string, expectedVersion: number | null, owner: ObjRef, options: AuthoringOptions = {}): InstallResult {
+  const target = world.object(obj);
+  world.object(owner);
   const current = target.verbs.get(name);
   if ((current?.version ?? null) !== expectedVersion) {
     throw wooError("E_VERSION", "verb version conflict", { expected: expectedVersion, actual: current?.version ?? null });
@@ -48,13 +59,16 @@ export function installVerb(world: WooWorld, obj: ObjRef, name: string, source: 
     };
   }
   const version = (current?.version ?? 0) + 1;
+  const perms = compiled.metadata?.perms ?? current?.perms ?? "rxd";
+  const directCallable = compiled.metadata?.perms ? perms.includes("d") : current?.direct_callable === true;
   world.addVerb(obj, {
     kind: "bytecode",
     name,
     aliases: [],
-    owner: target.owner,
-    perms: compiled.metadata?.perms ?? current?.perms ?? "rxd",
+    owner,
+    perms,
     arg_spec: compiled.metadata?.arg_spec ?? current?.arg_spec ?? {},
+    direct_callable: directCallable,
     source,
     source_hash: compiled.source_hash ?? hashSource(source),
     bytecode: { ...compiled.bytecode, version },
@@ -66,6 +80,16 @@ export function installVerb(world: WooWorld, obj: ObjRef, name: string, source: 
 
 export function definePropertyVersioned(world: WooWorld, obj: ObjRef, name: string, defaultValue: WooValue, perms: string, expectedVersion: number | null, typeHint?: string) {
   const target = world.object(obj);
+  return definePropertyVersionedWithOwner(world, obj, name, defaultValue, perms, expectedVersion, target.owner, typeHint);
+}
+
+export function definePropertyVersionedAs(world: WooWorld, actor: ObjRef, obj: ObjRef, name: string, defaultValue: WooValue, perms: string, expectedVersion: number | null, typeHint?: string) {
+  world.assertCanAuthorObject(actor, obj);
+  return definePropertyVersionedWithOwner(world, obj, name, defaultValue, perms, expectedVersion, actor, typeHint);
+}
+
+function definePropertyVersionedWithOwner(world: WooWorld, obj: ObjRef, name: string, defaultValue: WooValue, perms: string, expectedVersion: number | null, owner: ObjRef, typeHint?: string) {
+  const target = world.object(obj);
   const current = target.propertyDefs.get(name);
   if ((current?.version ?? null) !== expectedVersion) {
     throw wooError("E_VERSION", "property definition version conflict", { expected: expectedVersion, actual: current?.version ?? null });
@@ -74,10 +98,20 @@ export function definePropertyVersioned(world: WooWorld, obj: ObjRef, name: stri
     name,
     defaultValue,
     perms,
-    owner: target.owner,
+    owner,
     typeHint,
     version: (current?.version ?? 0) + 1
   });
+}
+
+export function setPropertyValueVersionedAs(world: WooWorld, actor: ObjRef, obj: ObjRef, name: string, value: WooValue, expectedVersion: number | null = null) {
+  world.assertCanAuthorObject(actor, obj);
+  const current = world.object(obj).propertyVersions.get(name) ?? null;
+  if (expectedVersion !== null && current !== expectedVersion) {
+    throw wooError("E_VERSION", "property value version conflict", { expected: expectedVersion, actual: current });
+  }
+  world.setProp(obj, name, value);
+  return world.propertyInfo(obj, name);
 }
 
 function inferFormat(source: string): "t0-source" | "t0-json-bytecode" {

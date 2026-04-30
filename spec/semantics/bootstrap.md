@@ -35,7 +35,7 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | `$guest` | `$player` | — | Reusable temporary player. Bound to a session at auth time; reset via `:on_disfunc` and returned to the free pool when its session is reaped. See [identity.md §I6.4](identity.md#i64-guest-reset-the-on_disfunc-convention). |
 | `$sequenced_log` | `$root` | — | Append-only sequenced log primitive. Owns the runtime-blessed `:append`/`:read` verbs, atomic seq allocation, and durable log storage. Subclassed by `$space` and other coordination shapes. See [sequenced-log.md](sequenced-log.md). |
 | `$space` | `$sequenced_log` | — | Coordination workhorse. Adds dispatch, subscribers, and applied-frame broadcast on top of the inherited log primitive. The v1 reference subclass for `:call`-shaped sequenced coordination. |
-| `$thing` | `$root` | — | Simple non-actor base class for persistent objects that primarily hold state. Use it when an object should be addressable and programmable but should not itself originate calls. |
+| `$thing` | `$root` | fertile | Simple non-actor base class for persistent objects that primarily hold state. It is fertile so first-light programmers can create ordinary owned objects without a wizard-created personal superclass. Use it when an object should be addressable and programmable but should not itself originate calls. |
 | `$catalog` | `$thing` | — | v1-ops class for installed catalog records. Instances record source provenance, version, alias, owner, and created objects for introspection and uninstall. See [catalogs.md](../discovery/catalogs.md). |
 | `$catalog_registry` | `$space` | own host | v1-ops singleton space that sequences catalog install/update/uninstall operations. Its log is the catalog operations history. See [catalogs.md §CT5](../discovery/catalogs.md#ct5-install). |
 
@@ -64,6 +64,7 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 |---|---|---|
 | `:describe()` rxd | map | Introspection (see [introspection.md](introspection.md)). |
 | `:title()` rxd | str | Short identifying phrase for `:look`-style composition; default returns `this.name`. Subclasses override to add flair (e.g. `$cockatoo:title()` decorates with *"a sulphur-crested cockatoo perched on the mantelpiece"*). MOO/LambdaCore convention. |
+| `:look_self()` rxd | map | Generic object view. Default returns the object's `:title()` and actor-readable `description`. MOO/LambdaCore convention adapted to structured return values. |
 | `:on_event(event)` | — | Default observation handler; no-op. |
 
 ### B2.3 `$actor` additional properties
@@ -130,6 +131,7 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | Verb | Args | Purpose |
 |---|---|---|
 | `:call(message)` | message | Sequenced dispatch (space.md §S2). |
+| `:look_self()` rxd | — | Generic room/space view: own title and actor-readable description, present actors, and visible contents summarized via each item's `:title()` and actor-readable `description`. `:title()` errors propagate; they are not silently replaced with object names. |
 | `:replay(from_seq, limit)` rxd | int, int | Subclass alias for inherited `:read`. |
 | `:snapshot()` | — | Capture materialized state. Wizard or programmer-only. |
 | `:subscribe(actor)` | obj | Add to subscribers. |
@@ -308,7 +310,7 @@ All direct-callable (rxd). Observations are live-only by route per [chat DESIGN.
 | `:say(text)` | str | Emits `said`. |
 | `:emote(text)` | str | Emits `emoted`. |
 | `:tell(recipient, text)` | obj, str | Emits `told` to `recipient`. |
-| `:look()` | — | Returns `{description, present_actors, contents}`. `contents` is a list of `{id, title, description}` for every object whose `location` is this space, in MOO `:look` tradition. `title` is the result of calling `:title()` on the contained object so it can decorate itself (e.g. *"a sulphur-crested cockatoo perched on the mantelpiece"*); the default `$root:title` returns the object's `name`. Richer matching/disambiguation is deferred to the full `$match`/room-surface pass. |
+| `:look()` | — | Thin chat command wrapper over `this:look_self()`. The generic composition lives on `$space:look_self`, not in the chat feature. |
 | `:who()` | — | Returns the present-actor list. |
 | `:enter(actor?)` | obj? | Adds presence; emits `entered`. |
 | `:leave(actor?)` | obj? | Removes presence; emits `left`. |

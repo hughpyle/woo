@@ -49,6 +49,10 @@ a direct/off-space call, the anchor is null unless a later profile adds an
 explicit placement argument. It costs 50 ticks per call (host instantiation is
 not free).
 
+Creation is permissioned. A wizard may create for any owner. A non-wizard
+creator must be a programmer, must create objects owned by itself, and may use a
+parent only if that parent is owned by the creator or marked `fertile`.
+
 Full v1 `create()` is subject to a per-task creation budget (default 100 per
 verb invocation, raises `E_QUOTA`) and the per-owner storage quotas in
 [permissions.md §11.7](permissions.md#117-storage-quotas-and-accounting). The
@@ -56,6 +60,12 @@ owner's `created` list (a property convention on `$root_object`) is appended
 automatically; ops can iterate it for per-owner inventory. The v0.5
 implementation enforces the parent/owner/anchor/tick-cost semantics; quota
 accounting and the `created` list are still pending.
+
+`move(obj, new_location)` and `chparent(obj, new_parent)` are ordinary behavior
+primitives but use the same authoring authority as direct IDE lifecycle
+operations: wizard, or programmer editing an object it owns. `chparent` also
+requires that the new parent be owned by the programmer or `fertile`, and rejects
+cycles with `E_RECMOVE`.
 
 `has_flag(obj, name)` returns whether an object metadata flag is true. It is for
 ordinary behavior checks such as wizard bypasses; it is not a substitute for the
@@ -65,8 +75,13 @@ There is intentionally no "list all objects in the world" builtin. Instance enum
 
 ### 19.5 Task / scheduling
 
-`task_id()`, `task_perms()`, `kill_task(id)`, `tasks(player)`,  
-`set_task_local(key, val)`, `get_task_local(key)`.
+`task_id()`, `task_perms()`, `caller_perms()`, `set_task_perms(actor)`,  
+`kill_task(id)`, `tasks(player)`, `set_task_local(key, val)`, `get_task_local(key)`.
+
+`task_perms()` returns the current effective `progr` for permission checks.
+`caller_perms()` returns the caller frame's effective principal. A wizard frame
+may call `set_task_perms(actor)` to drop authority before executing
+caller-controlled work; non-wizard frames cannot use it to escalate.
 
 `tasks(player)` is local to that player's DO. There is no global `queued_tasks()` — by the same principle as object enumeration, tasks aren't enumerable at world scale.
 

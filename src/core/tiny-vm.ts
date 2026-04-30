@@ -41,6 +41,7 @@ export type SerializedVmContext = {
   actor: ObjRef;
   player: ObjRef;
   caller: ObjRef;
+  callerPerms: ObjRef;
   progr: ObjRef;
   thisObj: ObjRef;
   verbName: string;
@@ -103,7 +104,7 @@ const DEFAULT_TICKS = 100_000;
 const DEFAULT_MEMORY = 4 * 1024 * 1024;
 const DEFAULT_WALL_MS = 10_000;
 const MAX_VM_FRAMES = 128;
-const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "has_flag", "random", "contents"];
+const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "move", "chparent", "has_flag", "random", "contents", "task_perms", "caller_perms", "set_task_perms"];
 
 export function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): WooValue {
   return runVmFrames([makeFrame(ctx, bytecode, args)]).result;
@@ -203,10 +204,11 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
       definer,
       progr: verb.owner,
       player: caller.ctx.player ?? caller.ctx.actor,
-      caller: caller.ctx.thisObj
+      caller: caller.ctx.thisObj,
+      callerPerms: caller.ctx.progr
     };
     if (verb.kind === "native") {
-      const value = caller.ctx.world.dispatch({ ...caller.ctx, caller: caller.ctx.thisObj }, obj, name, callArgs, startAt);
+      const value = caller.ctx.world.dispatch({ ...caller.ctx, caller: caller.ctx.thisObj, callerPerms: caller.ctx.progr }, obj, name, callArgs, startAt);
       push(value);
       return;
     }
@@ -771,7 +773,17 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
         const parent = assertObj(builtinArgs[0]);
         const owner = builtinArgs[1] === undefined || builtinArgs[1] === null ? frame.ctx.actor : assertObj(builtinArgs[1]);
         const anchor = frame.ctx.space === "#-1" ? null : frame.ctx.space;
-        return frame.ctx.world.createRuntimeObject(parent, owner, anchor);
+        return frame.ctx.world.createRuntimeObject(parent, owner, anchor, { progr: frame.ctx.progr });
+      }
+      case "move": {
+        if (builtinArgs.length !== 2) throw wooError("E_INVARG", "move expects object and destination");
+        frame.ctx.world.moveAuthoredObject(frame.ctx.progr, assertObj(builtinArgs[0]), assertObj(builtinArgs[1]));
+        return true;
+      }
+      case "chparent": {
+        if (builtinArgs.length !== 2) throw wooError("E_INVARG", "chparent expects object and new parent");
+        frame.ctx.world.chparentAuthoredObject(frame.ctx.progr, assertObj(builtinArgs[0]), assertObj(builtinArgs[1]));
+        return true;
       }
       case "has_flag": {
         const obj = frame.ctx.world.object(assertObj(builtinArgs[0]));
@@ -786,6 +798,22 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
       case "contents": {
         const obj = frame.ctx.world.object(assertObj(builtinArgs[0]));
         return Array.from(obj.contents);
+      }
+      case "task_perms":
+        if (builtinArgs.length !== 0) throw wooError("E_INVARG", "task_perms expects no arguments");
+        return frame.ctx.progr;
+      case "caller_perms":
+        if (builtinArgs.length !== 0) throw wooError("E_INVARG", "caller_perms expects no arguments");
+        return frame.ctx.callerPerms;
+      case "set_task_perms": {
+        if (builtinArgs.length !== 1) throw wooError("E_INVARG", "set_task_perms expects one actor");
+        const next = assertObj(builtinArgs[0]);
+        frame.ctx.world.object(next);
+        if (next !== frame.ctx.progr && !frame.ctx.world.object(frame.ctx.progr).flags.wizard) {
+          throw wooError("E_PERM", `${frame.ctx.progr} cannot set task perms to ${next}`, { progr: frame.ctx.progr, next });
+        }
+        frame.ctx.progr = next;
+        return next;
       }
       default:
         throw wooError("E_INVARG", `unknown builtin: ${name}`);
@@ -826,6 +854,7 @@ function serializeVmFrame(frame: VmFrame): SerializedVmFrame {
       actor: frame.ctx.actor,
       player: frame.ctx.player,
       caller: frame.ctx.caller,
+      callerPerms: frame.ctx.callerPerms,
       progr: frame.ctx.progr,
       thisObj: frame.ctx.thisObj,
       verbName: frame.ctx.verbName,
@@ -854,6 +883,7 @@ function hydrateVmFrame(world: CallContext["world"], frame: SerializedVmFrame, o
     actor: frame.ctx.actor,
     player: frame.ctx.player,
     caller: frame.ctx.caller,
+    callerPerms: frame.ctx.callerPerms ?? frame.ctx.progr,
     progr: frame.ctx.progr,
     thisObj: frame.ctx.thisObj,
     verbName: frame.ctx.verbName,

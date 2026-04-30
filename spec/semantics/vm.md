@@ -53,7 +53,7 @@ Verb-body source code reads these as bare names (the compiler resolves them to o
 | `definer` | current frame | no | The object on which this verb was defined (the ancestor where lookup matched). `pass()` resolves the next verb up from `definer`, not `this`. |
 | `args` | current frame | no | The argument list passed to the verb. |
 
-**Authority and audit.** `progr` is for "is this code allowed to do X" (compile-time authority). `actor` is for "who is calling right now" (runtime principal). Workflow gates ([operations/workflows.md §WF4](../operations/workflows.md#wf4-roles-and-gating)) use `actor`; permission flags on verbs and properties use `progr`. The two answer different questions and must not be conflated.
+**Authority and audit.** `progr` is for "is this code allowed to do X" (compile-time authority). `actor` is for "who is calling right now" (runtime principal). Workflow gates ([operations/workflows.md §WF4](../operations/workflows.md#wf4-roles-and-gating)) use `actor`; permission flags on verbs and properties use `progr`. The two answer different questions and must not be conflated. `task_perms()`, `caller_perms()`, and `set_task_perms(actor)` expose the MOO-style authority-drop surface without adding new globals.
 
 **MOO parser globals not present.** LambdaMOO exposed `dobj`, `dobjstr`, `prepstr`, `iobj`, `iobjstr`, `argstr` from its built-in command parser. woo has no built-in text parser — chat-shaped interfaces build their own (see [match.md](match.md)). These names are reserved but unbound in the v1 VM.
 

@@ -13,13 +13,13 @@ Covers object flags, verb/property perms, the `progr` discipline, the trust boun
 | Flag | Meaning |
 |---|---|
 | `wizard` | Object grants its `progr` activations bypass on perm checks. |
-| `programmer` | Object's owner can author/edit verbs and properties (subject to per-verb/prop perms). |
+| `programmer` | Actor may author/edit verbs and properties on objects it owns. |
 | `fertile` | Other users can `chparent` to this object. |
 | `recyclable` | Object can be destroyed via `recycle()`. |
 
 ### 11.2 Verb perms
 
-Bits: `r` (source readable to non-owner), `w` (writable by non-owner), `x` (executable as command), `d` (debug — uncaught error aborts task with traceback rather than returning an `err` value).
+Bits: `r` (source readable to non-owner), `w` (writable by non-owner), `x` (executable as command), `d` (direct-callable shorthand). The persisted verb metadata field is `direct_callable`; `rxd` in source is shorthand for `perms: "rx"` plus `direct_callable: true`.
 
 Owner of a verb is the principal under which the verb runs (`progr`). This is set when the verb is created; it is not the caller.
 
@@ -48,8 +48,13 @@ the same permission kernel:
 Public wizard-owned verbs are therefore public capabilities. This is allowed and
 MOO-like, but such verbs must either be deliberately capability-shaped or check
 `actor`/`player` and drop effective permissions before doing caller-controlled
-work. Generic wizard-owned setters on a universal ancestor are not safe public
-capabilities.
+work. `set_task_perms(actor)` is the minimal drop primitive: it changes the
+current task's effective `progr` for subsequent VM operations. `task_perms()`
+returns the current effective principal; `caller_perms()` returns the effective
+principal of the caller frame. Only a wizard-privileged frame may set task
+permissions to a different object; non-wizard frames may only set them to their
+current value. Generic wizard-owned setters on a universal ancestor are not safe
+public capabilities.
 
 ### 11.5 Cross-host trust
 

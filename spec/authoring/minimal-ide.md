@@ -189,6 +189,9 @@ define_property(obj, name, default, perms, expected_version, type_hint?) -> Prop
 set_property_value(obj, name, value, expected_version?) -> PropertyInfo
 set_property_info(obj, name, expected_version, info) -> PropertyInfo
 delete_property(obj, name, expected_version) -> bool
+create_object(parent, name?, description?, aliases?, location?) -> ObjRef
+move_object(obj, location) -> bool
+chparent_object(obj, new_parent) -> bool
 ```
 
 `compile_verb` performs no mutation. It returns bytecode metadata and
@@ -215,6 +218,15 @@ must not already exist." For `set_property_info` and `delete_property`,
 `expected_version` must match the current property definition version. Property
 value writes may also use `expected_version` when the implementation tracks
 per-value versions.
+
+Authoring authority is intentionally narrower than runtime dispatch: wizard, or
+a programmer editing an object it owns. `create_object` creates an object owned
+by the actor; the parent must be owned by the actor or `fertile`. `move_object`
+and `chparent_object` require the same object-authoring authority, and
+`chparent_object` applies the same parent/fertile rule plus cycle rejection.
+Wire endpoints for these live under an authoring surface (for example
+`/api/authoring/objects/create`), not under `/api/objects/:id`, which is
+reserved for ordinary REST object access.
 
 Authoring input formats:
 

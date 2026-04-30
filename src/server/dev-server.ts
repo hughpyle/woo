@@ -2,7 +2,7 @@ import http from "node:http";
 import { parse } from "node:url";
 import { createServer as createViteServer } from "vite";
 import { WebSocket, WebSocketServer } from "ws";
-import { compileVerb, definePropertyVersioned, installVerb } from "../core/authoring";
+import { compileVerb, definePropertyVersionedAs, installVerbAs, setPropertyValueVersionedAs } from "../core/authoring";
 import { createWorld } from "../core/bootstrap";
 import { parseAutoInstallCatalogs } from "../core/local-catalogs";
 import { appliedFromLogEntry, handleRestProtocolRequest, handleWsProtocolFrame, isSpaceLike, parseWsProtocolFrame, type RestProtocolRequest } from "../core/protocol";
@@ -13,13 +13,14 @@ import {
   type DirectResultFrame,
   type LiveEventFrame,
   type ObjRef,
-  type Session
+  type Session,
+  type WooValue
 } from "../core/types";
 import { installGitHubTap } from "./github-taps";
 import { LocalSQLiteRepository } from "./sqlite-repository";
 
-// Local dev server only: HTTP authoring endpoints are intentionally
-// unauthenticated for local poking. Do not deploy as-is.
+// Local dev server only: HTTP authoring endpoints require a session and then
+// defer to the world's object-authoring permission checks.
 const repository = new LocalSQLiteRepository(process.env.WOO_DB ?? ".woo/dev.sqlite");
 const world = createWorld({ repository, catalogs: parseAutoInstallCatalogs(process.env.WOO_AUTO_INSTALL_CATALOGS) });
 type AttachedSocket = { sessionId: string; actor: string; socketId: string };
@@ -60,14 +61,17 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/compile") {
       if (!authoringEnabled()) return json(res, { error: wooError("E_PERM", "authoring endpoints are disabled") }, 403);
+      requireRestSession(req);
       const body = await readJson(req);
       return json(res, compileVerb(String(body.source ?? ""), { format: body.format }));
     }
     if (req.method === "POST" && url.pathname === "/api/install") {
       if (!authoringEnabled()) return json(res, { error: wooError("E_PERM", "authoring endpoints are disabled") }, 403);
+      const session = requireRestSession(req);
       const body = await readJson(req);
-      const result = installVerb(
+      const result = installVerbAs(
         world,
+        session.actor,
         String(body.object),
         String(body.name),
         String(body.source ?? ""),
@@ -78,9 +82,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/property") {
       if (!authoringEnabled()) return json(res, { error: wooError("E_PERM", "authoring endpoints are disabled") }, 403);
+      const session = requireRestSession(req);
       const body = await readJson(req);
-      const result = definePropertyVersioned(
+      const result = definePropertyVersionedAs(
         world,
+        session.actor,
         String(body.object),
         String(body.name),
         body.default ?? null,
@@ -89,6 +95,39 @@ const server = http.createServer(async (req, res) => {
         body.type_hint
       );
       return json(res, result);
+    }
+    if (req.method === "POST" && url.pathname === "/api/property/value") {
+      if (!authoringEnabled()) return json(res, { error: wooError("E_PERM", "authoring endpoints are disabled") }, 403);
+      const session = requireRestSession(req);
+      const body = await readJson(req);
+      return json(res, setPropertyValueVersionedAs(world, session.actor, String(body.object), String(body.name), body.value as WooValue, body.expected_version ?? null));
+    }
+    if (req.method === "POST" && url.pathname === "/api/authoring/objects/create") {
+      if (!authoringEnabled()) return json(res, { error: wooError("E_PERM", "authoring endpoints are disabled") }, 403);
+      const session = requireRestSession(req);
+      const body = await readJson(req);
+      const id = world.createAuthoredObject(session.actor, {
+        parent: String(body.parent ?? "$thing"),
+        name: typeof body.name === "string" ? body.name : undefined,
+        description: typeof body.description === "string" ? body.description : undefined,
+        aliases: Array.isArray(body.aliases) ? body.aliases as WooValue[] : undefined,
+        location: typeof body.location === "string" ? body.location : null
+      });
+      return json(res, { id, object: world.describeForActor(id, session.actor) });
+    }
+    if (req.method === "POST" && url.pathname === "/api/authoring/objects/move") {
+      if (!authoringEnabled()) return json(res, { error: wooError("E_PERM", "authoring endpoints are disabled") }, 403);
+      const session = requireRestSession(req);
+      const body = await readJson(req);
+      world.moveAuthoredObject(session.actor, String(body.object), String(body.location));
+      return json(res, { ok: true, object: world.describeForActor(String(body.object), session.actor) });
+    }
+    if (req.method === "POST" && url.pathname === "/api/authoring/objects/chparent") {
+      if (!authoringEnabled()) return json(res, { error: wooError("E_PERM", "authoring endpoints are disabled") }, 403);
+      const session = requireRestSession(req);
+      const body = await readJson(req);
+      world.chparentAuthoredObject(session.actor, String(body.object), String(body.parent));
+      return json(res, { ok: true, object: world.describeForActor(String(body.object), session.actor) });
     }
   } catch (err) {
     return json(res, { error: normalizeError(err) }, 400);

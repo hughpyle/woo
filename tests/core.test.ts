@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compileVerb, definePropertyVersioned, installVerb } from "../src/core/authoring";
+import { compileVerb, definePropertyVersioned, definePropertyVersionedAs, installVerb, installVerbAs } from "../src/core/authoring";
 import { bootstrap, createWorld, createWorldFromSerialized, nonEmptyHostScopedWorld, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
 import type { Message, TinyBytecode, VerbDef } from "../src/core/types";
@@ -132,6 +132,7 @@ describe("woo core", () => {
           actor,
           player: actor,
           caller: "#-1",
+          callerPerms: actor,
           progr: actor,
           thisObj: "delay_1",
           verbName: "call_sealed",
@@ -169,6 +170,7 @@ describe("woo core", () => {
           actor,
           player: actor,
           caller: "#-1",
+          callerPerms: actor,
           progr: actor,
           thisObj: "no_x_child",
           verbName: "value",
@@ -837,6 +839,99 @@ describe("authoring", () => {
     expect(() => installVerb(world, "delay_1", "set_feedback", source, null)).toThrow();
   });
 
+  it("lets a programmer build an object, install behavior, and keep private state filtered", () => {
+    const world = createWorld();
+    const builder = world.auth("guest:builder");
+    const other = world.auth("guest:other-builder-test");
+    const builderObj = world.object(builder.actor);
+    builderObj.owner = builder.actor;
+    builderObj.flags.programmer = true;
+
+    expect(world.directCall("builder-enter", builder.actor, "the_chatroom", "enter", []).op).toBe("result");
+    expect(world.directCall("other-enter", other.actor, "the_chatroom", "enter", []).op).toBe("result");
+
+    expect(() => world.createAuthoredObject(other.actor, { parent: "$thing", name: "Should Fail", location: "the_chatroom" })).toThrow();
+
+    const lamp = world.createAuthoredObject(builder.actor, {
+      parent: "$thing",
+      name: "Lamp",
+      description: "A hidden builder lamp.",
+      aliases: ["lamp"],
+      location: "the_chatroom"
+    });
+    const subclass = world.createAuthoredObject(builder.actor, { parent: "$thing", name: "Builder Thing" });
+    world.moveAuthoredObject(builder.actor, lamp, "$nowhere");
+    expect(world.object(lamp).location).toBe("$nowhere");
+    world.moveAuthoredObject(builder.actor, lamp, "the_chatroom");
+    world.chparentAuthoredObject(builder.actor, lamp, subclass);
+    expect(world.object(lamp).parent).toBe(subclass);
+
+    const descDef = world.object(lamp).propertyDefs.get("description");
+    expect(descDef).toBeTruthy();
+    if (descDef) descDef.perms = "w";
+    definePropertyVersionedAs(world, builder.actor, lamp, "rub_count", 0, "r", null, "int");
+    expect(() => installVerbAs(world, other.actor, lamp, "steal", `verb :steal() rx { return true; }`, null)).toThrow();
+    const installed = installVerbAs(world, builder.actor, lamp, "rub", `verb :rub() rx {
+  this.rub_count = this.rub_count + 1;
+  observe({ type: "builder_rubbed", target: this, count: this.rub_count, actor: actor });
+  return this.rub_count;
+}`, null);
+    expect(installed.ok).toBe(true);
+
+    const used = world.call("rub-lamp", other.id, "the_chatroom", message(other.actor, lamp, "rub", []));
+    expect(used.op).toBe("applied");
+    expect(world.getProp(lamp, "rub_count")).toBe(1);
+    if (used.op === "applied") expect(used.observations[0]).toMatchObject({ type: "builder_rubbed", target: lamp, count: 1, actor: other.actor });
+
+    const look = world.directCall("look-builder-room", other.actor, "the_chatroom", "look", []);
+    expect(look.op).toBe("result");
+    if (look.op === "result") {
+      const room = look.result as { contents: Array<{ id: string; title: string; description: unknown }> };
+      expect(room.contents.find((item) => item.id === lamp)).toMatchObject({ id: lamp, title: "Lamp", description: null });
+    }
+
+    const reloaded = createWorldFromSerialized(world.exportWorld());
+    expect(reloaded.object(lamp).parent).toBe(subclass);
+    expect(reloaded.getProp(lamp, "rub_count")).toBe(1);
+    expect(reloaded.verbInfo(lamp, "rub").owner).toBe(builder.actor);
+    expect(reloaded.propOrNullForActor(other.actor, lamp, "description")).toBe(null);
+  });
+
+  it("exposes task permission primitives without allowing non-wizard escalation", () => {
+    const { world, actor } = authedWorld();
+    world.createObject({ id: "perm_box", name: "Perm Box", parent: "$thing", owner: "$wiz" });
+    world.defineProperty("perm_box", { name: "secret", defaultValue: "sealed", owner: "$wiz", perms: "r", typeHint: "str" });
+    expect(installVerb(world, "perm_box", "perms_probe", `verb :perms_probe() rxd {
+  let before = task_perms();
+  set_task_perms(actor);
+  return [before, task_perms(), caller_perms()];
+}`, null).ok).toBe(true);
+    const probe = world.directCall("perms-probe", actor, "perm_box", "perms_probe", []);
+    expect(probe.op).toBe("result");
+    if (probe.op === "result") expect(probe.result).toEqual(["$wiz", actor, actor]);
+
+    expect(installVerb(world, "perm_box", "drop_then_write", `verb :drop_then_write() rxd {
+  set_task_perms(actor);
+  this.secret = "pwned";
+  return true;
+}`, null).ok).toBe(true);
+    const denied = world.directCall("drop-write", actor, "perm_box", "drop_then_write", []);
+    expect(denied.op).toBe("error");
+    if (denied.op === "error") expect(denied.error.code).toBe("E_PERM");
+    expect(world.getProp("perm_box", "secret")).toBe("sealed");
+
+    world.object(actor).owner = actor;
+    world.object(actor).flags.programmer = true;
+    const owned = world.createAuthoredObject(actor, { parent: "$thing", name: "Owned Probe" });
+    expect(installVerbAs(world, actor, owned, "try_escalate", `verb :try_escalate() rxd {
+  set_task_perms("$wiz");
+  return true;
+}`, null).ok).toBe(true);
+    const escalated = world.directCall("try-escalate", actor, owned, "try_escalate", []);
+    expect(escalated.op).toBe("error");
+    if (escalated.op === "error") expect(escalated.error.code).toBe("E_PERM");
+  });
+
   it("compiles string interpolation and dynamic index get/set", () => {
     const { world, session, actor } = authedWorld();
     const source = `verb :index_and_interp(name, value) rx {
@@ -955,6 +1050,7 @@ describe("authoring", () => {
       actor,
       player: actor,
       caller: "#-1",
+      callerPerms: actor,
       progr: actor,
       thisObj: "delay_1",
       verbName: "call_child",

@@ -1389,7 +1389,7 @@ function bindIde() {
   });
   document.querySelector<HTMLButtonElement>("[data-compile]")?.addEventListener("click", async () => {
     const source = document.querySelector<HTMLTextAreaElement>("[data-source]")!.value;
-    const response = await fetch("/api/compile", { method: "POST", body: JSON.stringify({ source }) });
+    const response = await fetch("/api/compile", { method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify({ source }) });
     state.compileResult = await response.json();
     render();
   });
@@ -1401,7 +1401,7 @@ function bindIde() {
     const current = info.verbs?.find((verb: any) => verb.name === name);
     const response = await fetch("/api/install", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: authHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ object, name, source, expected_version: current?.version ?? null })
     });
     state.compileResult = await response.json();

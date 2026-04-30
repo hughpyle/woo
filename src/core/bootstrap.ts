@@ -65,14 +65,15 @@ function seedUniversal(world: WooWorld): void {
   world.createObject({ id: "$sequenced_log", name: "$sequenced_log", parent: "$root", owner: "$wiz" });
   world.createObject({ id: "$space", name: "$space", parent: "$sequenced_log", owner: "$wiz" });
   world.createObject({ id: "$thing", name: "$thing", parent: "$root", owner: "$wiz" });
+  world.object("$thing").flags.fertile = true;
   world.createObject({ id: "$catalog", name: "$catalog", parent: "$thing", owner: "$wiz" });
   world.createObject({ id: "$catalog_registry", name: "$catalog_registry", parent: "$space", owner: "$wiz" });
   reparentSeed(world, "$space", "$sequenced_log");
 
   for (const id of ["$root", "$actor", "$player", "$sequenced_log", "$space", "$thing", "$catalog", "$catalog_registry"]) {
-    define(world, id, "name", "", "str");
-    define(world, id, "description", "", "str");
-    define(world, id, "aliases", [], "list<str>");
+    define(world, id, "name", "", "str", "r");
+    define(world, id, "description", "", "str", "r");
+    define(world, id, "aliases", [], "list<str>", "r");
   }
   define(world, "$root", "host_placement", null, "str|null");
   describeSeed(world, "$system", "Bootstrap object and world registry root. It has no parent, owns the reserved #0 identity, carries wizard authority, and is where corenames and world-level metadata are anchored.");
@@ -119,6 +120,7 @@ function seedUniversal(world: WooWorld): void {
   bytecode(world, "$root", "set_prop", setPropBytecode, "verb :set_prop(name, value) r { ... }", { perms: "r" });
   native(world, "$root", "describe", "describe", "verb :describe() rxd { ... }", { directCallable: true });
   native(world, "$root", "title", "default_title", "verb :title() rxd { return this.name; }", { directCallable: true });
+  native(world, "$root", "look_self", "default_look_self", "verb :look_self() rxd { return { title: this:title(), description: this.description }; }", { directCallable: true });
   native(world, "$player", "on_disfunc", "player_on_disfunc", "verb :on_disfunc() r { ... }", { perms: "r" });
   native(world, "$player", "moveto", "player_moveto", "verb :moveto(target) r { ... }", { perms: "r" });
   native(world, "$guest", "on_disfunc", "guest_on_disfunc", "verb :on_disfunc() r { ... }", { perms: "r" });
@@ -129,6 +131,7 @@ function seedUniversal(world: WooWorld): void {
     native(world, obj, "remove_feature", "remove_feature", "verb :remove_feature(f) rx { ... }");
     native(world, obj, "has_feature", "has_feature", "verb :has_feature(f) rxd { ... }", { directCallable: true });
   }
+  native(world, "$space", "look_self", "space_look_self", "verb :look_self() rxd { ... }", { directCallable: true });
   native(world, "$space", "replay", "replay", "verb :replay(from_seq, limit) rxd { ... }", { directCallable: true });
   native(world, "$catalog_registry", "install", "catalog_registry_install", "verb :install(manifest, frontmatter, alias, provenance) rx { ... }");
   native(world, "$catalog_registry", "list", "catalog_registry_list", "verb :list() rxd { ... }", { directCallable: true });
