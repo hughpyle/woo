@@ -544,7 +544,7 @@ function render() {
       <aside class="nav">
         <div class="brand">Woo</div>
         <div class="actor">${escapeHtml(state.actor ?? "connecting...")}</div>
-        ${navButton("chat", "Chat")}
+        ${navButton("chat", "Room")}
         ${navButton("dubspace", "Dubspace")}
         ${navButton("taskspace", "Taskspace")}
         ${navButton("ide", "IDE")}
@@ -867,7 +867,7 @@ function renderChat() {
   if (!inRoom) {
     return `
       <section class="toolbar">
-        <h1>${escapeHtml(room?.name ?? "Chat")}</h1>
+        <h1>${escapeHtml(room?.name ?? "Room")}</h1>
         <button data-chat-enter>Enter</button>
       </section>
       <section class="chat-layout solo">
@@ -879,7 +879,7 @@ function renderChat() {
   }
   return `
     <section class="toolbar">
-      <h1>${escapeHtml(room?.name ?? "Chat")}</h1>
+      <h1>${escapeHtml(room?.name ?? "Room")}</h1>
       <button data-chat-leave>Leave</button>
       <button data-chat-look>Look</button>
       <button data-chat-who>Who</button>
@@ -890,7 +890,7 @@ function renderChat() {
           ${state.chatFeed.map(renderChatLine).join("") || `<div class="chat-empty">${escapeHtml(room?.description ?? "No chat events yet.")}</div>`}
         </div>
         <form class="chat-form" data-chat-form>
-          <input data-chat-input autocomplete="off" placeholder="Say, /me acts, /tell guest_2 hello" value="${escapeHtml(state.chatDraft)}" />
+          <input data-chat-input autocomplete="off" placeholder="say something — or :waves, look cockatoo, tell guest_2 hi" value="${escapeHtml(state.chatDraft)}" />
           <button>Send</button>
         </form>
       </div>

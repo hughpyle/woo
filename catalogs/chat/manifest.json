@@ -112,7 +112,7 @@
     { "on": "$cockatoo", "type": "cockatoo_ungagged", "shape": { "source": "obj", "actor": "obj" } }
   ],
   "seed_hooks": [
-    { "kind": "create_instance", "class": "$chatroom", "as": "the_chatroom", "name": "Lobby", "description": "The first runnable chat room. It is a live lobby where connected actors can speak, emote, tell, look, and see who is present through the $conversational feature.", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0 } },
+    { "kind": "create_instance", "class": "$chatroom", "as": "the_chatroom", "name": "Room", "description": "The first runnable chat room. It is a live lobby where connected actors can speak, emote, tell, look, and see who is present through the $conversational feature.", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0 } },
     { "kind": "attach_feature", "consumer": "the_chatroom", "feature": "$conversational" },
     { "kind": "create_instance", "class": "$cockatoo", "as": "the_cockatoo", "name": "Cockatoo", "description": "A sulphur-crested cockatoo sitting in a cage on top of the mantelpiece. Inside the cage are a few bird-toys, a mirror, and a tray for its food and water. (Cheap imitation of LambdaMOO #1479; aliases there: cockatoo, cock, raven, bird, cuckatoo, duck.)", "anchor": "the_chatroom", "location": "the_chatroom", "properties": { "aliases": ["cockatoo", "cock", "raven", "bird", "cuckatoo", "duck"] } }
   ]

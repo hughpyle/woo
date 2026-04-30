@@ -25,6 +25,8 @@ cluster hosts load host-scoped world slices instead of bootstrapping full shadow
 worlds. Cross-host verb-body RPC and internal-forwarding hardening are still in
 progress.
 
+Online demo: https://woo.hughpyle.workers.dev/
+
 ## Specification
 
 Start with [spec/README.md](spec/README.md).
