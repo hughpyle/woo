@@ -976,7 +976,13 @@ function refreshChatLook() {
     const present = Array.isArray(result?.present_actors) ? result.present_actors.map(String) : [];
     state.chatPresent = present;
     const names = present.map(actorLabel).join(", ") || "nobody";
-    pushChatLine({ kind: "system", text: `${String(result?.description ?? "")} Present: ${names}.` });
+    const contents = Array.isArray(result?.contents) ? result.contents : [];
+    const things = contents
+      .map((item: any) => String(item?.title ?? item?.name ?? item?.id ?? ""))
+      .filter(Boolean);
+    const lines = [String(result?.description ?? ""), `Present: ${names}.`];
+    if (things.length > 0) lines.push(`You see ${things.join(", ")}.`);
+    pushChatLine({ kind: "system", text: lines.join(" ") });
   });
 }
 
