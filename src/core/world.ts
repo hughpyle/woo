@@ -22,6 +22,7 @@ import {
 } from "./types";
 import type { ObjectRepository, ParkedTaskRecord, SerializedObject, SerializedSession, SerializedWorld, SpaceSnapshotRecord, WorldRepository } from "./repository";
 import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializedTinyVmTaskWithInput, runTinyVm, type SerializedVmTask } from "./tiny-vm";
+import { installCatalogManifest, type CatalogManifest } from "./catalog-installer";
 
 type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue;
 const DRUM_VOICES = ["kick", "snare", "hat", "tone"] as const;
@@ -223,6 +224,14 @@ export class WooWorld {
     return verb;
   }
 
+  defineEventSchema(objRef: ObjRef, type: string, shape: Record<string, WooValue>): void {
+    const obj = this.object(objRef);
+    obj.eventSchemas.set(type, cloneValue(shape as WooValue) as Record<string, WooValue>);
+    obj.modified = Date.now();
+    this.persistObject(objRef);
+    this.persist();
+  }
+
   resolveVerb(objRef: ObjRef, name: string): ResolvedVerb {
     const parentMatch = this.resolveVerbFrom(objRef, name, false);
     if (parentMatch) return parentMatch;
@@ -361,9 +370,15 @@ export class WooWorld {
       return session;
     }
     const tokenClass = this.tokenClassFor(token);
+    const actor = this.allocateGuest();
+    return this.createSessionForActor(actor, tokenClass);
+  }
+
+  createSessionForActor(actor: ObjRef, tokenClass: Session["tokenClass"] = "bearer"): Session {
+    this.reapExpiredSessions();
+    this.object(actor);
     const id = `session-${this.sessionCounter++}`;
     this.persistCounters();
-    const actor = this.allocateGuest();
     const now = Date.now();
     const session: Session = {
       id,
@@ -378,10 +393,22 @@ export class WooWorld {
       this.sessions.set(id, session);
       this.persistSession(session);
       this.setProp(actor, "session_id", id);
-      this.ensurePresence(actor, "the_dubspace");
-      this.ensurePresence(actor, "the_taskspace");
+      if (this.objects.has("the_dubspace")) this.ensurePresence(actor, "the_dubspace");
+      if (this.objects.has("the_taskspace")) this.ensurePresence(actor, "the_taskspace");
     });
     return session;
+  }
+
+  claimWizardBootstrapSession(presentedToken: string, expectedToken: string | undefined): Session {
+    if (!expectedToken) throw wooError("E_BOOTSTRAP_TOKEN_MISSING", "WOO_INITIAL_WIZARD_TOKEN is not set");
+    const claim = () => {
+      if (this.propOrNull("$system", "bootstrap_token_used") === true) throw wooError("E_TOKEN_CONSUMED", "wizard bootstrap token has already been consumed");
+      if (presentedToken !== expectedToken) throw wooError("E_NOSESSION", "invalid wizard bootstrap token");
+      this.setProp("$system", "bootstrap_token_used", true);
+      return this.createSessionForActor("$wiz", "bearer");
+    };
+    const repo = this.activeObjectRepository();
+    return repo ? repo.transaction(claim) : claim();
   }
 
   attachSocket(sessionId: string, socketId: string): void {
@@ -713,7 +740,7 @@ export class WooWorld {
   dubspaceState() {
     const controls = ["slot_1", "slot_2", "slot_3", "slot_4", "channel_1", "filter_1", "delay_1", "drum_1", "default_scene"];
     return Object.fromEntries(
-      controls.map((id) => [
+      controls.filter((id) => this.objects.has(id)).map((id) => [
         id,
         {
           id,
@@ -725,6 +752,7 @@ export class WooWorld {
   }
 
   taskspaceState() {
+    if (!this.objects.has("the_taskspace")) return { root_tasks: [], tasks: {} };
     const taskIds = Array.from(this.objects.values())
       .filter((obj) => obj.parent === "$task")
       .map((obj) => obj.id);
@@ -1881,6 +1909,43 @@ export class WooWorld {
         error: entry.error as unknown as WooValue
       }));
     });
+    this.nativeHandlers.set("catalog_registry_install", (ctx, args) => {
+      if (!this.object(ctx.actor).flags.wizard) throw wooError("E_PERM", "only wizards may install catalogs", ctx.actor);
+      const manifest = assertMap(args[0]) as unknown as CatalogManifest;
+      const alias = typeof args[2] === "string" ? args[2] : manifest.name;
+      const provenance = args[3] && typeof args[3] === "object" && !Array.isArray(args[3]) ? (args[3] as Record<string, WooValue>) : {};
+      return installCatalogManifest(this, manifest, {
+        actor: ctx.actor,
+        tap: typeof provenance.tap === "string" ? provenance.tap : "@local",
+        alias,
+        provenance
+      }) as unknown as WooValue;
+    });
+    this.nativeHandlers.set("catalog_registry_list", () => this.propOrNull("$catalog_registry", "installed_catalogs"));
+    this.nativeHandlers.set("match_object", (_ctx, args) => {
+      const wanted = assertString(args[0] ?? "").toLowerCase();
+      const location = typeof args[1] === "string" && this.objects.has(args[1]) ? args[1] : null;
+      const candidates = location ? Array.from(this.object(location).contents) : Array.from(this.objects.keys());
+      const matches = candidates.filter((id) => {
+        const obj = this.object(id);
+        const aliases = this.propOrNull(id, "aliases");
+        return obj.name.toLowerCase() === wanted || id.toLowerCase() === wanted || (Array.isArray(aliases) && aliases.some((alias) => String(alias).toLowerCase() === wanted));
+      });
+      if (matches.length === 0) return this.objects.has("$failed_match") ? "$failed_match" : null;
+      if (matches.length > 1) return this.objects.has("$ambiguous_match") ? "$ambiguous_match" : matches[0];
+      return matches[0];
+    });
+    this.nativeHandlers.set("match_verb", (_ctx, args) => {
+      const name = assertString(args[0] ?? "");
+      const target = assertObj(args[1]);
+      try {
+        this.resolveVerb(target, name);
+        return name;
+      } catch {
+        return this.objects.has("$failed_match") ? "$failed_match" : null;
+      }
+    });
+    this.nativeHandlers.set("parse_chat_command", (_ctx, args) => ({ text: assertString(args[0] ?? ""), actor: assertObj(args[1] ?? "#-1") }));
     this.nativeHandlers.set("preview_control", (ctx, args) => {
       const target = assertObj(args[0]);
       const name = assertString(args[1]);

@@ -75,13 +75,13 @@ Wizard-action audit on `X-Woo-Force-Direct`, `X-Woo-Impersonate-Actor`, `wiz:for
 
 `DEPLOY.md` already exists; verify the operator path against the live deploy. End-to-end smoke: deploy → set secrets → first auth as wizard → install local catalogs → exercise dubspace/taskspace/chat from the bundled client.
 
-### Phase 7 (deferred): catalog tap install over GitHub
+### Phase 7 (partly landed locally): catalog tap install over GitHub
 
-`/api/tap/install` Worker handler that fetches `raw.githubusercontent.com/<tap>/<sha>/catalogs/<name>/manifest.json`, computes hashes, dispatches `$catalog_registry:call({verb: "install", ...})`. Local-catalog install path already exists (Phase 3); the GitHub fetch is the remaining piece.
+The local Node server now has `/api/tap/install` and `GET /api/taps`. The helper in `src/server/github-taps.ts` resolves GitHub refs, fetches `manifest.json` and `README.md`, computes SHA-256 hashes, and dispatches `$catalog_registry:install`. The Cloudflare Worker still needs to reuse or port this helper into its fetch handler, then layer in production observability and any private-repo token policy.
 
 ## Current Implementation Status
 
-Substrate landed (works in-process; CF backend pending):
+Substrate landed (works in-process):
 
 - `ObjectRepository` interface in `src/core/repository.ts` with full method set + `transaction()` + `savepoint()`.
 - In-memory and local SQLite repositories (`src/core/repository.ts` `InMemoryObjectRepository`, `src/server/sqlite-repository.ts`).
@@ -90,19 +90,33 @@ Substrate landed (works in-process; CF backend pending):
 - REST API with six endpoints (`src/server/dev-server.ts` for the local Node target).
 - Wire ops `direct`/`result`/`event` over WebSocket.
 - Identity three-layer model (actor/session/connection); session table is credential-only, connection state in-memory.
-- Local catalog install path with `tests/catalogs.test.ts`; manifests for chat/dubspace/taskspace ship in `catalogs/`.
-- 88/88 tests pass; typecheck clean.
+- Local + GitHub catalog install path; manifests for chat/dubspace/taskspace ship in `catalogs/`. GitHub tap helper lives in `src/server/github-taps.ts` and is wired through `POST /api/tap/install` and `GET /api/taps`. Wizard auth via `wizard:<WOO_INITIAL_WIZARD_TOKEN>`.
+- 94/94 tests pass; typecheck clean (split: main + `tsconfig.worker.json`).
 
-CF-specific code: **none**. `src/worker/` does not exist; `wrangler.toml` does not exist; CF storage backend is unwritten.
+Phase 0 (toolchain smoke test) — landed:
+
+- `wrangler.toml` skeleton (no DO bindings yet; reserved for `tag = "v1"` later).
+- `src/worker/index.ts` stub Worker — JSON heartbeat for any path.
+- `tsconfig.worker.json` scopes `@cloudflare/workers-types` to the worker tree only.
+- Live at `https://woo.hughpyle.workers.dev/`. Token-mint flow proven (`woo` API token created with the six required permission groups; `wrangler whoami` succeeds).
+
+Phase 1 (CF backend `ObjectRepository`) — landed:
+
+- `src/worker/cf-repository.ts` (~620 lines). Mirrors `LocalSQLiteRepository`. Schema and SQL strings byte-identical (both target SQLite); the wrapping changes:
+  - `state.storage.sql.exec(...)` cursor API instead of better-sqlite3 prepared statements.
+  - `state.storage.transactionSync(fn)` for atomicity (raw `BEGIN`/`COMMIT`/`ROLLBACK` aren't allowed via `sql.exec` on CF).
+  - **`savepoint(fn)` also uses `state.storage.transactionSync(fn)`** — when called inside an outer transaction it nests as an implicit savepoint. Raw SQL `SAVEPOINT`/`ROLLBACK TO`/`RELEASE` are forbidden through `sql.exec` per CF docs and have been removed.
+- `CFObjectRepository implements ObjectRepository, WorldRepository` — adds stub `load(): null`, `save(): throw E_NOT_SUPPORTED`, `latestSpaceSnapshot` so it plugs into `WooWorld`'s constructor without a type refactor.
+- Pending-log-outcome assertion at outer-only commit boundary (matches local backend).
+- No CF-storage variant in conformance harness yet (Miniflare integration is the gating piece).
 
 ## Still open
 
 In dependency order:
 
-- **`CFObjectRepository`** at `src/worker/cf-repository.ts`. Mirrors `SQLiteObjectRepository`. ~400 lines.
-- **`PersistentObjectDO`** class wrapping `WooWorld`. Delegates RPC methods to `world.directCall` / `world.applyCall` / equivalents.
+- **`PersistentObjectDO`** class wrapping `WooWorld`. Delegates RPC methods to `world.directCall` / `world.applyCall` / equivalents. Replaces the stub `src/worker/index.ts` once it exists.
 - **`DirectoryDO`** singleton. Trivial; ~80 lines.
-- **Worker entry** (`src/worker/index.ts`). Route parsing, ID resolution, sessions, DO stub fetch. ~150 lines.
+- **Worker entry** (full): route parsing, ID resolution, sessions, DO stub fetch. ~150 lines. Adds DO bindings + `[[migrations]] tag = "v1"` to `wrangler.toml`.
 - **First-request bootstrap** with `WOO_INITIAL_WIZARD_TOKEN` consumption and `WOO_AUTO_INSTALL_CATALOGS` auto-install.
 - **`wiz:rotate_bootstrap_token` verb** on `$system`. Spec'd in §R14.4; impl pending.
 - **Alarms** for parked tasks. Replaces the 250ms `setInterval` only on the CF target; local dev keeps the poll.
@@ -110,8 +124,8 @@ In dependency order:
 - **Cross-DO RPC layer**: `RemoteHost.rpc(target, method, args)` stub used by `world.dispatch` when target is on a different anchor cluster. Currently `world.ts` assumes single-process; needs an "is target hosted here?" check before dispatch.
 - **Verb-lookup cache** (`ancestor_verb_cache`, `ancestor_prop_cache`). Schema exists in `persistence.md §14.1`; population on cross-DO miss is unimplemented.
 - **`src/instrument.ts`** with AE writes, structured logs, per-DO `:metrics()`.
-- **`wrangler.toml`** skeleton matching §R12.
-- **Catalog tap install** Worker route (`/api/tap/install`) with GitHub fetch + content hashing. Deferred per Phase 7; local catalogs cover the demos.
+- **CF storage variant in conformance harness** via Miniflare. Optional; the unit-level transaction/savepoint guarantees are covered by the SQLite + in-memory backends.
+- **Worker-side catalog tap install**: import `src/server/github-taps.ts` helpers into the Worker fetch handler. Local Node already has `POST /api/tap/install` and `GET /api/taps`.
 
 ## Known acceptable shortcuts
 

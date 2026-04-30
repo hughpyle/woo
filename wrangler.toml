@@ -1,0 +1,12 @@
+name = "woo"
+main = "src/worker/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_als"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1.0
+
+# Durable Object bindings + migrations are intentionally absent in this stub
+# deploy. They land in tag = "v1" alongside src/worker/persistent-object-do.ts
+# and src/worker/directory-do.ts (per notes/impl-cf-deploy.md Phase 2).

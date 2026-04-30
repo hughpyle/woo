@@ -17,7 +17,7 @@ The forward-looking specification continues to live under `spec/`. This notes do
 - **`tiny-vm.ts`** — T0 opcode dispatcher implementing the subset specified in [spec/semantics/tiny-vm.md](../spec/semantics/tiny-vm.md): `PUSH_LIT`/`LOCAL`/`THIS`/`ACTOR`/`SPACE`/`SEQ`/`MESSAGE`/`ARG`, `POP`, `DUP`, `MAP_GET`, `MAKE_MAP`, `MAKE_LIST`, `EQ`, `GET_PROP`, `SET_PROP`, `OBSERVE`, `JUMP`, `JUMP_IF_FALSE`, `RETURN`, `FAIL`.
 - **`fixtures.ts`** — five canonical T0 bytecode fixtures (`set_value`, `set_prop`, `set_control`, `claim`, `set_status`) matching tiny-vm.md "Concrete Fixtures."
 - **`world.ts`** — in-memory `WooWorld` implementing the full `$space:call` lifecycle (validate → authorize → sequence → dispatch → commit/rollback → applied frame), idempotent retry cache (5 min TTL), introspection (`describe`, `properties`, `verbs`, `property_info`, `verb_info`), and native handlers for taskspace and dubspace domain verbs.
-- **`bootstrap.ts`** — seed graph creation: `$system`, `$root`, `$actor`, `$player`, `$wiz`, `$space`, `$thing`, dubspace classes, taskspace classes, demo instances (`the_dubspace`, `the_taskspace`), guest pool of 8 players.
+- **`bootstrap.ts`** — seed graph creation: `$system`, `$root`, `$actor`, `$player`, `$wiz`, `$sequenced_log`, `$space`, `$thing`, `$catalog`, `$catalog_registry`, `$nowhere`, plus local catalog install for chat/taskspace/dubspace and a guest pool of 8 players.
 - **`authoring.ts`** — `compileVerb` (T0 source regex-based compiler + JSON bytecode fallback), `installVerb` with `expected_version` check, versioned property definition.
 
 ### Server (`src/server/dev-server.ts`)

@@ -13,8 +13,8 @@ This is the contract the implementation must produce on first start; without it,
 1. **Directory** is created first. Holds corename → ULID map and world metadata. Empty at boot until populated.
 2. **`$system` (`#0`)** is created with the reserved ULID `00000000000000000000000000`. `parent = null`.
 3. **Universal classes** are created in dependency order: `$root` → `$actor` → `$player` → `$wiz` / `$guest`, `$sequenced_log` → `$space` → `$thing`. v1-ops catalog-capable worlds also seed `$catalog` and `$catalog_registry` after `$space`. Corenames registered in Directory.
-4. **Configured local catalogs** are installed depending on which demos are being booted: `@local:chat`, `@local:taskspace`, and `@local:dubspace`. Until the local catalog installer is wired, first-light builds may hard-seed the equivalent classes and instances from code; the normative source is the catalog manifests.
-5. **Demo instances** (`$nowhere`, `the_dubspace`, `the_taskspace`, `the_chatroom`) are created with their internal anchored objects by those local catalogs. `$nowhere` is a seeded `$thing` used as the default `home` for guests being reset. `:add_feature` calls attach `$conversational` to `the_chatroom` and `the_taskspace` (running as wizard at boot, satisfying both attach-policy gates).
+4. **Configured local catalogs** are installed depending on which demos are being booted: `@local:chat`, `@local:taskspace`, and `@local:dubspace`. The normative source is the catalog manifests; bootstrap no longer hard-seeds demo classes and instances directly.
+5. **Scaffold and demo instances** are created. `$nowhere` is a bootstrap `$thing` used as the default `home` for guests being reset. `the_dubspace`, `the_taskspace`, and `the_chatroom` are created by their local catalogs with their internal anchored objects. `:add_feature` calls attach `$conversational` to `the_chatroom` and `the_taskspace` (running as wizard at boot, satisfying both attach-policy gates).
 6. **Guest player pool** is pre-seeded so first connections don't need to mint identities.
 
 Boot is idempotent: running it twice should be a no-op (each seed is created only if its corename isn't already mapped). This makes test setup and dev-restart trivial.
@@ -210,10 +210,10 @@ Its native verbs are `:install(manifest, frontmatter, alias, provenance)`,
 | `:start_transport()` | — | Starts the shared percussion transport by storing a space-owned `started_at` timestamp. Emits `transport_started`. |
 | `:stop_transport()` | — | Stops the shared percussion transport. Emits `transport_stopped`. |
 
-All these behaviors are reached through `$space:call`. First-light may seed the
-simple property-update behaviors as T0 bytecode and the list/timer-heavy
-behaviors as native bootstrap handlers until the VM profile can express them
-directly.
+All these behaviors are reached through `$space:call`. In v0.5 the dubspace
+catalog installs simple property-update behaviors as authored bytecode or
+fixtures, and list/timer-heavy behaviors via trusted local `implementation`
+hints until the VM profile can express them directly.
 
 ---
 
@@ -379,7 +379,7 @@ Allocation uses an explicit free pool, **not** "any guest with no live session" 
 
 ## B8. Verb bodies
 
-The seeded verbs above are implemented as T0 bytecode. Concrete JSON bytecode for the load-bearing ones is in [tiny-vm.md "Concrete fixtures"](tiny-vm.md#concrete-fixtures). Verbs not in the fixture list have straightforward bodies that follow the same pattern: read args, read/write properties, emit observation, return.
+Universal bootstrap verbs are native or T0 bytecode where they are runtime primitives (`:describe`, guest reset, feature management, `:replay`). Demo verbs are installed from local catalog manifests. Where the current DSL can express the behavior, the installer compiles source to bytecode; where it cannot yet, trusted local manifests may carry an `implementation` hint pointing at a native handler or named fixture.
 
 ---
 

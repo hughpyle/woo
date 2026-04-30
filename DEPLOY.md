@@ -158,6 +158,17 @@ Response: `{ "actor": "$wiz", "session": "<session-id>" }`. Use `Authorization: 
 
 Either path consumes the token. The world records `bootstrap_token_used = true` in the Directory's `world_meta` table; presenting the token again fails.
 
+With that session, install a public GitHub catalog tap:
+
+```sh
+curl -X POST https://your-world.example.com/api/tap/install \
+  -H 'content-type: application/json' \
+  -H 'Authorization: Session YOUR_SESSION_ID' \
+  -d '{"tap":"hugh/woo-libs","catalog":"dubspace","ref":"dubspace-v1.0.0","as":"dubspace"}'
+```
+
+The response is the applied frame from `$catalog_registry`. `GET /api/taps` with the same session returns the installed catalog registry.
+
 ---
 
 ## Upgrades (pulling upstream changes)

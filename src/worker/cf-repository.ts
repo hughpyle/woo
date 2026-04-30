@@ -1,0 +1,707 @@
+// CFObjectRepository — Cloudflare Durable Object backend for ObjectRepository.
+//
+// Mirrors src/server/sqlite-repository.ts (LocalSQLiteRepository). The schema
+// and SQL strings are identical (both target SQLite); only the storage wrapping
+// differs: CF's state.storage.sql cursor API + state.storage.transactionSync
+// instead of better-sqlite3's prepared-statement / db.exec API.
+//
+// Per spec/reference/cloudflare.md §R3 and §R3.1–§R3.4:
+// - transaction() uses state.storage.transactionSync (CF's atomicity primitive).
+// - savepoint() also uses state.storage.transactionSync — when called inside
+//   an outer transaction, CF nests it as an implicit savepoint. Raw SQL
+//   SAVEPOINT/ROLLBACK TO/RELEASE statements are NOT supported through
+//   sql.exec on CF DOs (transaction-related statements must go through
+//   transactionSync), so we don't issue them.
+// - appendLog inserts a pending row (applied_ok = NULL); recordLogOutcome
+//   updates the same row inside the outer transaction.
+// - The transaction's commit fails if any pending log outcome remains.
+
+// Types from @cloudflare/workers-types are scoped via tsconfig.worker.json,
+// which sets `types: ["@cloudflare/workers-types"]`. The main tsconfig excludes
+// src/worker/ to keep these globals out of client/server typechecking.
+
+import type {
+  LogReadResult,
+  ObjectRepository,
+  ParkedTaskRecord,
+  SerializedObject,
+  SerializedProperty,
+  SerializedSession,
+  SerializedVerb,
+  SerializedWorld,
+  SpaceSnapshotRecord,
+  WorldRepository
+} from "../core/repository";
+import { wooError, type ErrorValue, type Message, type ObjRef, type SpaceLogEntry, type VerbDef, type WooValue } from "../core/types";
+
+type Row = Record<string, unknown>;
+
+export class CFObjectRepository implements ObjectRepository, WorldRepository {
+  private sql: SqlStorage;
+  private transactionDepth = 0;
+
+  constructor(private state: DurableObjectState) {
+    this.sql = state.storage.sql;
+    this.migrate();
+  }
+
+  // ---- WorldRepository compatibility (so WooWorld's constructor can accept us) ----
+  //
+  // CF doesn't do whole-world hydration; live state lives in DO storage and is
+  // read incrementally via the ObjectRepository methods below. createWorld()
+  // calls `repository?.load()` once at startup and treats null as "fresh
+  // bootstrap"; since the DO's storage either contains state from prior
+  // requests (already loaded by the runtime via per-object reads) or is empty
+  // (and bootstrap runs), returning null here is the correct shape.
+
+  load(): SerializedWorld | null {
+    return null;
+  }
+
+  save(_world: SerializedWorld): void {
+    // Whole-world save is intentionally unsupported on CF. The runtime uses
+    // per-object methods inside transaction()/savepoint() blocks. If something
+    // calls this, that's a bug in the routing — fail loudly so it surfaces.
+    throw wooError("E_NOT_SUPPORTED", "CF backend uses incremental ObjectRepository; whole-world save() is not implemented");
+  }
+
+  latestSpaceSnapshot(space: ObjRef): SpaceSnapshotRecord | null {
+    // WorldRepository's optional method; same data as ObjectRepository.loadLatestSnapshot.
+    return this.loadLatestSnapshot(space);
+  }
+
+  // ---- transactions ----
+
+  transaction<T>(fn: () => T): T {
+    // Nested transaction() calls flatten — only the outermost call wraps
+    // state.storage.transactionSync and runs the pending-outcome assertion.
+    // (Nested transactionSync would itself be a savepoint, but we want the
+    // commit-time check at the outer-only boundary.)
+    if (this.transactionDepth > 0) return fn();
+    this.transactionDepth = 1;
+    try {
+      let result!: T;
+      this.state.storage.transactionSync(() => {
+        result = fn();
+        this.assertNoPendingLogOutcomes();
+      });
+      return result;
+    } finally {
+      this.transactionDepth = 0;
+    }
+  }
+
+  savepoint<T>(fn: () => T): T {
+    // Inside an outer transactionSync, a nested transactionSync creates a
+    // savepoint: throws roll back the inner scope; success commits to the
+    // outer scope. This is CF's documented nested-transaction behavior, and
+    // it's how the local SQLite backend's SAVEPOINT/ROLLBACK TO/RELEASE
+    // statements get expressed on a runtime where raw transaction-control
+    // SQL is forbidden through sql.exec.
+    return this.state.storage.transactionSync(fn);
+  }
+
+  // ---- objects ----
+
+  loadObject(id: ObjRef): SerializedObject | null {
+    const row = this.one("SELECT * FROM object WHERE id = ?", id);
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      parent: row.parent === null ? null : String(row.parent),
+      owner: String(row.owner),
+      location: row.location === null ? null : String(row.location),
+      anchor: row.anchor === null ? null : String(row.anchor),
+      flags: flagsFromInt(Number(row.flags)),
+      created: Number(row.created),
+      modified: Number(row.modified),
+      propertyDefs: this.all("SELECT * FROM property_def WHERE object_id = ? ORDER BY name", id).map((def) => ({
+        name: String(def.name),
+        defaultValue: parseValue(String(def.default_val)),
+        typeHint: def.type_hint == null ? undefined : String(def.type_hint),
+        owner: String(def.owner),
+        perms: String(def.perms),
+        version: Number(def.version)
+      })),
+      properties: this.all("SELECT * FROM property_value WHERE object_id = ? ORDER BY name", id).map(
+        (value) => [String(value.name), parseValue(String(value.value))] as [string, WooValue]
+      ),
+      propertyVersions: this.all("SELECT * FROM property_version WHERE object_id = ? ORDER BY name", id).map(
+        (version) => [String(version.name), Number(version.version)] as [string, number]
+      ),
+      verbs: this.all("SELECT * FROM verb WHERE object_id = ? ORDER BY name", id).map(verbFromRow),
+      children: this.all("SELECT child_ref FROM child WHERE object_id = ? ORDER BY child_ref", id).map((row) => String(row.child_ref)),
+      contents: this.all("SELECT content_ref FROM content WHERE object_id = ? ORDER BY content_ref", id).map((row) => String(row.content_ref)),
+      eventSchemas: this.all("SELECT * FROM event_schema WHERE object_id = ? ORDER BY type", id).map(
+        (schema) => [String(schema.type), parseValue(String(schema.schema)) as Record<string, WooValue>] as [string, Record<string, WooValue>]
+      )
+    };
+  }
+
+  saveObject(obj: SerializedObject): void {
+    this.transaction(() => {
+      this.deleteObjectRows(obj.id);
+      this.sql.exec(
+        "INSERT INTO object(id, name, parent, owner, location, anchor, flags, created, modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        obj.id, obj.name, obj.parent, obj.owner, obj.location, obj.anchor, flagsToInt(obj.flags), obj.created, obj.modified
+      );
+      for (const def of obj.propertyDefs) {
+        this.sql.exec(
+          "INSERT INTO property_def(object_id, name, default_val, type_hint, owner, perms, version) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          obj.id, def.name, stringifyValue(def.defaultValue), def.typeHint ?? null, def.owner, def.perms, def.version
+        );
+      }
+      for (const [name, value] of obj.properties) {
+        this.sql.exec("INSERT INTO property_value(object_id, name, value) VALUES (?, ?, ?)", obj.id, name, stringifyValue(value));
+      }
+      for (const [name, version] of obj.propertyVersions) {
+        this.sql.exec("INSERT INTO property_version(object_id, name, version) VALUES (?, ?, ?)", obj.id, name, version);
+      }
+      for (const verb of obj.verbs) this.saveVerb(obj.id, verb);
+      for (const child of obj.children) this.addChild(obj.id, child);
+      for (const content of obj.contents) this.addContent(obj.id, content);
+      for (const [type, schema] of obj.eventSchemas) this.saveEventSchema(obj.id, type, schema);
+    });
+  }
+
+  deleteObject(id: ObjRef): void {
+    this.transaction(() => this.deleteObjectRows(id));
+  }
+
+  listHostedObjects(): ObjRef[] {
+    return this.all("SELECT id FROM object ORDER BY id").map((row) => String(row.id));
+  }
+
+  // ---- properties ----
+
+  loadProperty(id: ObjRef, name: string): SerializedProperty | null {
+    const def = this.one("SELECT * FROM property_def WHERE object_id = ? AND name = ?", id, name);
+    const value = this.one("SELECT value FROM property_value WHERE object_id = ? AND name = ?", id, name);
+    const version = this.one("SELECT version FROM property_version WHERE object_id = ? AND name = ?", id, name);
+    if (!def && !value && !version) return null;
+    return {
+      name,
+      def: def
+        ? {
+            name,
+            defaultValue: parseValue(String(def.default_val)),
+            typeHint: def.type_hint == null ? undefined : String(def.type_hint),
+            owner: String(def.owner),
+            perms: String(def.perms),
+            version: Number(def.version)
+          }
+        : null,
+      value: value ? parseValue(String(value.value)) : undefined,
+      version: version ? Number(version.version) : def ? Number(def.version) : 0
+    };
+  }
+
+  saveProperty(id: ObjRef, prop: SerializedProperty): void {
+    this.ensureHostedObject(id);
+    if (prop.def) {
+      this.sql.exec(
+        "INSERT OR REPLACE INTO property_def(object_id, name, default_val, type_hint, owner, perms, version) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        id, prop.name, stringifyValue(prop.def.defaultValue), prop.def.typeHint ?? null, prop.def.owner, prop.def.perms, prop.def.version
+      );
+    } else {
+      this.sql.exec("DELETE FROM property_def WHERE object_id = ? AND name = ?", id, prop.name);
+    }
+    if (prop.value !== undefined) {
+      this.sql.exec("INSERT OR REPLACE INTO property_value(object_id, name, value) VALUES (?, ?, ?)", id, prop.name, stringifyValue(prop.value));
+    } else {
+      this.sql.exec("DELETE FROM property_value WHERE object_id = ? AND name = ?", id, prop.name);
+    }
+    this.sql.exec("INSERT OR REPLACE INTO property_version(object_id, name, version) VALUES (?, ?, ?)", id, prop.name, prop.version);
+  }
+
+  deleteProperty(id: ObjRef, name: string): void {
+    this.sql.exec("DELETE FROM property_def WHERE object_id = ? AND name = ?", id, name);
+    this.sql.exec("DELETE FROM property_value WHERE object_id = ? AND name = ?", id, name);
+    this.sql.exec("DELETE FROM property_version WHERE object_id = ? AND name = ?", id, name);
+  }
+
+  listPropertyNames(id: ObjRef): string[] {
+    return this.all(
+      "SELECT name FROM property_def WHERE object_id = ? UNION SELECT name FROM property_value WHERE object_id = ? ORDER BY name",
+      id, id
+    ).map((row) => String(row.name));
+  }
+
+  // ---- verbs ----
+
+  loadVerb(id: ObjRef, name: string): SerializedVerb | null {
+    const row = this.one("SELECT * FROM verb WHERE object_id = ? AND name = ?", id, name);
+    return row ? verbFromRow(row) : null;
+  }
+
+  saveVerb(id: ObjRef, verb: SerializedVerb): void {
+    this.ensureHostedObject(id);
+    this.sql.exec(
+      "INSERT OR REPLACE INTO verb(object_id, name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      id, verb.name, verb.kind, stringifyValue(verb.aliases), verb.owner, verb.perms,
+      stringifyValue(verb.arg_spec), verb.source, verb.source_hash, verb.version, stringifyValue(verb.line_map),
+      verb.kind === "native" ? verb.native : null,
+      verb.kind === "bytecode" ? stringifyValue(verb.bytecode as unknown as WooValue) : null
+    );
+  }
+
+  deleteVerb(id: ObjRef, name: string): void {
+    this.sql.exec("DELETE FROM verb WHERE object_id = ? AND name = ?", id, name);
+  }
+
+  listVerbNames(id: ObjRef): string[] {
+    return this.all("SELECT name FROM verb WHERE object_id = ? ORDER BY name", id).map((row) => String(row.name));
+  }
+
+  // ---- inheritance / containment ----
+
+  loadChildren(id: ObjRef): ObjRef[] {
+    return this.all("SELECT child_ref FROM child WHERE object_id = ? ORDER BY child_ref", id).map((row) => String(row.child_ref));
+  }
+
+  addChild(id: ObjRef, child: ObjRef): void {
+    this.ensureHostedObject(id);
+    this.sql.exec("INSERT OR IGNORE INTO child(object_id, child_ref) VALUES (?, ?)", id, child);
+  }
+
+  removeChild(id: ObjRef, child: ObjRef): void {
+    this.sql.exec("DELETE FROM child WHERE object_id = ? AND child_ref = ?", id, child);
+  }
+
+  loadContents(id: ObjRef): ObjRef[] {
+    return this.all("SELECT content_ref FROM content WHERE object_id = ? ORDER BY content_ref", id).map((row) => String(row.content_ref));
+  }
+
+  addContent(id: ObjRef, child: ObjRef): void {
+    this.ensureHostedObject(id);
+    this.sql.exec("INSERT OR IGNORE INTO content(object_id, content_ref) VALUES (?, ?)", id, child);
+  }
+
+  removeContent(id: ObjRef, child: ObjRef): void {
+    this.sql.exec("DELETE FROM content WHERE object_id = ? AND content_ref = ?", id, child);
+  }
+
+  // ---- event schemas ----
+
+  loadEventSchemas(id: ObjRef): [string, Record<string, WooValue>][] {
+    return this.all("SELECT type, schema FROM event_schema WHERE object_id = ? ORDER BY type", id).map(
+      (row) => [String(row.type), parseValue(String(row.schema)) as Record<string, WooValue>] as [string, Record<string, WooValue>]
+    );
+  }
+
+  saveEventSchema(id: ObjRef, type: string, schema: Record<string, WooValue>): void {
+    this.ensureHostedObject(id);
+    this.sql.exec("INSERT OR REPLACE INTO event_schema(object_id, type, schema) VALUES (?, ?, ?)", id, type, stringifyValue(schema as WooValue));
+  }
+
+  deleteEventSchema(id: ObjRef, type: string): void {
+    this.sql.exec("DELETE FROM event_schema WHERE object_id = ? AND type = ?", id, type);
+  }
+
+  // ---- log (two-phase) ----
+
+  appendLog(space: ObjRef, actor: ObjRef, message: Message): { seq: number; ts: number } {
+    this.ensureHostedObject(space);
+    const seq = this.currentSeq(space);
+    const nextSeq = this.loadProperty(space, "next_seq");
+    this.saveProperty(space, {
+      name: "next_seq",
+      def: nextSeq?.def ?? null,
+      value: seq + 1,
+      version: (nextSeq?.version ?? 0) + 1
+    });
+    const ts = Date.now();
+    this.sql.exec(
+      "INSERT INTO space_message(space_id, seq, ts, actor, message, applied_ok, error) VALUES (?, ?, ?, ?, ?, NULL, NULL)",
+      space, seq, ts, actor, stringifyValue(message as unknown as WooValue)
+    );
+    return { seq, ts };
+  }
+
+  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, error?: ErrorValue): void {
+    const row = this.one("SELECT applied_ok, error FROM space_message WHERE space_id = ? AND seq = ?", space, seq);
+    if (!row) throw wooError("E_STORAGE", `log entry not found: ${space}:${seq}`);
+    if (row.applied_ok !== null && row.applied_ok !== undefined) {
+      const existing = Boolean(row.applied_ok);
+      const existingError = row.error ? parseValue(String(row.error)) : undefined;
+      if (existing === applied_ok && JSON.stringify(existingError ?? null) === JSON.stringify(error ?? null)) return;
+      throw wooError("E_STORAGE", `log outcome already recorded: ${space}:${seq}`);
+    }
+    this.sql.exec(
+      "UPDATE space_message SET applied_ok = ?, error = ? WHERE space_id = ? AND seq = ?",
+      applied_ok ? 1 : 0,
+      error ? stringifyValue(error as unknown as WooValue) : null,
+      space, seq
+    );
+  }
+
+  readLog(space: ObjRef, from: number, limit: number): LogReadResult {
+    const rows = this.all("SELECT * FROM space_message WHERE space_id = ? AND seq >= ? ORDER BY seq LIMIT ?", space, from, limit + 1);
+    const page = rows.slice(0, limit);
+    return {
+      messages: page.map(logEntryFromRow),
+      next_seq: this.currentSeq(space),
+      has_more: rows.length > limit
+    };
+  }
+
+  currentSeq(space: ObjRef): number {
+    const prop = this.loadProperty(space, "next_seq");
+    if (typeof prop?.value === "number") return prop.value;
+    const row = this.one("SELECT MAX(seq) AS max_seq FROM space_message WHERE space_id = ?", space);
+    return Number(row?.max_seq ?? 0) + 1;
+  }
+
+  saveSpaceSnapshot(snapshot: SpaceSnapshotRecord): void {
+    this.sql.exec(
+      "INSERT OR REPLACE INTO space_snapshot(space_id, seq, ts, state, hash) VALUES (?, ?, ?, ?, ?)",
+      snapshot.space_id, snapshot.seq, snapshot.ts, stringifyValue(snapshot.state), snapshot.hash
+    );
+  }
+
+  loadLatestSnapshot(space: ObjRef): SpaceSnapshotRecord | null {
+    const row = this.one("SELECT * FROM space_snapshot WHERE space_id = ? ORDER BY seq DESC LIMIT 1", space);
+    return row ? snapshotFromRow(row) : null;
+  }
+
+  truncateLog(space: ObjRef, covered_seq: number): number {
+    const before = this.one("SELECT COUNT(*) AS n FROM space_message WHERE space_id = ? AND seq <= ?", space, covered_seq);
+    this.sql.exec("DELETE FROM space_message WHERE space_id = ? AND seq <= ?", space, covered_seq);
+    return Number(before?.n ?? 0);
+  }
+
+  // ---- sessions ----
+
+  loadSession(session_id: string): SerializedSession | null {
+    const row = this.one("SELECT * FROM session WHERE id = ?", session_id);
+    return row ? sessionFromRow(row) : null;
+  }
+
+  saveSession(record: SerializedSession): void {
+    this.sql.exec(
+      "INSERT OR REPLACE INTO session(id, actor, started, expires_at, last_detach_at, token_class) VALUES (?, ?, ?, ?, ?, ?)",
+      record.id, record.actor, record.started,
+      record.expiresAt ?? null, record.lastDetachAt ?? null, record.tokenClass ?? "guest"
+    );
+  }
+
+  deleteSession(session_id: string): void {
+    this.sql.exec("DELETE FROM session WHERE id = ?", session_id);
+  }
+
+  loadExpiredSessions(now: number): SerializedSession[] {
+    return this.all("SELECT * FROM session ORDER BY id")
+      .map(sessionFromRow)
+      .filter((session) =>
+        (session.expiresAt !== undefined && session.expiresAt <= now) ||
+        (session.lastDetachAt !== undefined && session.lastDetachAt !== null && session.lastDetachAt <= now)
+      );
+  }
+
+  // ---- parked tasks ----
+
+  saveTask(task: ParkedTaskRecord): void {
+    this.sql.exec(
+      "INSERT OR REPLACE INTO task(id, parked_on, state, resume_at, awaiting_player, correlation_id, serialized, created, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      task.id, task.parked_on, task.state, task.resume_at, task.awaiting_player,
+      task.correlation_id, stringifyValue(task.serialized), task.created, task.origin
+    );
+  }
+
+  deleteTask(id: string): void {
+    this.sql.exec("DELETE FROM task WHERE id = ?", id);
+  }
+
+  loadTask(id: string): ParkedTaskRecord | null {
+    const row = this.one("SELECT * FROM task WHERE id = ?", id);
+    return row ? taskFromRow(row) : null;
+  }
+
+  loadDueTasks(now: number): ParkedTaskRecord[] {
+    return this.all(
+      "SELECT * FROM task WHERE state = 'suspended' AND resume_at <= ? ORDER BY resume_at, created, id",
+      now
+    ).map(taskFromRow);
+  }
+
+  loadAwaitingReadTasks(player: ObjRef): ParkedTaskRecord[] {
+    return this.all(
+      "SELECT * FROM task WHERE state = 'awaiting_read' AND awaiting_player = ? ORDER BY created, id",
+      player
+    ).map(taskFromRow);
+  }
+
+  earliestResumeAt(): number | null {
+    const row = this.one("SELECT MIN(resume_at) AS resume_at FROM task WHERE state = 'suspended' AND resume_at IS NOT NULL");
+    return row?.resume_at == null ? null : Number(row.resume_at);
+  }
+
+  // ---- counters & meta ----
+
+  nextCounter(name: string): number {
+    let next = 1;
+    this.transaction(() => {
+      const key = `counter:${name}`;
+      next = Number(this.loadMeta(key) ?? 1);
+      this.saveMeta(key, String(next + 1));
+    });
+    return next;
+  }
+
+  loadMeta(key: string): string | null {
+    const row = this.one("SELECT value FROM world_meta WHERE key = ?", key);
+    return row?.value == null ? null : String(row.value);
+  }
+
+  saveMeta(key: string, value: string): void {
+    this.sql.exec("INSERT OR REPLACE INTO world_meta(key, value) VALUES (?, ?)", key, value);
+  }
+
+  // ---- internals ----
+
+  /** Execute a query and return rows as plain object records. */
+  private all(query: string, ...params: SqlStorageValue[]): Row[] {
+    return this.sql.exec(query, ...params).toArray() as Row[];
+  }
+
+  /** Execute a query expected to return at most one row. */
+  private one(query: string, ...params: SqlStorageValue[]): Row | null {
+    const rows = this.sql.exec(query, ...params).toArray() as Row[];
+    return rows[0] ?? null;
+  }
+
+  private ensureHostedObject(id: ObjRef): void {
+    if (!this.one("SELECT 1 FROM object WHERE id = ?", id)) {
+      throw wooError("E_OBJNF", `object not hosted here: ${id}`, id);
+    }
+  }
+
+  private deleteObjectRows(id: ObjRef): void {
+    for (const table of ["event_schema", "content", "child", "verb", "property_version", "property_value", "property_def"]) {
+      this.sql.exec(`DELETE FROM ${table} WHERE object_id = ?`, id);
+    }
+    this.sql.exec("DELETE FROM object WHERE id = ?", id);
+  }
+
+  private assertNoPendingLogOutcomes(): void {
+    const row = this.one("SELECT space_id, seq FROM space_message WHERE applied_ok IS NULL LIMIT 1");
+    if (row) {
+      throw wooError("E_STORAGE", `pending log outcome at transaction commit: ${row.space_id}:${row.seq}`);
+    }
+  }
+
+  private migrate(): void {
+    // Schema mirrors src/server/sqlite-repository.ts migrate() exactly.
+    // CF Workers SQL doesn't support multi-statement exec in one call, so each
+    // CREATE TABLE / CREATE INDEX runs separately.
+    const stmts = [
+      `CREATE TABLE IF NOT EXISTS object (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        parent TEXT,
+        owner TEXT NOT NULL,
+        location TEXT,
+        anchor TEXT,
+        flags INTEGER NOT NULL,
+        created INTEGER NOT NULL,
+        modified INTEGER NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS property_def (
+        object_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        default_val TEXT NOT NULL,
+        type_hint TEXT,
+        owner TEXT NOT NULL,
+        perms TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (object_id, name)
+      )`,
+      `CREATE TABLE IF NOT EXISTS property_value (
+        object_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY (object_id, name)
+      )`,
+      `CREATE TABLE IF NOT EXISTS property_version (
+        object_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        PRIMARY KEY (object_id, name)
+      )`,
+      `CREATE TABLE IF NOT EXISTS verb (
+        object_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        aliases TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        perms TEXT NOT NULL,
+        arg_spec TEXT NOT NULL,
+        source TEXT NOT NULL,
+        source_hash TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        line_map TEXT NOT NULL,
+        native TEXT,
+        bytecode TEXT,
+        PRIMARY KEY (object_id, name)
+      )`,
+      `CREATE TABLE IF NOT EXISTS child (
+        object_id TEXT NOT NULL,
+        child_ref TEXT NOT NULL,
+        PRIMARY KEY (object_id, child_ref)
+      )`,
+      `CREATE TABLE IF NOT EXISTS content (
+        object_id TEXT NOT NULL,
+        content_ref TEXT NOT NULL,
+        PRIMARY KEY (object_id, content_ref)
+      )`,
+      `CREATE TABLE IF NOT EXISTS event_schema (
+        object_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        schema TEXT NOT NULL,
+        PRIMARY KEY (object_id, type)
+      )`,
+      `CREATE TABLE IF NOT EXISTS space_message (
+        space_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        ts INTEGER NOT NULL,
+        actor TEXT NOT NULL,
+        message TEXT NOT NULL,
+        applied_ok INTEGER,
+        error TEXT,
+        PRIMARY KEY (space_id, seq)
+      )`,
+      `CREATE INDEX IF NOT EXISTS space_message_ts ON space_message(space_id, ts)`,
+      `CREATE TABLE IF NOT EXISTS space_snapshot (
+        space_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        ts INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        hash TEXT NOT NULL,
+        PRIMARY KEY (space_id, seq)
+      )`,
+      `CREATE TABLE IF NOT EXISTS task (
+        id TEXT PRIMARY KEY,
+        parked_on TEXT NOT NULL,
+        state TEXT NOT NULL,
+        resume_at INTEGER,
+        awaiting_player TEXT,
+        correlation_id TEXT,
+        serialized TEXT NOT NULL,
+        created INTEGER NOT NULL,
+        origin TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS task_parked_on ON task(parked_on)`,
+      `CREATE INDEX IF NOT EXISTS task_resume_at ON task(resume_at) WHERE state = 'suspended'`,
+      `CREATE TABLE IF NOT EXISTS session (
+        id TEXT PRIMARY KEY,
+        actor TEXT NOT NULL,
+        started INTEGER NOT NULL,
+        expires_at INTEGER,
+        last_detach_at INTEGER,
+        token_class TEXT NOT NULL DEFAULT 'guest'
+      )`,
+      `CREATE TABLE IF NOT EXISTS world_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )`
+    ];
+    for (const stmt of stmts) this.sql.exec(stmt);
+  }
+}
+
+// ---- row decoders (shared with sqlite-repository.ts conceptually; duplicated
+// here because the local-vs-CF row shapes are byte-identical strings/numbers
+// but the surrounding storage APIs diverge enough that sharing a module would
+// add friction without payoff). Worth extracting if a third backend appears. ----
+
+function verbFromRow(row: Row): VerbDef {
+  const base = {
+    name: String(row.name),
+    aliases: parseValue(String(row.aliases)) as string[],
+    owner: String(row.owner),
+    perms: String(row.perms),
+    arg_spec: parseValue(String(row.arg_spec)) as Record<string, WooValue>,
+    source: String(row.source),
+    source_hash: String(row.source_hash),
+    version: Number(row.version),
+    line_map: parseValue(String(row.line_map)) as Record<string, WooValue>
+  };
+  if (row.kind === "native") return { ...base, kind: "native", native: String(row.native) };
+  return { ...base, kind: "bytecode", bytecode: parseValue(String(row.bytecode)) as VerbDef extends { bytecode: infer B } ? B : never };
+}
+
+function snapshotFromRow(row: Row): SpaceSnapshotRecord {
+  return {
+    space_id: String(row.space_id),
+    seq: Number(row.seq),
+    ts: Number(row.ts),
+    state: parseValue(String(row.state)),
+    hash: String(row.hash)
+  };
+}
+
+function taskFromRow(row: Row): ParkedTaskRecord {
+  return {
+    id: String(row.id),
+    parked_on: String(row.parked_on),
+    state: row.state as ParkedTaskRecord["state"],
+    resume_at: row.resume_at == null ? null : Number(row.resume_at),
+    awaiting_player: row.awaiting_player == null ? null : String(row.awaiting_player),
+    correlation_id: row.correlation_id == null ? null : String(row.correlation_id),
+    serialized: parseValue(String(row.serialized)),
+    created: Number(row.created),
+    origin: String(row.origin)
+  };
+}
+
+function sessionFromRow(row: Row): SerializedSession {
+  return {
+    id: String(row.id),
+    actor: String(row.actor),
+    started: Number(row.started),
+    expiresAt: row.expires_at == null ? undefined : Number(row.expires_at),
+    lastDetachAt: row.last_detach_at == null ? null : Number(row.last_detach_at),
+    tokenClass: row.token_class as "guest" | "bearer" | "apikey" | undefined
+  };
+}
+
+function logEntryFromRow(row: Row): SpaceLogEntry {
+  if (row.applied_ok === null || row.applied_ok === undefined) {
+    throw wooError("E_STORAGE", `log entry has no committed outcome: ${row.space_id}:${row.seq}`);
+  }
+  return {
+    space: String(row.space_id),
+    seq: Number(row.seq),
+    ts: Number(row.ts),
+    actor: String(row.actor),
+    message: parseValue(String(row.message)) as unknown as Message,
+    applied_ok: Boolean(row.applied_ok),
+    error: row.error ? (parseValue(String(row.error)) as unknown as ErrorValue) : undefined
+  };
+}
+
+function stringifyValue(value: WooValue): string {
+  return JSON.stringify(value);
+}
+
+function parseValue(value: string): WooValue {
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    throw wooError("E_STORAGE", "invalid JSON value in CF repository", err instanceof Error ? err.message : String(err));
+  }
+}
+
+function flagsToInt(flags: SerializedObject["flags"]): number {
+  return (flags.wizard ? 1 : 0) | (flags.programmer ? 2 : 0) | (flags.fertile ? 4 : 0) | (flags.recyclable ? 8 : 0);
+}
+
+function flagsFromInt(flags: number): SerializedObject["flags"] {
+  return {
+    wizard: Boolean(flags & 1),
+    programmer: Boolean(flags & 2),
+    fertile: Boolean(flags & 4),
+    recyclable: Boolean(flags & 8)
+  };
+}

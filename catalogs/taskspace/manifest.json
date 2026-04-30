@@ -14,7 +14,7 @@
         { "name": "root_tasks", "type": "list<obj>", "default": [], "perms": "rw" }
       ],
       "verbs": [
-        { "name": "create_task", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["title", "description"] }, "source": "verb :create_task(title, description) rx { let task = create($task, title); task.description = description; task.space = this; this.root_tasks = append(this.root_tasks, task); observe({ type: \"task_created\", task: task, parent: null, title: title }); return task; }" }
+        { "name": "create_task", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["title", "description"] }, "source": "verb :create_task(title, description) rx { let task = create($task, title); task.description = description; task.space = this; this.root_tasks = append(this.root_tasks, task); observe({ type: \"task_created\", task: task, parent: null, title: title }); return task; }", "implementation": { "kind": "native", "handler": "create_task" } }
       ]
     },
     {
@@ -34,15 +34,15 @@
         { "name": "space", "type": "obj|null", "default": null, "perms": "rw" }
       ],
       "verbs": [
-        { "name": "add_subtask", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["title", "description"] }, "source": "verb :add_subtask(title, description) rx { let child = create($task, title); child.description = description; child.parent_task = this; child.space = this.space; this.subtasks = append(this.subtasks, child); observe({ type: \"task_created\", task: child, parent: this, title: title }); observe({ type: \"subtask_added\", parent: this, child: child, index: length(this.subtasks) - 1 }); return child; }" },
-        { "name": "move", "perms": "rx", "arg_spec": { "args": ["parent", "index"] }, "source": "verb :move(parent, index) rx { move_task(this, parent, index); observe({ type: \"task_moved\", task: this, to_parent: parent, index: index }); return this; }" },
-        { "name": "claim", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :claim() rx { if (this.assignee != null && this.assignee != actor) raise(E_CONFLICT); this.assignee = actor; this.status = \"claimed\"; observe({ type: \"task_claimed\", task: this, actor: actor }); return this; }" },
-        { "name": "release", "perms": "rx", "arg_spec": { "args": [] }, "source": "verb :release() rx { this.assignee = null; if (this.status != \"done\") this.status = \"open\"; observe({ type: \"task_released\", task: this }); return this; }" },
-        { "name": "set_status", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["status"] }, "source": "verb :set_status(status) rx { let from = this.status; this.status = status; observe({ type: \"status_changed\", task: this, from: from, to: status }); return status; }" },
-        { "name": "add_requirement", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["text"] }, "source": "verb :add_requirement(text) rx { this.requirements = append(this.requirements, { text: text, checked: false }); observe({ type: \"requirement_added\", task: this, index: length(this.requirements) - 1, text: text }); return length(this.requirements) - 1; }" },
-        { "name": "check_requirement", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["index", "checked"] }, "source": "verb :check_requirement(index, checked) rx { this.requirements[index].checked = checked; observe({ type: \"requirement_checked\", task: this, index: index, checked: checked }); return checked; }" },
-        { "name": "add_message", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["body"] }, "source": "verb :add_message(body) rx { let msg = { actor: actor, ts: now(), body: body }; this.messages = append(this.messages, msg); observe({ type: \"message_added\", task: this, actor: actor, body: body, ts: msg.ts }); return msg; }" },
-        { "name": "add_artifact", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["ref"] }, "source": "verb :add_artifact(ref) rx { ref.added_by = actor; ref.added_at = now(); this.artifacts = append(this.artifacts, ref); observe({ type: \"artifact_attached\", task: this, ref: ref }); return ref; }" }
+        { "name": "add_subtask", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["title", "description"] }, "source": "verb :add_subtask(title, description) rx { let child = create($task, title); child.description = description; child.parent_task = this; child.space = this.space; this.subtasks = append(this.subtasks, child); observe({ type: \"task_created\", task: child, parent: this, title: title }); observe({ type: \"subtask_added\", parent: this, child: child, index: length(this.subtasks) - 1 }); return child; }", "implementation": { "kind": "native", "handler": "add_subtask" } },
+        { "name": "move", "perms": "rx", "arg_spec": { "args": ["parent", "index"] }, "source": "verb :move(parent, index) rx { move_task(this, parent, index); observe({ type: \"task_moved\", task: this, to_parent: parent, index: index }); return this; }", "implementation": { "kind": "native", "handler": "move_task" } },
+        { "name": "claim", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :claim() rx { if (this.assignee != null && this.assignee != actor) raise(E_CONFLICT); this.assignee = actor; this.status = \"claimed\"; observe({ type: \"task_claimed\", task: this, actor: actor }); return this; }", "implementation": { "kind": "native", "handler": "claim_task" } },
+        { "name": "release", "perms": "rx", "arg_spec": { "args": [] }, "source": "verb :release() rx { this.assignee = null; if (this.status != \"done\") this.status = \"open\"; observe({ type: \"task_released\", task: this }); return this; }", "implementation": { "kind": "native", "handler": "release_task" } },
+        { "name": "set_status", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["status"] }, "source": "verb :set_status(status) rx { let from = this.status; this.status = status; observe({ type: \"status_changed\", task: this, from: from, to: status }); return status; }", "implementation": { "kind": "native", "handler": "set_status_task" } },
+        { "name": "add_requirement", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["text"] }, "source": "verb :add_requirement(text) rx { this.requirements = append(this.requirements, { text: text, checked: false }); observe({ type: \"requirement_added\", task: this, index: length(this.requirements) - 1, text: text }); return length(this.requirements) - 1; }", "implementation": { "kind": "native", "handler": "add_requirement" } },
+        { "name": "check_requirement", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["index", "checked"] }, "source": "verb :check_requirement(index, checked) rx { this.requirements[index].checked = checked; observe({ type: \"requirement_checked\", task: this, index: index, checked: checked }); return checked; }", "implementation": { "kind": "native", "handler": "check_requirement" } },
+        { "name": "add_message", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["body"] }, "source": "verb :add_message(body) rx { let msg = { actor: actor, ts: now(), body: body }; this.messages = append(this.messages, msg); observe({ type: \"message_added\", task: this, actor: actor, body: body, ts: msg.ts }); return msg; }", "implementation": { "kind": "native", "handler": "add_message" } },
+        { "name": "add_artifact", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["ref"] }, "source": "verb :add_artifact(ref) rx { ref.added_by = actor; ref.added_at = now(); this.artifacts = append(this.artifacts, ref); observe({ type: \"artifact_attached\", task: this, ref: ref }); return ref; }", "implementation": { "kind": "native", "handler": "add_artifact" } }
       ]
     }
   ],
@@ -61,8 +61,7 @@
     { "on": "$task", "type": "artifact_attached", "shape": { "task": "obj", "ref": "map" } }
   ],
   "seed_hooks": [
-    { "kind": "create_instance", "class": "$taskspace", "as": "the_taskspace", "name": "Taskspace", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0, "root_tasks": [] } },
+    { "kind": "create_instance", "class": "$taskspace", "as": "the_taskspace", "name": "Taskspace", "description": "The first runnable task coordination space. It owns the sequenced timeline and anchored task tree used by people or agents to create, claim, discuss, and complete work.", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0, "root_tasks": [] } },
     { "kind": "attach_feature", "consumer": "the_taskspace", "feature": "chat:$conversational" }
   ]
 }
-

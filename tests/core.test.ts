@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compileVerb, definePropertyVersioned, installVerb } from "../src/core/authoring";
-import { createWorld } from "../src/core/bootstrap";
+import { bootstrap, createWorld } from "../src/core/bootstrap";
+import { installLocalCatalogs } from "../src/core/local-catalogs";
 import type { Message, VerbDef } from "../src/core/types";
 
 function message(actor: string, target: string, verb: string, args: unknown[] = []): Message {
@@ -51,6 +52,38 @@ describe("woo core", () => {
     }
   });
 
+  it("installs first-light demos from local catalog manifests", () => {
+    const world = createWorld();
+    const installed = world.getProp("$catalog_registry", "installed_catalogs") as Record<string, unknown>[];
+    expect(installed.map((record) => record.alias)).toEqual(["chat", "taskspace", "dubspace"]);
+    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(["install", "install", "install"]);
+    bootstrap(world);
+    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(["install", "install", "install"]);
+    expect(world.object("catalog_dubspace").parent).toBe("$catalog");
+    expect(world.object("$space").parent).toBe("$sequenced_log");
+    expect(world.object("$dubspace").parent).toBe("$space");
+    expect(world.object("$taskspace").parent).toBe("$space");
+    expect(world.object("$conversational").parent).toBe("$thing");
+    expect(world.object("$dubspace").eventSchemas.has("control_changed")).toBe(true);
+    expect(world.verbInfo("the_dubspace", "set_control").source).toContain("target.(name)");
+    expect(world.verbInfo("the_dubspace", "start_loop").bytecode_version).toBeGreaterThan(0);
+    expect(world.verbInfo("the_chatroom", "say").definer).toBe("$conversational");
+  });
+
+  it("can boot without demo catalogs and install them later", () => {
+    const world = createWorld({ catalogs: false });
+    expect(() => world.object("the_dubspace")).toThrow(/E_OBJNF|object not found/);
+    expect(world.getProp("$catalog_registry", "installed_catalogs")).toEqual([]);
+    const session = world.auth("guest:clean");
+    expect(world.getProp(session.actor, "presence_in")).toEqual([]);
+
+    installLocalCatalogs(world, ["chat", "taskspace", "dubspace"]);
+    expect(world.object("the_chatroom").parent).toBe("$chatroom");
+    expect(world.object("the_taskspace").parent).toBe("$taskspace");
+    expect(world.object("the_dubspace").parent).toBe("$dubspace");
+    expect(world.verbInfo("the_taskspace", "say").definer).toBe("$conversational");
+  });
+
   it("sequences calls and emits observations", () => {
     const { world, session, actor } = authedWorld();
     const first = world.call("1", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.77]));
@@ -73,6 +106,14 @@ describe("woo core", () => {
     const resumed = world.auth(`session:${first.id}`);
     expect(resumed.id).toBe(first.id);
     expect(resumed.actor).toBe(first.actor);
+  });
+
+  it("claims the wizard bootstrap token exactly once", () => {
+    const world = createWorld({ catalogs: false });
+    const session = world.claimWizardBootstrapSession("secret", "secret");
+    expect(session.actor).toBe("$wiz");
+    expect(world.getProp("$system", "bootstrap_token_used")).toBe(true);
+    expect(() => world.claimWizardBootstrapSession("secret", "secret")).toThrow(/E_TOKEN_CONSUMED|already been consumed/);
   });
 
   it("allocates guest instances, not the guest class", () => {

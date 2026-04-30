@@ -12,9 +12,9 @@
       "description": "Chat-shaped text-to-action scaffold.",
       "properties": [],
       "verbs": [
-        { "name": "match_object", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["name", "location"] }, "source": "verb :match_object(name, location) rxd { return match_object(name, location); }" },
-        { "name": "match_verb", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["name", "target"] }, "source": "verb :match_verb(name, target) rxd { return match_verb(name, target); }" },
-        { "name": "parse_command", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["text", "actor"] }, "source": "verb :parse_command(text, actor) rxd { return parse_chat_command(text, actor); }" }
+        { "name": "match_object", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["name", "location"] }, "source": "verb :match_object(name, location) rxd { return match_object(name, location); }", "implementation": { "kind": "native", "handler": "match_object" } },
+        { "name": "match_verb", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["name", "target"] }, "source": "verb :match_verb(name, target) rxd { return match_verb(name, target); }", "implementation": { "kind": "native", "handler": "match_verb" } },
+        { "name": "parse_command", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["text", "actor"] }, "source": "verb :parse_command(text, actor) rxd { return parse_chat_command(text, actor); }", "implementation": { "kind": "native", "handler": "parse_chat_command" } }
       ]
     },
     { "local_name": "$failed_match", "parent": "$thing", "description": "Stable sentinel returned when no visible object matches.", "properties": [], "verbs": [] },
@@ -34,15 +34,15 @@
       "description": "Feature object carrying live chat verbs for spaces.",
       "properties": [],
       "verbs": [
-        { "name": "can_be_attached_by", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["actor"] }, "source": "verb :can_be_attached_by(actor) rxd { return true; }" },
-        { "name": "say", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["text"] }, "source": "verb :say(text) rxd { observe({ type: \"said\", actor: actor, text: text }); return true; }" },
-        { "name": "emote", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["text"] }, "source": "verb :emote(text) rxd { observe({ type: \"emoted\", actor: actor, text: text }); return true; }" },
-        { "name": "tell", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["recipient", "text"] }, "source": "verb :tell(recipient, text) rxd { observe({ type: \"told\", from: actor, to: recipient, text: text }); return true; }" },
-        { "name": "look", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :look() rxd { return { description: this.description, contents: this.contents, present_actors: this.subscribers }; }" },
-        { "name": "who", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :who() rxd { return this.subscribers; }" },
-        { "name": "enter", "perms": "rxd", "direct_callable": true, "skip_presence_check": true, "arg_spec": { "args": ["actor?"] }, "source": "verb :enter(who) rxd { let entrant = who || actor; this:add_presence(entrant); observe({ type: \"entered\", actor: entrant }); return this.subscribers; }" },
-        { "name": "leave", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["actor?"] }, "source": "verb :leave(who) rxd { let leaver = who || actor; this:remove_presence(leaver); observe({ type: \"left\", actor: leaver }); return this.subscribers; }" },
-        { "name": "command", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["text"] }, "source": "verb :command(text) rxd { let cmd = $match:parse_command(text, actor); return dispatch_chat_command(this, cmd); }" }
+        { "name": "can_be_attached_by", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["actor"] }, "source": "verb :can_be_attached_by(actor) rxd { return true; }", "implementation": { "kind": "native", "handler": "conversational_can_be_attached_by" } },
+        { "name": "say", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["text"] }, "source": "verb :say(text) rxd { observe({ type: \"said\", actor: actor, text: text }); return true; }", "implementation": { "kind": "native", "handler": "chat_say" } },
+        { "name": "emote", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["text"] }, "source": "verb :emote(text) rxd { observe({ type: \"emoted\", actor: actor, text: text }); return true; }", "implementation": { "kind": "native", "handler": "chat_emote" } },
+        { "name": "tell", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["recipient", "text"] }, "source": "verb :tell(recipient, text) rxd { observe({ type: \"told\", from: actor, to: recipient, text: text }); return true; }", "implementation": { "kind": "native", "handler": "chat_tell" } },
+        { "name": "look", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :look() rxd { return { description: this.description, contents: this.contents, present_actors: this.subscribers }; }", "implementation": { "kind": "native", "handler": "chat_look" } },
+        { "name": "who", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :who() rxd { return this.subscribers; }", "implementation": { "kind": "native", "handler": "chat_who" } },
+        { "name": "enter", "perms": "rxd", "direct_callable": true, "skip_presence_check": true, "arg_spec": { "args": ["actor?"] }, "source": "verb :enter(who) rxd { let entrant = who || actor; this:add_presence(entrant); observe({ type: \"entered\", actor: entrant }); return this.subscribers; }", "implementation": { "kind": "native", "handler": "chat_enter" } },
+        { "name": "leave", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["actor?"] }, "source": "verb :leave(who) rxd { let leaver = who || actor; this:remove_presence(leaver); observe({ type: \"left\", actor: leaver }); return this.subscribers; }", "implementation": { "kind": "native", "handler": "chat_leave" } },
+        { "name": "command", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["text"] }, "source": "verb :command(text) rxd { let cmd = $match:parse_command(text, actor); return dispatch_chat_command(this, cmd); }", "implementation": { "kind": "native", "handler": "chat_command" } }
       ]
     }
   ],
@@ -55,8 +55,7 @@
     { "on": "$conversational", "type": "huh", "shape": { "source": "obj", "actor": "obj", "text": "str", "suggestion": "str?" } }
   ],
   "seed_hooks": [
-    { "kind": "create_instance", "class": "$chatroom", "as": "the_chatroom", "name": "Lobby", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0 } },
+    { "kind": "create_instance", "class": "$chatroom", "as": "the_chatroom", "name": "Lobby", "description": "The first runnable chat room. It is a live lobby where connected actors can speak, emote, tell, look, and see who is present through the $conversational feature.", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0 } },
     { "kind": "attach_feature", "consumer": "the_chatroom", "feature": "$conversational" }
   ]
 }
-

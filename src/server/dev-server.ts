@@ -4,6 +4,7 @@ import { createServer as createViteServer } from "vite";
 import { WebSocket, WebSocketServer } from "ws";
 import { compileVerb, definePropertyVersioned, installVerb } from "../core/authoring";
 import { createWorld } from "../core/bootstrap";
+import { parseAutoInstallCatalogs } from "../core/local-catalogs";
 import { normalizeError, type ParkedTaskRun } from "../core/world";
 import {
   wooError,
@@ -18,12 +19,13 @@ import {
   type SpaceLogEntry,
   type WooValue
 } from "../core/types";
+import { installGitHubTap } from "./github-taps";
 import { LocalSQLiteRepository } from "./sqlite-repository";
 
 // Local dev server only: HTTP authoring endpoints are intentionally
 // unauthenticated for local poking. Do not deploy as-is.
 const repository = new LocalSQLiteRepository(process.env.WOO_DB ?? ".woo/dev.sqlite");
-const world = createWorld({ repository });
+const world = createWorld({ repository, catalogs: parseAutoInstallCatalogs(process.env.WOO_AUTO_INSTALL_CATALOGS) });
 type AttachedSocket = { sessionId: string; actor: string; socketId: string };
 const sockets = new Map<WebSocket, AttachedSocket>();
 type RestStream = { id: string; res: http.ServerResponse; actor: ObjRef; target: ObjRef; scope: "space" | "actor" };
@@ -98,7 +100,7 @@ wss.on("connection", (ws) => {
     try {
       const frame = JSON.parse(String(raw));
       if (frame.op === "auth") {
-        const session = world.auth(String(frame.token ?? "guest:dev"));
+        const session = authenticateToken(String(frame.token ?? "guest:dev"));
         const previous = sockets.get(ws);
         if (previous) world.detachSocket(previous.sessionId, previous.socketId);
         world.attachSocket(session.id, socketId);
@@ -297,10 +299,40 @@ async function handleRestApi(req: http.IncomingMessage, res: http.ServerResponse
       const body = await readJson(req);
       const token = String(body.token ?? "");
       if (!token.startsWith("guest:") && !token.startsWith("session:")) {
-        throw wooError("E_INVARG", "v1-core REST accepts guest: and session: tokens");
+        if (!token.startsWith("wizard:")) throw wooError("E_INVARG", "REST accepts guest:, session:, and wizard: tokens");
       }
-      const session = world.auth(token);
+      const session = authenticateToken(token);
       json(res, { actor: session.actor, session: session.id });
+      return true;
+    } catch (err) {
+      return restError(res, err);
+    }
+  }
+
+  if (req.method === "POST" && pathname === "/api/tap/install") {
+    try {
+      const session = requireRestSession(req);
+      requireWizard(session.actor);
+      const body = await readJson(req);
+      const frame = await installGitHubTap(world, session.actor, {
+        tap: String(body.tap ?? ""),
+        catalog: String(body.catalog ?? ""),
+        ref: typeof body.ref === "string" ? body.ref : undefined,
+        as: typeof body.as === "string" ? body.as : undefined
+      });
+      broadcastApplied(frame);
+      json(res, frame);
+      return true;
+    } catch (err) {
+      return restError(res, err);
+    }
+  }
+
+  if (req.method === "GET" && pathname === "/api/taps") {
+    try {
+      const session = requireRestSession(req);
+      requireWizard(session.actor);
+      json(res, { catalogs: world.getProp("$catalog_registry", "installed_catalogs") });
       return true;
     } catch (err) {
       return restError(res, err);
@@ -389,6 +421,19 @@ function objectRoute(pathname: string): { id: string; rest: string[] } | null {
     id: decodeURIComponent(parts[2]),
     rest: parts.slice(3).map((part) => decodeURIComponent(part))
   };
+}
+
+function authenticateToken(token: string): Session {
+  if (token.startsWith("wizard:")) return claimWizardSession(token.slice("wizard:".length));
+  return world.auth(token);
+}
+
+function claimWizardSession(token: string): Session {
+  return world.claimWizardBootstrapSession(token, process.env.WOO_INITIAL_WIZARD_TOKEN);
+}
+
+function requireWizard(actor: ObjRef): void {
+  if (!world.object(actor).flags.wizard) throw wooError("E_PERM", "wizard authority required", actor);
 }
 
 function requireRestSession(req: http.IncomingMessage): Session {
@@ -508,7 +553,10 @@ function statusForError(error: ErrorValue): number {
     case "E_INVARG":
       return 400;
     case "E_NOSESSION":
+    case "E_TOKEN_CONSUMED":
       return 401;
+    case "E_BOOTSTRAP_TOKEN_MISSING":
+      return 503;
     case "E_PERM":
     case "E_DIRECT_DENIED":
       return 403;
@@ -516,6 +564,7 @@ function statusForError(error: ErrorValue): number {
     case "E_VERBNF":
     case "E_PROPNF":
     case "E_NOTAPPLICABLE":
+    case "E_NOTFOUND":
       return 404;
     case "E_CONFLICT":
       return 409;

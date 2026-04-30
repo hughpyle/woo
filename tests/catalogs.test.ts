@@ -1,6 +1,8 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createWorld } from "../src/core/bootstrap";
+import { installCatalogManifest, type CatalogManifest as RuntimeCatalogManifest } from "../src/core/catalog-installer";
 
 type CatalogManifest = {
   name: string;
@@ -63,6 +65,18 @@ describe("local catalogs", () => {
     const taskspace = readManifest("taskspace");
     expect(taskspace.depends).toEqual(["@local:chat"]);
     expect(taskspace.seed_hooks).toContainEqual({ kind: "attach_feature", consumer: "the_taskspace", feature: "chat:$conversational" });
+  });
+
+  it("rejects missing catalog dependencies with the installed set in the error", () => {
+    const world = createWorld({ catalogs: false });
+    const manifest: RuntimeCatalogManifest = {
+      name: "needs-chat",
+      version: "1.0.0",
+      spec_version: "v1",
+      depends: ["@local:chat"],
+      classes: []
+    };
+    expect(() => installCatalogManifest(world, manifest, { tap: "@local", alias: "needs-chat" })).toThrow(/@local:chat.*\(none\)/);
   });
 
   it("declares source for every catalog verb", () => {

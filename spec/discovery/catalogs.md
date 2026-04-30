@@ -31,6 +31,8 @@ A **catalog** is a directory in a public GitHub repository (or in the deployment
 
 Spec ships **source**, not bytecode. The manifest carries DSL source for every verb; the importing world recompiles in its own spec version. This avoids cross-spec-version bytecode portability problems entirely.
 
+**First-light local implementation hints.** The bundled `@local` catalogs may also carry a non-portable `implementation` field on a verb (`native` handler or named bytecode fixture). This is a v0.5 bridge for demo behavior the current DSL cannot yet express. Public v1 catalogs must treat source as normative; implementation hints are ignored outside trusted local catalogs.
+
 In-world, installed catalogs are objects descended from `$catalog`; the world's `$catalog_registry` lists them. Each installed class records its source catalog so introspection can answer "where did this come from?"
 
 ---
@@ -146,6 +148,8 @@ body: { tap, catalog, ref?, as? }
 
 Worker resolves `ref` against the GitHub API (HEAD of the named tag/branch, or the supplied SHA), retrieves the **resolved commit SHA**, then fetches `https://raw.githubusercontent.com/<tap>/<sha>/catalogs/<catalog>/manifest.json` and the README. Computes content hashes (SHA-256) of both. Dispatches `$catalog_registry:call({actor, target: "$catalog_registry", verb: "install", args: [manifest, frontmatter, alias, install_provenance]})` where `actor` is the authenticated wizard actor, `alias = body.as ?? catalog`, and `install_provenance` is:
 
+If `ref` is omitted, the first implementation chooses the highest semver tag matching `<catalog>-v*`; if no matching tag exists, it falls back to `main`. Public GitHub taps ignore any non-portable `implementation` hints in the manifest and compile from source. Only `@local` catalogs may use trusted native/fixture hints.
+
 ```
 {
   tap: "<owner>/<repo>",
@@ -202,11 +206,11 @@ A deployment's bundled `catalogs/` directory ships with the world's source. The 
 
 Boot-time auto-install is controlled by `WOO_AUTO_INSTALL_CATALOGS` (a comma-separated list, see [reference/cloudflare.md §R14](../reference/cloudflare.md#r14-deploying-your-own-world)):
 
-- `WOO_AUTO_INSTALL_CATALOGS=chat,taskspace,dubspace` — the **target** default for this repository's dev configuration once the local catalog installer is wired. Until then, v0.5 bootstraps the same demo objects directly from code and treats the bundled `catalogs/` directory as source/spec data.
+- `WOO_AUTO_INSTALL_CATALOGS=chat,taskspace,dubspace` — the default for this repository's dev configuration. The v0.5 runtime seeds universal objects, then installs these local catalogs.
 - `WOO_AUTO_INSTALL_CATALOGS=` (empty) — clean world; operators install what they want.
 - Each entry is a catalog name resolved against `@local:<name>`.
 
-Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the boot-time pass skips it. Each auto-installed catalog still produces a registry log entry, so the install history is complete.
+Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the boot-time pass skips it without appending a no-op registry log row. The first successful auto-install of each catalog is sequenced through `$catalog_registry`, so the install history records the mutation rather than every later reboot.
 
 ### CT5.5 Manifest shape
 
@@ -243,7 +247,15 @@ Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the 
 }
 ```
 
-The DSL source per verb is what enables the recompile-in-importing-world discipline.
+The DSL source per verb is what enables the recompile-in-importing-world discipline. The first-party `@local` manifests in this repository may additionally include:
+
+```jsonc
+"implementation": { "kind": "native", "handler": "chat_say" }
+// or
+"implementation": { "kind": "fixture", "name": "set_control" }
+```
+
+Those implementation hints are trusted-local only. They are not part of the portable public catalog contract and exist so the first-light demos can be installed from manifests before the DSL can express every behavior.
 
 ---
 
