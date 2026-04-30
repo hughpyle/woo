@@ -25,6 +25,41 @@
       "description": "Standalone chat room class whose behavior comes from $conversational.",
       "properties": [],
       "verbs": []
+    },
+    {
+      "local_name": "$cockatoo",
+      "parent": "$thing",
+      "description": "A talkative bird. Cheap imitation of the LambdaMOO cockatoo (#1479): squawks random phrases, can be taught new ones, gagged when too noisy. Self-driven timer chatter is deferred until DSL exposes fork; for now squawking is actor-driven.",
+      "properties": [
+        { "name": "phrases", "type": "list<str>", "default": [
+          "Squawk!",
+          "Hello!",
+          "Pretty bird!",
+          "Want a cracker?",
+          "I'm a cockatoo!",
+          "Programmable, persistent, and loud.",
+          "World of objects!"
+        ], "perms": "rw" },
+        { "name": "shake_reactions", "type": "list<str>", "default": [
+          "flaps wildly",
+          "glares balefully",
+          "squawks in protest",
+          "showers feathers",
+          "preens with offended dignity"
+        ], "perms": "rw" },
+        { "name": "gagged", "type": "bool", "default": false, "perms": "rw" },
+        { "name": "mood", "type": "str", "default": "alert", "perms": "rw" }
+      ],
+      "verbs": [
+        { "name": "look", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :look() rxd { let state = this.mood; if (this.gagged) { state = \"gagged\"; } observe({ type: \"cockatoo_seen\", source: this, actor: actor, mood: state, ts: now() }); return { description: this.description, mood: state, phrase_count: length(this.phrases) }; }" },
+        { "name": "squawk", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :squawk() rxd { if (this.gagged) { observe({ type: \"cockatoo_muffled\", source: this, actor: actor, ts: now() }); return \"*muffled noises*\"; } let phrases = this.phrases; if (length(phrases) == 0) { return \"\"; } let phrase = phrases[random(length(phrases)) + 1]; observe({ type: \"cockatoo_squawk\", source: this, actor: actor, text: phrase, ts: now() }); return phrase; }" },
+        { "name": "teach", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["phrase"] }, "source": "verb :teach(phrase) rxd { if (!phrase) { raise { code: \"E_INVARG\", message: \"teach requires a phrase\" }; } this.phrases = this.phrases + [phrase]; observe({ type: \"cockatoo_taught\", source: this, actor: actor, phrase: phrase, ts: now() }); return length(this.phrases); }" },
+        { "name": "pluck", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :pluck() rxd { observe({ type: \"cockatoo_pluck\", source: this, actor: actor, text: \"*EEEEEEK!*\", ts: now() }); return true; }" },
+        { "name": "shake", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :shake() rxd { let reactions = this.shake_reactions; if (length(reactions) == 0) { return \"\"; } let reaction = reactions[random(length(reactions)) + 1]; observe({ type: \"cockatoo_shake\", source: this, actor: actor, reaction: reaction, ts: now() }); return reaction; }" },
+        { "name": "feed", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["food?"] }, "source": "verb :feed(food) rxd { let snack = food; if (!snack) { snack = \"birdseed\"; } observe({ type: \"cockatoo_fed\", source: this, actor: actor, food: snack, ts: now() }); return snack; }" },
+        { "name": "gag", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :gag() rxd { this.gagged = true; observe({ type: \"cockatoo_gagged\", source: this, actor: actor, ts: now() }); return true; }" },
+        { "name": "ungag", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :ungag() rxd { this.gagged = false; observe({ type: \"cockatoo_ungagged\", source: this, actor: actor, ts: now() }); return true; }" }
+      ]
     }
   ],
   "features": [
@@ -52,10 +87,20 @@
     { "on": "$conversational", "type": "told", "shape": { "source": "obj", "from": "obj", "to": "obj", "text": "str" } },
     { "on": "$conversational", "type": "entered", "shape": { "source": "obj", "actor": "obj" } },
     { "on": "$conversational", "type": "left", "shape": { "source": "obj", "actor": "obj" } },
-    { "on": "$conversational", "type": "huh", "shape": { "source": "obj", "actor": "obj", "text": "str", "suggestion": "str?" } }
+    { "on": "$conversational", "type": "huh", "shape": { "source": "obj", "actor": "obj", "text": "str", "suggestion": "str?" } },
+    { "on": "$cockatoo", "type": "cockatoo_seen", "shape": { "source": "obj", "actor": "obj", "mood": "str" } },
+    { "on": "$cockatoo", "type": "cockatoo_squawk", "shape": { "source": "obj", "actor": "obj", "text": "str" } },
+    { "on": "$cockatoo", "type": "cockatoo_muffled", "shape": { "source": "obj", "actor": "obj" } },
+    { "on": "$cockatoo", "type": "cockatoo_taught", "shape": { "source": "obj", "actor": "obj", "phrase": "str" } },
+    { "on": "$cockatoo", "type": "cockatoo_pluck", "shape": { "source": "obj", "actor": "obj", "text": "str" } },
+    { "on": "$cockatoo", "type": "cockatoo_shake", "shape": { "source": "obj", "actor": "obj", "reaction": "str" } },
+    { "on": "$cockatoo", "type": "cockatoo_fed", "shape": { "source": "obj", "actor": "obj", "food": "str" } },
+    { "on": "$cockatoo", "type": "cockatoo_gagged", "shape": { "source": "obj", "actor": "obj" } },
+    { "on": "$cockatoo", "type": "cockatoo_ungagged", "shape": { "source": "obj", "actor": "obj" } }
   ],
   "seed_hooks": [
     { "kind": "create_instance", "class": "$chatroom", "as": "the_chatroom", "name": "Lobby", "description": "The first runnable chat room. It is a live lobby where connected actors can speak, emote, tell, look, and see who is present through the $conversational feature.", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0 } },
-    { "kind": "attach_feature", "consumer": "the_chatroom", "feature": "$conversational" }
+    { "kind": "attach_feature", "consumer": "the_chatroom", "feature": "$conversational" },
+    { "kind": "create_instance", "class": "$cockatoo", "as": "the_cockatoo", "name": "Cockatoo", "description": "A sulphur-crested cockatoo sitting in a cage on top of the mantelpiece. Inside the cage are a few bird-toys, a mirror, and a tray for its food and water. (Cheap imitation of LambdaMOO #1479; aliases there: cockatoo, cock, raven, bird, cuckatoo, duck.)", "anchor": "the_chatroom", "location": "the_chatroom", "properties": {} }
   ]
 }

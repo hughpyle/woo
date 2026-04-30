@@ -159,14 +159,39 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
 
 export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: RepairCatalogOptions = {}): void {
   const actor = options.actor ?? "$wiz";
-  for (const def of [...(manifest.classes ?? []), ...(manifest.features ?? [])]) {
-    if (!world.objects.has(def.local_name)) continue;
+  const existing = installedCatalogs(world);
+  const localObjects = new Map<string, ObjRef>();
+  const localSeeds = new Map<string, ObjRef>();
+  const objectDefs = [...(manifest.classes ?? []), ...(manifest.features ?? [])];
+  for (const def of objectDefs) localObjects.set(def.local_name, def.local_name);
+
+  for (const def of objectDefs) {
+    if (!world.objects.has(def.local_name)) {
+      const parent = resolveObjectRef(world, def.parent, localObjects, localSeeds, existing);
+      world.createObject({ id: def.local_name, name: def.local_name, parent, owner: actor });
+    }
     setDescriptionIfEmpty(world, def.local_name, catalogDescription(def.description, def.local_name, manifest.name));
     for (const property of def.properties ?? []) installProperty(world, def.local_name, property, actor);
     for (const verb of def.verbs ?? []) installVerbDef(world, def.local_name, verb, actor, false, true);
   }
   for (const schema of manifest.schemas ?? []) {
     if (world.objects.has(schema.on)) world.defineEventSchema(schema.on, schema.type, schema.shape);
+  }
+  for (const hook of manifest.seed_hooks ?? []) {
+    if (hook.kind === "create_instance") {
+      const id = hook.as;
+      if (!world.objects.has(id)) {
+        const parent = resolveObjectRef(world, hook.class, localObjects, localSeeds, existing);
+        const anchor = hook.anchor ? resolveObjectRef(world, hook.anchor, localObjects, localSeeds, existing) : null;
+        const location = hook.location ? resolveObjectRef(world, hook.location, localObjects, localSeeds, existing) : null;
+        world.createObject({ id, name: hook.name ?? id, parent, owner: actor, anchor, location });
+      }
+      localSeeds.set(hook.as, id);
+      setDescriptionIfEmpty(world, id, catalogDescription(hook.description, hook.name ?? id, manifest.name));
+      for (const [name, value] of Object.entries(hook.properties ?? {})) setPropIfMissing(world, id, name, value);
+      continue;
+    }
+    if (world.objects.has(hook.consumer) && world.objects.has(hook.feature)) attachFeature(world, hook.consumer, hook.feature);
   }
 }
 

@@ -192,6 +192,61 @@ describe("local catalogs", () => {
     expect(world.getProp("delay_1", "feedback")).toBe(0.44);
   });
 
+  it("seeds the_cockatoo in the chatroom with random-pick squawk", () => {
+    const world = createWorld();
+    expect(world.objects.has("$cockatoo")).toBe(true);
+    expect(world.objects.has("the_cockatoo")).toBe(true);
+    expect(world.object("the_cockatoo").parent).toBe("$cockatoo");
+    expect(world.object("the_cockatoo").anchor).toBe("the_chatroom");
+    expect(world.object("the_cockatoo").location).toBe("the_chatroom");
+
+    const session = world.auth("guest:cockatoo");
+    const phrases = world.getProp("the_cockatoo", "phrases") as string[];
+    expect(phrases.length).toBeGreaterThan(0);
+
+    // Cockatoo lives in the_chatroom; presence required to poke it
+    world.directCall("enter", session.actor, "the_chatroom", "enter", []);
+
+    const squawk = world.directCall("squawk", session.actor, "the_cockatoo", "squawk", []);
+    expect(squawk.op).toBe("result");
+    if (squawk.op === "result") {
+      expect(phrases).toContain(String(squawk.result));
+      expect(squawk.observations[0]).toMatchObject({ type: "cockatoo_squawk", source: "the_cockatoo", actor: session.actor });
+    }
+
+    world.directCall("teach", session.actor, "the_cockatoo", "teach", ["world of objects"]);
+    expect((world.getProp("the_cockatoo", "phrases") as string[]).at(-1)).toBe("world of objects");
+
+    world.directCall("gag", session.actor, "the_cockatoo", "gag", []);
+    const muffled = world.directCall("squawk-gagged", session.actor, "the_cockatoo", "squawk", []);
+    if (muffled.op === "result") {
+      expect(muffled.result).toBe("*muffled noises*");
+      expect(muffled.observations[0]).toMatchObject({ type: "cockatoo_muffled" });
+    }
+  });
+
+  it("migrates the cockatoo into worlds installed before it landed", () => {
+    const world = createWorld();
+    // Reset to before the cockatoo migration ran
+    world.setProp("$system", "applied_migrations", ["2026-04-30-source-catalog-verbs", "2026-04-30-catalog-placement-metadata"]);
+    // Pretend the cockatoo never existed in this world
+    world.objects.delete("the_cockatoo");
+    world.objects.delete("$cockatoo");
+    expect(world.objects.has("$cockatoo")).toBe(false);
+    expect(world.objects.has("the_cockatoo")).toBe(false);
+
+    installLocalCatalogs(world, ["chat"]);
+
+    expect(world.objects.has("$cockatoo")).toBe(true);
+    expect(world.objects.has("the_cockatoo")).toBe(true);
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-chat-cockatoo");
+
+    const session = world.auth("guest:migrated-cockatoo");
+    world.directCall("enter", session.actor, "the_chatroom", "enter", []);
+    const squawk = world.directCall("squawk", session.actor, "the_cockatoo", "squawk", []);
+    expect(squawk.op).toBe("result");
+  });
+
   it("migrates stale local catalog native verbs to source bytecode", () => {
     const world = createWorld();
     world.setProp("$system", "applied_migrations", []);
@@ -233,6 +288,9 @@ describe("local catalogs", () => {
     expect(world.object("$conversational").verbs.get("enter")?.kind).toBe("bytecode");
     expect(world.object("$task").verbs.get("add_subtask")?.kind).toBe("bytecode");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-source-catalog-verbs");
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-catalog-placement-metadata");
+    expect(world.getProp("the_taskspace", "auto_presence")).toBe(true);
+    expect(world.getProp("the_taskspace", "host_placement")).toBe("self");
 
     const session = world.auth("guest:migrated-catalog");
     expect(world.directCall("enter", session.actor, "the_chatroom", "enter", []).op).toBe("result");

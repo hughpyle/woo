@@ -104,6 +104,12 @@ the_taskspace.features = [$conversational]
 
 Now `the_taskspace:say("starting standup")` works. The utterance is a direct call, so the `said` observation is live-only — pushed to taskspace subscribers, separate from the taskspace's own sequenced log of task mutations.
 
+## The cockatoo (cheap imitation of LambdaMOO #1479)
+
+`$cockatoo` lives in `the_chatroom` as a small static-feeling resident. It has a `phrases` list and `:squawk()` picks one at random via the `random(n)` builtin; `:teach(phrase)` extends the list; `:gag()` / `:ungag()` toggle a muzzle that swaps squawks for `*muffled noises*` observations. `:pluck()`, `:shake()`, `:feed()` are flavor verbs.
+
+What's intentionally not (yet) here: **self-driven timer chatter**. The canonical LambdaMOO cockatoo activated and squawked on a fork loop with a random delay. Woo's runtime supports parked/forked tasks, but the DSL does not yet expose `fork(seconds) { ... }` or a `schedule(seconds, target, verb, args)` builtin. Once it does, the cockatoo will become the first useful demo of woo's parked-task system: install a watchdog verb that schedules itself, with random interval and random phrase pick. Until then, squawking is actor-driven only.
+
 ## Renderer
 
 A transient browser host that:

@@ -7,6 +7,8 @@ export type LocalCatalogName = string;
 
 const LOCAL_CATALOGS = new Map(BUNDLED_CATALOGS.map((entry) => [entry.manifest.name, entry.manifest] as const));
 const LOCAL_CATALOG_SOURCE_MIGRATION = "2026-04-30-source-catalog-verbs";
+const LOCAL_CATALOG_PLACEMENT_MIGRATION = "2026-04-30-catalog-placement-metadata";
+const LOCAL_CATALOG_CHAT_COCKATOO_MIGRATION = "2026-04-30-chat-cockatoo";
 
 export const DEFAULT_LOCAL_CATALOGS = bundledCatalogAliases();
 
@@ -60,12 +62,18 @@ export function installLocalCatalog(world: WooWorld, name: string): void {
 }
 
 function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): void {
-  if (migrationApplied(world, LOCAL_CATALOG_SOURCE_MIGRATION)) return;
+  runLocalCatalogMigration(world, names, LOCAL_CATALOG_SOURCE_MIGRATION);
+  runLocalCatalogMigration(world, names, LOCAL_CATALOG_PLACEMENT_MIGRATION);
+  runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_COCKATOO_MIGRATION);
+}
+
+function runLocalCatalogMigration(world: WooWorld, names: readonly string[], id: string): void {
+  if (migrationApplied(world, id)) return;
   for (const name of names) {
     if (!localCatalogInstalled(world, name)) continue;
     repairCatalogManifest(world, LOCAL_CATALOGS.get(name)!, { actor: "$wiz" });
   }
-  markMigrationApplied(world, LOCAL_CATALOG_SOURCE_MIGRATION);
+  markMigrationApplied(world, id);
 }
 
 function isLocalCatalogName(name: string): name is LocalCatalogName {
