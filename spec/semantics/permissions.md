@@ -19,7 +19,7 @@ Covers object flags, verb/property perms, the `progr` discipline, the trust boun
 
 ### 11.2 Verb perms
 
-Bits: `r` (source readable to non-owner), `w` (writable by non-owner), `x` (executable as command), `d` (direct-callable shorthand). The persisted verb metadata field is `direct_callable`; `rxd` in source is shorthand for `perms: "rx"` plus `direct_callable: true`.
+Bits: `r` (source readable to non-owner), `w` (writable by non-owner), `x` (executable as command), `d` (direct-callable shorthand). The persisted verb metadata field is `direct_callable`; `rxd` in source or a catalog manifest is ingestion shorthand for `perms: "rx"` plus `direct_callable: true`. Runtime storage should prefer the normalized form (`perms: "rx"`, `direct_callable: true`); older imported worlds may still contain `d` in `perms`, and loaders should treat it as the same shorthand when repairing or reinstalling verbs.
 
 Owner of a verb is the principal under which the verb runs (`progr`). This is set when the verb is created; it is not the caller.
 

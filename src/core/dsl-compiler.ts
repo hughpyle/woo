@@ -351,8 +351,9 @@ class Parser {
     this.expectValue("(", "expected '(' after verb name");
     const { params, argSpec } = this.parseHeaderParams();
     this.expectValue(")", "expected ')' after verb parameters");
-    let perms = "rxd";
-    if (this.peek().kind === "identifier" && /^[rwxdt]+$/.test(this.peek().value)) perms = this.advance().value;
+    const permsToken = this.expectIdentifier("expected verb permissions");
+    if (!/^[rwxd]+$/.test(permsToken.value)) throw this.error("expected verb permissions as a subset of rwxd", permsToken);
+    const perms = permsToken.value;
     const body = this.parseBlock();
     this.expectKind("eof", "expected end of source after verb body");
     return { kind: "Program", name, params, perms, argSpec, body, span: mergeSpan(start, body.span) };

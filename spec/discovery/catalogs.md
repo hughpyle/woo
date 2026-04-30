@@ -138,7 +138,7 @@ Three operations, all wizard-only and audited. Catalog operations are themselves
 
 `$catalog_registry` is a universal singleton (corename `$catalog_registry`) that descends from `$space`. Every install, uninstall, and update is a sequenced call **through `$catalog_registry`** — its log is the catalog-operations history. Replay over the registry log reconstructs the sequence of catalog mutations the world has seen.
 
-Because the registry is a `$space` subclass, it inherits the same call lifecycle, replay, and snapshot machinery ([sequenced-log.md §SL2](../semantics/sequenced-log.md#sl2-the-native-verbs), [space.md §S2](../semantics/space.md#s2-the-call-lifecycle)). The two-phase commit + savepoint discipline applies: a partial install rolls back inside the savepoint while the registry log row stays with `applied_ok=false`. Crash-safety and audit follow without new mechanisms.
+Because the registry is a `$space` subclass, it inherits the same call lifecycle, replay, and snapshot machinery ([sequenced-log.md §SL2](../semantics/sequenced-log.md#sl2-the-native-host-operations), [space.md §S2](../semantics/space.md#s2-the-call-lifecycle)). The two-phase commit + savepoint discipline applies: a partial install rolls back inside the savepoint while the registry log row stays with `applied_ok=false`. Crash-safety and audit follow without new mechanisms.
 
 This places catalog ops in a different sequencing scope from `$space:call` traffic in user spaces — installs don't conflict with normal world activity, but they are themselves totally ordered relative to each other and replay-deterministic.
 
@@ -279,6 +279,11 @@ branch on the seeded object names that happen to receive them.
   ]
 }
 ```
+
+Catalog `perms` use the same authoring shorthand as source: `rxd` means install
+with normalized `perms: "rx"` and `direct_callable: true`. Catalogs may also set
+`direct_callable` explicitly; the explicit metadata field is the authoritative
+stored form after install.
 
 The DSL source per verb is what enables the recompile-in-importing-world
 discipline. Trusted local experiments may additionally include:

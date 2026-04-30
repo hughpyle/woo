@@ -224,9 +224,12 @@ a programmer editing an object it owns. `create_object` creates an object owned
 by the actor; the parent must be owned by the actor or `fertile`. `move_object`
 and `chparent_object` require the same object-authoring authority, and
 `chparent_object` applies the same parent/fertile rule plus cycle rejection.
-Wire endpoints for these live under an authoring surface (for example
-`/api/authoring/objects/create`), not under `/api/objects/:id`, which is
-reserved for ordinary REST object access.
+Wire endpoints for these live under an authoring surface, not under
+`/api/objects/:id`, which is reserved for ordinary REST object access. The local
+development server currently exposes `/api/compile`, `/api/install`,
+`/api/property`, `/api/property/value`, and
+`/api/authoring/objects/{create,move,chparent}`. Worker-side authoring endpoints
+are intentionally deferred until the deployed IDE surface is enabled.
 
 Authoring input formats:
 

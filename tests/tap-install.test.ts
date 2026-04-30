@@ -84,7 +84,10 @@ describe("GitHub catalog taps", () => {
     expect(world.object("$remote_control").parent).toBe("$thing");
     expect(world.object("remote_control_1").parent).toBe("$remote_control");
     expect(world.object("catalog_remote").parent).toBe("$catalog");
-    expect(world.object("$remote_control").verbs.get("ping")?.kind).toBe("bytecode");
+    const ping = world.object("$remote_control").verbs.get("ping");
+    expect(ping?.kind).toBe("bytecode");
+    expect(ping?.perms).toBe("rx");
+    expect(ping?.direct_callable).toBe(true);
     expect(world.getProp("$catalog_registry", "installed_catalogs")).toMatchObject([
       {
         tap: "hugh/woo-libs",

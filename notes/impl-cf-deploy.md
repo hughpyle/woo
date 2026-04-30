@@ -169,7 +169,7 @@ In dependency order:
 
 - **Alarms** for parked tasks. Replaces the 250ms `setInterval` only on the CF target; local dev keeps the poll. (WS hibernation landed in Phase 2.2; alarms are the remaining piece of original Phase 4.)
 - **SSE stream** (`/api/objects/{id}/stream`) on the Worker. Returns 501 placeholder; browser clients use the WebSocket path. SSE matters for HTTP-only agent integrations.
-- **Authoring REST endpoints** in the Worker: `/api/compile`, `/api/install`, `/api/property`. The IDE tab can read object descriptions but cannot author verbs against the deployed world. dev-server has the Node implementations; needs Web-standard ports.
+- **Authoring REST endpoints** in the Worker: `/api/compile`, `/api/install`, `/api/property`, `/api/property/value`, and `/api/authoring/objects/{create,move,chparent}`. The IDE tab can read object descriptions but cannot author verbs or object lifecycle changes against the deployed world. dev-server has the Node implementations; needs Web-standard ports.
 - **`wiz:rotate_bootstrap_token` verb** on `$system`. Spec'd in §R14.4; impl pending.
 - **General cross-DO RPC layer**: `RemoteHost.rpc(target, method, args)` stub used by `world.dispatch` when target is on a different anchor cluster. The first routing slice forwards top-level REST/WS calls, but verb bodies still assume local dispatch inside a host.
 - **Authenticated internal forwarding headers**: the public Worker strips inbound `x-woo-internal-*` headers before forwarding, but cluster DOs currently trust headers from any caller with the same DO binding. Add an HMAC over the forwarded tuple (`session, actor, expires_at, token_class`) with a `WOO_INTERNAL_SECRET` before treating cluster DOs as an independently callable surface.

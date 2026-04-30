@@ -49,7 +49,7 @@ verb #room:look (this none none) rxd {
 The header is `verb` `<obj>` `:` `<name>` `(` `<arg-spec>` `)` `<perms>` `{` ... `}`.
 
 - `<arg-spec>` is the MOO `(dobj prep iobj)` triple for command-line dispatch. Use `(this none none)` for verbs called only by program.
-- `<perms>` is a subset of `r` (readable source), `w` (writable by non-owner), `x` (executable as a command), `d` (debug — errors abort task with traceback rather than returning `err`).
+- `<perms>` is a subset of `r` (readable source), `w` (writable by non-owner), `x` (executable as a command), `d` (direct-callable shorthand). `d` is accepted only in source/catalog authoring syntax; installed verb metadata stores `direct_callable: true` separately and strips `d` from persisted `perms`.
 
 ### 7.2 Statements
 

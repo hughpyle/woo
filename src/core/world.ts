@@ -23,6 +23,7 @@ import {
 import type { ObjectRepository, ParkedTaskRecord, SerializedObject, SerializedSession, SerializedWorld, SpaceSnapshotRecord, WorldRepository } from "./repository";
 import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializedTinyVmTaskWithInput, runTinyVm, type SerializedVmTask } from "./tiny-vm";
 import { installCatalogManifest, type CatalogManifest } from "./catalog-installer";
+import { normalizeVerbPerms } from "./verb-perms";
 
 type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue;
 const GUEST_SESSION_GRACE_MS = 60_000;
@@ -251,10 +252,12 @@ export class WooWorld {
   }
 
   addVerb(objRef: ObjRef, verb: VerbDef): VerbDef {
-    this.object(objRef).verbs.set(verb.name, verb);
+    const parsedPerms = normalizeVerbPerms(verb.perms, verb.direct_callable === true);
+    const normalized = { ...verb, perms: parsedPerms.perms, direct_callable: parsedPerms.directCallable };
+    this.object(objRef).verbs.set(verb.name, normalized);
     this.persistObject(objRef);
     this.persist();
-    return verb;
+    return normalized;
   }
 
   defineEventSchema(objRef: ObjRef, type: string, shape: Record<string, WooValue>): void {
@@ -1243,7 +1246,13 @@ export class WooWorld {
           propertyDefs: new Map(item.propertyDefs.map((def) => [def.name, { ...def, defaultValue: cloneValue(def.defaultValue) }])),
           properties: new Map(item.properties.map(([name, value]) => [name, cloneValue(value)])),
           propertyVersions: new Map(item.propertyVersions),
-          verbs: new Map(item.verbs.map((verb) => [verb.name, verb])),
+          verbs: new Map(
+            item.verbs.map((verb) => {
+              const parsedPerms = normalizeVerbPerms(verb.perms, verb.direct_callable === true);
+              const normalized = { ...verb, perms: parsedPerms.perms, direct_callable: parsedPerms.directCallable };
+              return [normalized.name, normalized] as const;
+            })
+          ),
           children: new Set(item.children),
           contents: new Set(item.contents),
           eventSchemas: new Map(item.eventSchemas)

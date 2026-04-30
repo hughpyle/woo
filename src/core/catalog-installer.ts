@@ -2,6 +2,7 @@ import { compileVerb } from "./authoring";
 import { fixtureByName } from "./fixtures";
 import { hashSource } from "./source-hash";
 import { wooError, type ObjRef, type TinyBytecode, type VerbDef, type WooValue } from "./types";
+import { normalizeVerbPerms } from "./verb-perms";
 import type { WooWorld } from "./world";
 
 export type CatalogManifest = {
@@ -216,12 +217,14 @@ function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner
   const existing = target.verbs.get(def.name);
   if (existing) {
     if (!repairExisting) {
+      const parsedPerms = normalizeVerbPerms(def.perms ?? existing.perms, existing.direct_callable || def.direct_callable === true);
       const next = {
         ...existing,
-        direct_callable: existing.direct_callable || def.direct_callable === true,
+        perms: parsedPerms.perms,
+        direct_callable: parsedPerms.directCallable,
         skip_presence_check: existing.skip_presence_check || def.skip_presence_check === true
       };
-      if (next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
+      if (next.perms !== existing.perms || next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
       return;
     }
     const repaired = compileCatalogVerbDef(obj, def, owner, existing.version + 1, allowImplementationHints);
@@ -244,17 +247,18 @@ function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner
 }
 
 function compileCatalogVerbDef(obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, version: number, allowImplementationHints: boolean): VerbDef {
+  const parsedPerms = normalizeVerbPerms(def.perms ?? "rx", def.direct_callable === true);
   const base = {
     name: def.name,
     aliases: def.aliases ?? [],
     owner,
-    perms: def.perms ?? "rxd",
+    perms: parsedPerms.perms,
     arg_spec: def.arg_spec ?? {},
     source: def.source,
     source_hash: hashSource(def.source),
     version,
     line_map: {},
-    direct_callable: def.direct_callable === true,
+    direct_callable: parsedPerms.directCallable,
     skip_presence_check: def.skip_presence_check === true
   };
 
@@ -278,19 +282,20 @@ function compileCatalogVerb(obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, ver
       diagnostics: compiled.diagnostics as unknown as WooValue
     });
   }
+  const parsedPerms = normalizeVerbPerms(def.perms ?? compiled.metadata?.perms ?? "rx", def.direct_callable === true);
   return {
     kind: "bytecode",
     name: def.name,
     aliases: def.aliases ?? [],
     owner,
-    perms: def.perms ?? compiled.metadata?.perms ?? "rxd",
+    perms: parsedPerms.perms,
     arg_spec: def.arg_spec ?? compiled.metadata?.arg_spec ?? {},
     source: def.source,
     source_hash: compiled.source_hash ?? hashSource(def.source),
     version,
     bytecode: { ...compiled.bytecode, version },
     line_map: compiled.line_map ?? {},
-    direct_callable: def.direct_callable === true,
+    direct_callable: parsedPerms.directCallable,
     skip_presence_check: def.skip_presence_check === true
   };
 }

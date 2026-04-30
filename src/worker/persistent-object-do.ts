@@ -24,8 +24,9 @@
 //   handler. Needed for FORK/SUSPEND wakeups on CF.
 // - SSE streams (/api/objects/{id}/stream) — return 501. Browser uses WS;
 //   SSE matters for HTTP-only agent integrations.
-// - Authoring REST endpoints (/api/compile, /api/install, /api/property) —
-//   the IDE tab can read on CF but not author.
+// - Authoring REST endpoints (/api/compile, /api/install, /api/property,
+//   /api/property/value, /api/authoring/objects/{create,move,chparent}) — the
+//   IDE tab can read on CF but not author.
 // - Worker-side GitHub tap install (/api/tap/install) — local catalogs
 //   cover the demos; remote-tap install is local-Node only for now.
 

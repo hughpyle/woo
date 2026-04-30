@@ -413,6 +413,21 @@ describe("woo core", () => {
     expect(ids).not.toContain("the_chatroom");
   });
 
+  it("normalizes legacy d permission shorthand while importing worlds", () => {
+    const serialized = createWorld({ catalogs: false }).exportWorld();
+    const root = serialized.objects.find((obj) => obj.id === "$root");
+    const describe = root?.verbs.find((verb) => verb.name === "describe");
+    expect(describe).toBeTruthy();
+    if (!describe) return;
+    describe.perms = "rxd";
+    describe.direct_callable = false;
+
+    const reloaded = createWorldFromSerialized(serialized, { persist: false });
+    const info = reloaded.verbInfo("$root", "describe");
+    expect(info.perms).toBe("rx");
+    expect(info.direct_callable).toBe(true);
+  });
+
   it("sequences calls and emits observations", () => {
     const { world, session, actor } = authedWorld();
     const first = world.call("1", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.77]));
@@ -837,6 +852,13 @@ describe("authoring", () => {
     expect(world.getProp("delay_1", "feedback")).toBe(0.62);
     if (applied.op === "applied") expect(applied.observations[0].type).toBe("control_changed");
     expect(() => installVerb(world, "delay_1", "set_feedback", source, null)).toThrow();
+  });
+
+  it("rejects undocumented verb permission letters", () => {
+    const compiled = compileVerb(`verb :bad() rxt {
+  return true;
+}`);
+    expect(compiled.ok).toBe(false);
   });
 
   it("lets a programmer build an object, install behavior, and keep private state filtered", () => {

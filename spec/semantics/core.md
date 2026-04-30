@@ -304,7 +304,9 @@ External clients and agents may not invoke arbitrary verbs directly just because
 Spec tables use `rxd` as shorthand for "readable/executable and externally
 direct-callable" — equivalent to `direct_callable: true` on the verb metadata.
 `rx` means readable/executable but not externally direct-callable unless the
-metadata says otherwise. The metadata field is authoritative in implementations.
+metadata says otherwise. Implementations normalize `rxd` at ingestion to stored
+`perms: "rx"` plus `direct_callable: true`; the metadata field is authoritative
+after install.
 
 This gate applies to **external ingress**, not to VM-to-VM `CALL_VERB` inside an already-running task. A sequenced call handler may call helper verbs directly as part of its own transaction; normal verb permissions still apply. `$space:call` also bypasses the external direct gate because the caller chose the sequenced route.
 
@@ -322,6 +324,6 @@ Five canonical patterns. New verbs should match one; if a verb resists classific
 | **Direct read** | `obj:verb()` | no | `:describe`, `:look`, `:who`, `:has_feature` — pure introspection. |
 | **Direct authoring/versioned mutation** | host-direct verb or REST authoring API | no (separate audit log) | IDE install, `compile_verb`, `define_property`. Versioned, but not a runtime sequence. |
 | **Direct live interaction** | `obj:verb()` (observations live-only by route) | no | chat `:say`, `:tell`, `:emote`, presence `:enter`/`:leave`, typing indicators, hover. The interaction is real-time-only; replay would not reproduce it. |
-| **Logged social interaction** | `$space:call(message)` or explicit `:append` | yes | moderated/auditable chat, compliance-mandated message archives. The author opts into durability. |
+| **Logged social interaction** | `$space:call(message)` or an explicit log-append wrapper | yes | moderated/auditable chat, compliance-mandated message archives. The author opts into durability. |
 
 Most v1-core verbs land in the first two patterns. Live-only interaction and authoring need explicit design choices about delivery and audit; logged social is opt-in only.

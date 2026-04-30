@@ -33,7 +33,7 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 | `$player` | `$actor` | — | Session-capable actor class for humans, agents, or tools connected over the wire. A player composes actor identity with session bookkeeping and attached websocket state. |
 | `$wiz` | `$player` | wizard, programmer | Seed administrator player. It carries wizard and programmer flags so the initial world can bootstrap, inspect, and repair code, schema, and seeded objects. |
 | `$guest` | `$player` | — | Reusable temporary player. Bound to a session at auth time; reset via `:on_disfunc` and returned to the free pool when its session is reaped. See [identity.md §I6.4](identity.md#i64-guest-reset-the-on_disfunc-convention). |
-| `$sequenced_log` | `$root` | — | Append-only sequenced log primitive. Owns the runtime-blessed `:append`/`:read` verbs, atomic seq allocation, and durable log storage. Subclassed by `$space` and other coordination shapes. See [sequenced-log.md](sequenced-log.md). |
+| `$sequenced_log` | `$root` | — | Append-only sequenced log primitive. Owns the runtime-blessed host append/read operations, atomic seq allocation, and durable log storage. Subclassed by `$space` and other coordination shapes. See [sequenced-log.md](sequenced-log.md). |
 | `$space` | `$sequenced_log` | — | Coordination workhorse. Adds dispatch, subscribers, and applied-frame broadcast on top of the inherited log primitive. The v1 reference subclass for `:call`-shaped sequenced coordination. |
 | `$thing` | `$root` | fertile | Simple non-actor base class for persistent objects that primarily hold state. It is fertile so first-light programmers can create ordinary owned objects without a wizard-created personal superclass. Use it when an object should be addressable and programmable but should not itself originate calls. |
 | `$catalog` | `$thing` | — | v1-ops class for installed catalog records. Instances record source provenance, version, alias, owner, and created objects for introspection and uninstall. See [catalogs.md](../discovery/catalogs.md). |
@@ -107,15 +107,21 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
-| `next_seq` | int | 1 | The next seq to assign. Reserved; written only by inherited `:append`. |
+| `next_seq` | int | 1 | The next seq to assign. Reserved; written only by the host append primitive. |
 | `last_snapshot_seq` | int | 0 | Highest seq covered by a snapshot. Used for snapshot triggering and log truncation. |
 
-### B2.6 `$sequenced_log` verbs
+### B2.6 `$sequenced_log` host operations
 
-| Verb | Args | Purpose |
+These are the native log operations that back `$sequenced_log` descendants.
+They are host/repository primitives in the current implementation, not ordinary
+bootstrapped object verbs. A fuller core may expose them as object-visible
+wrappers later, but the v0 seed graph does not install `:append` or `:read`
+directly on `$sequenced_log`.
+
+| Operation | Args | Purpose |
 |---|---|---|
-| `:append(message)` rxd | any | Native; atomically allocates a seq and persists `(seq, message)`. See [sequenced-log.md §SL2](sequenced-log.md#sl2-the-native-verbs). |
-| `:read(from, limit)` rxd | int, int | Native; paged history read. |
+| `append(message)` | any | Native; atomically allocates a seq and persists `(seq, message)`. See [sequenced-log.md §SL2](sequenced-log.md#sl2-the-native-host-operations). |
+| `read(from, limit)` | int, int | Native; paged history read. |
 
 ### B2.7 `$space` additional properties
 
@@ -130,16 +136,18 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 
 | Verb | Args | Purpose |
 |---|---|---|
-| `:call(message)` | message | Sequenced dispatch (space.md §S2). |
-| `:look_self()` rxd | — | Generic room/space view: own title and actor-readable description, present actors, and visible contents summarized via each item's `:title()` and actor-readable `description`. `:title()` errors propagate; they are not silently replaced with object names. |
-| `:replay(from_seq, limit)` rxd | int, int | Subclass alias for inherited `:read`. |
-| `:snapshot()` | — | Capture materialized state. Wizard or programmer-only. |
-| `:subscribe(actor)` | obj | Add to subscribers. |
-| `:unsubscribe(actor)` | obj | Remove from subscribers. |
-| `:on_applied(_event)` | event | Snapshot-trigger hook (space.md §S7). |
+| `:look_self()` rxd | — | Generic room/space view: own title and actor-readable description, present actors, and visible contents summarized via each item's `:title()` and actor-readable `description`. Item `:title()` calls run under the looking actor's authority, not privileged room authority. `:title()` errors propagate; they are not silently replaced with object names. |
+| `:replay(from_seq, limit)` rxd | int, int | Public wrapper over the host log read operation. |
 | `:add_feature(f)` | obj | Append to `features`; idempotent. |
 | `:remove_feature(f)` | obj | Remove from `features`. |
 | `:has_feature(f)` rxd | obj | Predicate. |
+
+The sequenced call lifecycle described as `$space:call` in the semantics docs is
+the protocol/host entrypoint, not a bootstrapped object-visible verb in v0.
+Likewise `snapshot`, explicit `subscribe`/`unsubscribe`, and `on_applied` remain
+reserved conventions until the full core grows object-level wrappers for them.
+Current presence/catalog verbs update `subscribers` directly under ordinary
+permission checks.
 
 ### B2.9 v1-ops catalog registry
 

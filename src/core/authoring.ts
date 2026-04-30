@@ -2,6 +2,7 @@ import { compileWooSource } from "./dsl-compiler";
 import { hashSource } from "./source-hash";
 import type { CompileResult, InstallResult, ObjRef, TinyBytecode, WooValue } from "./types";
 import { isErrorValue, wooError } from "./types";
+import { normalizeVerbPerms } from "./verb-perms";
 import type { WooWorld } from "./world";
 
 type AuthoringOptions = {
@@ -59,16 +60,18 @@ function installVerbWithOwner(world: WooWorld, obj: ObjRef, name: string, source
     };
   }
   const version = (current?.version ?? 0) + 1;
-  const perms = compiled.metadata?.perms ?? current?.perms ?? "rxd";
-  const directCallable = compiled.metadata?.perms ? perms.includes("d") : current?.direct_callable === true;
+  const parsedPerms = normalizeVerbPerms(
+    compiled.metadata?.perms ?? current?.perms ?? "rx",
+    compiled.metadata?.perms ? false : current?.direct_callable === true
+  );
   world.addVerb(obj, {
     kind: "bytecode",
     name,
     aliases: [],
     owner,
-    perms,
+    perms: parsedPerms.perms,
     arg_spec: compiled.metadata?.arg_spec ?? current?.arg_spec ?? {},
-    direct_callable: directCallable,
+    direct_callable: parsedPerms.directCallable,
     source,
     source_hash: compiled.source_hash ?? hashSource(source),
     bytecode: { ...compiled.bytecode, version },

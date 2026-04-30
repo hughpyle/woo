@@ -120,6 +120,38 @@ describe("local catalogs", () => {
     expect(world.hasPresence(second.actor, "the_chatroom")).toBe(false);
   });
 
+  it("treats rxd catalog source perms as direct-callable shorthand", () => {
+    const world = createWorld({ catalogs: false });
+    const manifest: RuntimeCatalogManifest = {
+      name: "shorthand",
+      version: "1.0.0",
+      spec_version: "v1",
+      classes: [
+        {
+          local_name: "$shorthand_probe",
+          parent: "$thing",
+          verbs: [
+            {
+              name: "ping",
+              source: "verb :ping() rxd { return \"pong\"; }"
+            }
+          ]
+        }
+      ]
+    };
+
+    installCatalogManifest(world, manifest, {
+      tap: "github:hugh/woo",
+      alias: "shorthand",
+      allowImplementationHints: false
+    });
+
+    const verb = world.object("$shorthand_probe").verbs.get("ping");
+    expect(verb?.perms).toBe("rx");
+    expect(verb?.direct_callable).toBe(true);
+    expect(world.directCall("catalog-shorthand-ping", "$wiz", "$shorthand_probe", "ping", []).op).toBe("result");
+  });
+
   it("installs taskspace from source without trusted implementation hints", () => {
     const world = createWorld({ catalogs: false });
     installCatalogManifest(world, readManifest("chat") as unknown as RuntimeCatalogManifest, {

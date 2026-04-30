@@ -61,7 +61,7 @@ CREATE TABLE verb (
   name         TEXT NOT NULL,
   aliases      TEXT NOT NULL,      -- JSON list
   owner        TEXT NOT NULL,
-  perms        TEXT NOT NULL,      -- string flags, e.g. "rxd", "rx"
+  perms        TEXT NOT NULL,      -- normalized string flags, e.g. "rx"; direct-callable lives in flags
   arg_spec     TEXT NOT NULL,      -- JSON map of named args (per arg_spec convention)
   source       TEXT NOT NULL,      -- raw DSL source
   source_hash  TEXT NOT NULL,

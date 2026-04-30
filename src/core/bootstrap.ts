@@ -3,6 +3,7 @@ import { installLocalCatalogs } from "./local-catalogs";
 import type { ObjectRepository, SerializedWorld, WorldRepository } from "./repository";
 import { hashSource } from "./source-hash";
 import type { ObjRef, TinyBytecode, WooValue } from "./types";
+import { normalizeVerbPerms } from "./verb-perms";
 import { WooWorld } from "./world";
 
 type BootstrapOptions = {
@@ -201,28 +202,30 @@ function reparentSeed(world: WooWorld, obj: ObjRef, parent: ObjRef): void {
 function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: TinyBytecode, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; perms?: string } = {}): void {
   const existing = world.object(obj).verbs.get(name);
   if (existing) {
+    const parsedPerms = normalizeVerbPerms(options.perms ?? existing.perms, existing.direct_callable || options.directCallable === true);
     const next = {
       ...existing,
-      perms: options.perms ?? existing.perms,
-      direct_callable: existing.direct_callable || options.directCallable === true,
+      perms: parsedPerms.perms,
+      direct_callable: parsedPerms.directCallable,
       skip_presence_check: existing.skip_presence_check || options.skipPresenceCheck === true
     };
     if (next.perms !== existing.perms || next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
     return;
   }
+  const parsedPerms = normalizeVerbPerms(options.perms ?? "rx", options.directCallable === true);
   world.addVerb(obj, {
     kind: "bytecode",
     name,
     aliases: [],
     owner: "$wiz",
-    perms: options.perms ?? "rxd",
+    perms: parsedPerms.perms,
     arg_spec: {},
     source,
     source_hash: hashSource(source),
     bytecode: bytecodeValue,
     version: bytecodeValue.version,
     line_map: {},
-    direct_callable: options.directCallable === true,
+    direct_callable: parsedPerms.directCallable,
     skip_presence_check: options.skipPresenceCheck === true
   });
 }
@@ -230,28 +233,30 @@ function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: Tin
 function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; perms?: string } = {}): void {
   const existing = world.object(obj).verbs.get(name);
   if (existing) {
+    const parsedPerms = normalizeVerbPerms(options.perms ?? existing.perms, existing.direct_callable || options.directCallable === true);
     const next = {
       ...existing,
-      perms: options.perms ?? existing.perms,
-      direct_callable: existing.direct_callable || options.directCallable === true,
+      perms: parsedPerms.perms,
+      direct_callable: parsedPerms.directCallable,
       skip_presence_check: existing.skip_presence_check || options.skipPresenceCheck === true
     };
     if (next.perms !== existing.perms || next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
     return;
   }
+  const parsedPerms = normalizeVerbPerms(options.perms ?? "rx", options.directCallable === true);
   world.addVerb(obj, {
     kind: "native",
     name,
     aliases: [],
     owner: "$wiz",
-    perms: options.perms ?? "rxd",
+    perms: parsedPerms.perms,
     arg_spec: {},
     source,
     source_hash: hashSource(source),
     version: 1,
     line_map: {},
     native: handler,
-    direct_callable: options.directCallable === true,
+    direct_callable: parsedPerms.directCallable,
     skip_presence_check: options.skipPresenceCheck === true
   });
 }

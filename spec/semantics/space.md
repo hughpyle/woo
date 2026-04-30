@@ -10,7 +10,7 @@ The split: `$sequenced_log` provides atomically-allocated seqs and a durable mes
 
 ## S1. The contract
 
-`$space` is a `$sequenced_log` subclass whose role is to dispatch sequenced messages: assign each a seq via the inherited `:append`, run the target verb, and broadcast the resulting applied frame. Anything else a space does — audience routing, snapshots, scenes — is either a per-app extension built on top, or part of §S6/§S7 below.
+`$space` is a `$sequenced_log` subclass whose role is to dispatch sequenced messages: assign each a seq via the host append primitive, run the target verb, and broadcast the resulting applied frame. Anything else a space does — audience routing, snapshots, scenes — is either a per-app extension built on top, or part of §S6/§S7 below.
 
 A space has the inherited fields from `$sequenced_log` ([sequenced-log.md §SL1](sequenced-log.md#sl1-contract)) — `next_seq`, `last_snapshot_seq`, the durable log — plus:
 
@@ -28,7 +28,7 @@ Spaces may carry additional materialized state — the dubspace's `delay_feedbac
 
 1. **Validate the message.** Required fields present (per [values.md §V10](values.md#v10-message-and-sequenced-message-serialization)); types match. If validation fails, raise `E_INVARG`. *No `seq` is assigned.*
 2. **Authorize the actor.** Check that `message.actor` may call through this space. If denied, raise `E_PERM`. *No `seq` is assigned.*
-3. **Assign `seq` and append to log.** `seq = this:append(message)` (inherited from `$sequenced_log`; see [sequenced-log.md §SL2](sequenced-log.md#sl2-the-native-verbs)). The native verb atomically allocates the seq, increments `next_seq`, and inserts a pending `(seq, message)` row inside the call transaction. The row's outcome (success or rolled-back) is recorded separately by step 6/8 before the transaction commits — see [reference/cloudflare.md §R3.2](../reference/cloudflare.md#r32-two-phase-log-writes) for the savepoint-scoped storage pattern. If storage fails before commit, the call is rejected pre-sequence with `E_STORAGE` and `next_seq` does not advance — see [failures.md §F6](failures.md#f6-storage-and-persistence-failures). The runtime never reaches "seq advanced but message not in the log."
+3. **Assign `seq` and append to log.** The host append primitive for this `$sequenced_log` atomically allocates the seq, increments `next_seq`, and inserts a pending `(seq, message)` row inside the call transaction. The row's outcome (success or rolled-back) is recorded separately by step 6/8 before the transaction commits — see [reference/cloudflare.md §R3.2](../reference/cloudflare.md#r32-two-phase-log-writes) for the savepoint-scoped storage pattern. If storage fails before commit, the call is rejected pre-sequence with `E_STORAGE` and `next_seq` does not advance — see [failures.md §F6](failures.md#f6-storage-and-persistence-failures). The runtime never reaches "seq advanced but message not in the log."
 4. **Resolve the target verb.** Use the standard verb lookup rule on `message.target` ([objects.md §9.1](objects.md#91-lookup): parent chain, then feature lookup where applicable). If not found, the call moves directly to step 8 (apply failure) with `E_VERBNF`.
 5. **Run the behavior.** Execute the verb's bytecode (T0 or full VM) within a sub-transaction of the call. The behavior may read/write properties on objects in the same anchor cluster (atomic), call other verbs (recursive within cluster), and emit observations.
 6. **On success:** commit mutations from step 5; observations from step 5 are queued for delivery.
@@ -74,10 +74,10 @@ The runtime does not enforce determinism; violations show up as replay divergenc
 
 ## S5. The log
 
-The log is inherited from `$sequenced_log`; semantics live in [sequenced-log.md §SL2](sequenced-log.md#sl2-the-native-verbs). Storage shape is in [reference/persistence.md](../reference/persistence.md) (`space_message` table); semantically a list indexed by seq.
+The log is inherited from `$sequenced_log`; semantics live in [sequenced-log.md §SL2](sequenced-log.md#sl2-the-native-host-operations). Storage shape is in [reference/persistence.md](../reference/persistence.md) (`space_message` table); semantically a list indexed by seq.
 
-- **Reads:** `space:replay(from_seq, limit)` is a subclass alias for the inherited `:read`. See [events.md §12.7](events.md#127-sequenced-calls-with-gap-recovery) for the paging pattern subscribers use.
-- **Writes:** only step 3 of `$space:call` appends — and it does so via the inherited `:append`, not by direct mutation of `next_seq`.
+- **Reads:** `space:replay(from_seq, limit)` is the object-visible wrapper over the host log read operation. See [events.md §12.7](events.md#127-sequenced-calls-with-gap-recovery) for the paging pattern subscribers use.
+- **Writes:** only step 3 of `$space:call` appends — and it does so via the host append primitive, not by direct mutation of `next_seq`.
 - **Truncation:** older entries may be truncated when superseded by a snapshot (§S7). Truncation is a host-local optimization; semantically a truncated entry is "covered by snapshot S, which represents the materialized state at seq ≤ K."
 
 ---
