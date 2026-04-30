@@ -9,16 +9,45 @@
 | Abstract host (semantics) | Concrete (Cloudflare) |
 |---|---|
 | Edge | Worker isolate, per-request |
-| Persistent | Durable Object — one DO per woo object |
+| Persistent | Durable Object — see §R1.1 for the three DO classes (self-hosted-instance, gateway, service). One DO per *self-hosting* woo object; co-resident objects share the host of their creator. |
 | Transient | Browser tab JavaScript runtime |
 
 ### R1.1 Routing
 
-A persistent ULID is also a Durable Object name. `env.WOO.idFromName("#01HXYZ...")` deterministically routes to the same DO globally. There is no intermediate lookup for unanchored objects; the ID *is* the address.
+DO instances fall into three classes, all of which use the same `PersistentObjectDO` Durable Object class — they differ only by what they host, not by their server-side code.
 
-For anchored objects ([semantics/objects.md §4.1](../semantics/objects.md#41-anchor-and-atomicity-scope)), the routing key is the anchor's id (followed transitively to the root of the anchor tree). `idFromName(root_anchor_ulid)` resolves to the same DO that hosts the entire anchor cluster. Multiple object rows then coexist in that DO's `object` table. Inbound routes for non-root anchored objects consult Directory for `objref -> host` placement.
+| Class | Naming | Hosts |
+|---|---|---|
+| **Self-hosted-instance DO** | `env.WOO.idFromName(<obj_id>)` | One DO per instance of a class declaring `instances_self_host` (per [semantics/objects.md §4.2](../semantics/objects.md#42-host-placement)). Rooms, players, anchor spaces (`the_dubspace`, `the_taskspace`), and v1-ops singletons (`$catalog_registry`) each get their own DO. |
+| **Gateway DO** | `env.WOO.idFromName("world")` | The default home for objects whose class does not self-host. Universal `$`-classes, ad-hoc objects with no anchor, and runtime-created objects whose creator is the gateway itself live here. The Worker entry uses the gateway DO for global routes (`/api/auth`, `/healthz`, `/ws` upgrade) and as the catch-all when no other host claims an id. |
+| **Service DO** | `env.DIRECTORY.idFromName("directory")` and similar | Singletons for routing and bookkeeping. See [§R2](#r2-singleton-dos). |
 
-Cross-DO RPC uses the DO stub returned from `idFromName`. The stub's methods are the inter-host RPC surface (verb dispatch migration, property read/write, version-checked artifact fetch).
+**Routing precedence.** The runtime resolves an object id to a host in order:
+
+1. If the object's `host_placement` property is `"self"`, the id is its own host (the runtime materialization of `instances_self_host` from §4.2).
+2. Else if the object's `anchor` resolves to a self-hosted ancestor, route to that anchor's host.
+3. Else if the object's `location` resolves to a self-hosted container, route there.
+4. Else, route to the creator/owner host. For ordinary runtime-created objects, this is the host of the verb's `progr` at create time. For seeded objects it is the host configured by the catalog or, if none, the gateway.
+
+The runtime maintains the resolved id-to-host map in **Directory** ([§R2](#r2-singleton-dos)) so the Worker entry can answer the lookup without contacting the owning DO. Self-hosted instances register themselves at first call; non-self-hosted instances are registered by their owning host when created.
+
+**Carryable objects do not migrate.** When an object's `location` changes (a player carries a book between rooms, then puts it on a table), the object's host does not change. The book's storage stays on the host that created it; the moving host writes the object's `location` field locally and uses cross-DO RPC to update the source and target container's `contents` cache (see §R1.7). This avoids subtree migration, two-phase storage, and Directory fences for ordinary movement.
+
+**Cross-DO RPC** uses the DO stub returned from `idFromName`. The stub's methods are the inter-host RPC surface (verb dispatch, property read/write, version-checked artifact fetch, and the contents-mirror updates described below).
+
+### R1.7 Contents-mirror invariants
+
+Every container — a room, a table, a mailbox — maintains its own `contents` set as the authoritative inverse of `obj.location`. Across DOs, that invariant is distributed:
+
+- The **source of truth** is `obj.location` on the object's own DO. Every move primitive writes this field transactionally on the host that owns the object.
+- The **container cache** is `container.contents`, a set of foreign object handles `{id, title, host}` maintained on the container's host. The mover RPCs the source container's host with `contents.delete(obj_id)` and the target container's host with `contents.add(obj_id, title_snapshot)` immediately after writing `obj.location`.
+- **Cache drift is tolerated.** If a push fails, the cache is stale; rendering looks wrong until reconciled. A reconcile sweep — triggered on `:look` or by periodic policy — verifies each cache entry by querying the member's actual `location` (via Directory routing) and prunes ghosts. Routing and correctness are unaffected by cache drift; only rendering is.
+
+This keeps the **Directory scoped to id-to-host routing** rather than expanding it into a centralized containment ledger. Move-frequency writes flow to the affected containers, not to Directory; Directory writes happen only when an object's host changes (i.e., never, for non-self-hosted instances after creation).
+
+**Player movement** between rooms (`go north`) does not migrate the player's storage. The player has its own DO; `player.location = next_room` is a local write on the player's DO, plus two cross-DO RPCs to update each room's subscriber list. Inventory items, anchored to the player or carried in `player.contents`, stay on the player's DO and travel with the player by reference (their `location` continues to point at the player; the rooms never see them).
+
+**Take and drop** are pure `location` writes plus a pair of contents-mirror RPCs. The object never moves between DOs; only its `location` field changes (on the object's own DO) and the source and target containers update their caches.
 
 ### R1.2 ID allocation
 
@@ -69,14 +98,14 @@ Operations are scoped to *this DO's hosted set*. Cross-DO operations go through 
 ```ts
 interface ObjectRepository {
   // Transactions / unit of work ----------------------------------------------
-  // Wrap multiple writes so they commit atomically or roll back together.
-  // Required for $space:call's "behavior failure rolls back mutations" rule
-  // (space.md §S3.2). The CF backend uses storage.transactionSync; in-memory
-  // backends snapshot-and-restore; local SQLite uses BEGIN/COMMIT/ROLLBACK.
+  // Wrap the final local state/log write so it commits atomically or rolls back.
+  // The async behavior body has already completed before this transaction opens.
+  // CF uses storage.transactionSync; in-memory backends snapshot-and-restore;
+  // local SQLite uses BEGIN/COMMIT/ROLLBACK.
   transaction<T>(fn: () => T): T;
-  // Nested rollback scope inside the current transaction. Used around the
-  // behavior body so failed mutations roll back while the accepted log row
-  // remains in the outer transaction.
+  // Nested rollback scope inside the current transaction. Used by repository-
+  // local maintenance and migrations; runtime behavior rollback is an in-memory
+  // world savepoint because behavior may await cross-host RPC.
   savepoint<T>(fn: () => T): T;
 
   // Object identity & metadata -----------------------------------------------
@@ -111,9 +140,9 @@ interface ObjectRepository {
   deleteEventSchema(id: ObjRef, type: string): void;
 
   // $sequenced_log surface ---------------------------------------------------
-  // Two-step: appendLog inserts a pending row; recordLogOutcome updates it with
-  // observations, applied_ok, and (optional) error before the same outer
-  // transaction commits.
+  // Two-step inside one commit transaction: appendLog inserts the row;
+  // recordLogOutcome updates it with observations, applied_ok, and optional
+  // error before commit.
   // See §R3.2 below.
   appendLog(space: ObjRef, actor: ObjRef, message: Message): { seq: number; ts: number };
   recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, observations?: Observation[], error?: ErrorValue): void;
@@ -146,42 +175,56 @@ interface ObjectRepository {
 }
 ```
 
-### R3.2 Two-phase log writes
+### R3.2 Sequenced log commit
 
-`$space:call` ([space.md §S2](../semantics/space.md#s2-the-call-lifecycle)) allocates a `seq` and inserts the message before its behavior runs (step 3); the behavior's outcome is determined later (step 7 or 8). The repository surfaces this with two operations inside one outer `transaction(fn)`:
+`$space:call` ([space.md §S2](../semantics/space.md#s2-the-call-lifecycle)) runs on a single async path. The host serializes behavior executions, reserves `seq = next_seq` in memory for sequenced calls, runs the behavior with an in-memory rollback savepoint, then opens one storage `transaction(fn)` to commit the final local state and log outcome.
 
-1. **`appendLog(space, actor, message)`** — atomic seq allocation + pending message-row insert. Returns `{seq, ts}`. The row has no outcome yet (`applied_ok IS NULL` in SQL terms).
-2. **`recordLogOutcome(space, seq, applied_ok, observations?, error?)`** — called after the behavior savepoint completes (success path) or rolls back (failure path), updating the same row with the replayable observations and outcome before the outer transaction commits.
+The repository still surfaces the log as two calls, but both happen during that final commit transaction:
 
-The pending state is an implementation detail of the still-open transaction. A committed log row always has `applied_ok = true` or `applied_ok = false`; replay never sees a pending row.
+1. **`appendLog(space, actor, message)`** — inserts the message row and advances durable `next_seq`. Returns `{seq, ts}`. The runtime verifies that returned `seq` matches its in-memory reservation; a mismatch is `E_STORAGE`.
+2. **`recordLogOutcome(space, seq, applied_ok, observations?, error?)`** — updates the same row with replayable observations and the behavior outcome before the transaction commits.
+
+The transient `applied_ok IS NULL` state exists only inside the open commit transaction. A committed log row always has `applied_ok = true` or `applied_ok = false`; replay never sees a pending row.
 
 ### R3.3 Crash recovery footnote
 
-With the savepoint model, a host crash before `recordLogOutcome` aborts the whole outer transaction; no in-flight row is committed. If a backend ever finds a committed row with `applied_ok IS NULL`, that is storage corruption or an old-format migration bug. It should refuse new calls on that log and surface `E_STORAGE` for operator repair rather than guessing at replay.
+If the host crashes before the final commit transaction, no in-flight row is committed and no applied frame has been returned. If it crashes during the final commit transaction, the storage layer rolls the whole commit forward or back atomically. If a backend ever finds a committed row with `applied_ok IS NULL`, that is storage corruption or an old-format migration bug. It should refuse new calls on that log and surface `E_STORAGE` for operator repair rather than guessing at replay.
 
 ### R3.4 Transactions and rollback scope
 
-`transaction(fn)` is the outer unit of work; `savepoint(fn)` is the behavior rollback scope. `$space:call` runs:
+The runtime's behavior rollback scope is an in-memory world savepoint, not a storage transaction. That is the essential simplification: cross-host property reads and `CALL_VERB` can be awaited without pretending the whole behavior body is inside `state.storage.transactionSync`.
 
 ```
-repo.transaction(() => {
-  const { seq, ts } = repo.appendLog(space, actor, message);
+await hostQueue.enqueue(async () => {
+  validateAndAuthorize(message);
+  const seq = reserveNextSeqInMemory(space);
   const observations = [];
+
   try {
-    repo.savepoint(() => {
-      runVerbBody(..., observations);     // mutations land in this savepoint
+    await withWorldSavepoint(async () => {
+      await runVerbBody(..., observations);
     });
-    repo.recordLogOutcome(space, seq, true, observations);
+    outcome = { applied_ok: true, observations };
   } catch (err) {
+    restoreWorldSavepoint();
     const error = normalizeError(err);
-    repo.recordLogOutcome(space, seq, false, [errorObservation(error)], error);
+    outcome = { applied_ok: false, observations: [errorObservation(error)], error };
   }
+
+  repo.transaction(() => {
+    const appended = repo.appendLog(space, actor, message);
+    assert(appended.seq === seq);
+    repo.recordLogOutcome(space, seq, outcome.applied_ok, outcome.observations, outcome.error);
+    flushDirtyObjectsAndTasks();
+  });
 });
 ```
 
-`appendLog` is outside the behavior savepoint but inside the outer transaction. A successful behavior releases the savepoint and records `applied_ok = true` plus the resulting observations. A failed behavior rolls back to the savepoint, preserving the pending log row and `next_seq`, then records `applied_ok = false`, the `$error` observation, and the normalized error. The outer transaction commits the log row and its final outcome in one write boundary.
+The caller receives an applied frame only after the final commit succeeds. If commit fails, the runtime restores the pre-call in-memory state and returns `op:"error"` with `E_STORAGE`; no durable seq is visible.
 
 Cross-anchor-cluster mutations (cross-DO RPCs from inside the verb body) are **not** in the rollback scope, per [space.md §S3.4](../semantics/space.md#s3-failure-rules-normative). Verb authors avoid them in sequenced flows; if they must, they accept the torn-state risk.
+
+The VM does not perform raw remote property writes (`SET_PROP`, property definition, or property metadata edits) from inside a running behavior. Those raise `E_CROSS_HOST_WRITE`. Cross-host mutation, when unavoidable, is expressed as `CALL_VERB` to the remote object so the receiving host performs its own permission checks, sequencing discipline, and audit trail.
 
 ---
 
@@ -202,7 +245,7 @@ The concrete CF SQLite encoding lives in [persistence.md](persistence.md). The s
 | `getAncestorChain(id, expected_version?)` | Chain walk for cache population. |
 | `setProp(id, name, value, expected_version)` | Versioned write; `E_VERSION` on stale. |
 | `defineVerb(id, ...args, expected_version)` | Authoring; same versioning. |
-| `dispatchCall(message, frame_envelope)` | Verb-call migration (§R6). |
+| `dispatchCall(message, frame_envelope)` | Cross-host verb dispatch (§R6). |
 | `appendLog(space, message)` | `$sequenced_log:append`; atomic seq allocation. |
 | `readLog(space, from, limit)` | `$sequenced_log:read`. |
 | `subscribe(space, observer_do, observer_actor)` | Register observer for applied-frame fan-out. |
@@ -230,7 +273,7 @@ The receiver verifies `caller_progr` for permission gates; `caller_actor` is rec
 
 ## R6. Cross-DO verb dispatch
 
-When a verb call resolves to a target object on a different DO, dispatch *migrates*: the activation frame travels with the call.
+When a verb call resolves to a target object on a different DO, dispatch is an awaited host RPC. The origin keeps the caller continuation; the receiver runs the callee frame and returns the result plus observations.
 
 ### R6.1 Non-yielding cross-DO calls (v1 baseline)
 

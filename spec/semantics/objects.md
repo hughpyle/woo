@@ -47,6 +47,40 @@ Constraints:
 
 Default: `anchor = null`. Use anchoring deliberately, when atomic coordination across a cluster is the design intent. The dubspace is the canonical example: `$mix`, `#delay`, `#channel`, `#scene` all anchor on `$mix`, share one host, and `$mix:call` mutates them atomically. Most objects in most worlds don't need an anchor.
 
+### 4.2 Host placement
+
+Where an object physically lives — which host owns its persistent storage — is determined at **creation time** by the object's class metadata, not by per-instance configuration. Two cases:
+
+1. **Self-hosted instances.** A class that declares `instances_self_host: true` (inherited through the parent chain) produces instances that each run as their own host. Every instance of such a class gets a dedicated persistent host (in the Cloudflare reference, a Durable Object) at creation, with its own storage, scheduling alarm, and hibernation lifecycle. The `instances_self_host` property is **monotone for the class's lifetime** — it must not be flipped while extant instances exist, because that would split the population across two policies. Catalog-update migrations fail loud on such a flip.
+
+2. **Co-resident instances.** A class without `instances_self_host` produces instances that live on the host of their creator (`progr` of the verb that called `create`). Carryable objects — books, hats, notes — fall here. The instance's `location` may change freely at runtime as it is carried between containers (§10.2 location and contents); host placement does not move with location. A book created on a player's host stays on that host even after it has been put on a table in another room. Lookups of the book through its container are resolved via Directory routing and per-host RPC (see [reference/cloudflare.md §R1](../reference/cloudflare.md#r1-host-mapping)).
+
+Subclass semantics: `instances_self_host` is inherited as a logical OR through the parent chain. A subclass of a self-hosting class is itself self-hosting; a subclass of a co-resident class can opt in by declaring its own flag.
+
+The classes that declare `instances_self_host: true` in v1-core and the bundled first-light catalogs:
+
+- `$room` (and subclasses) — every room has its own log, subscribers, and fixtures, scaling independently of other rooms.
+- `$player` (and subclasses including `$wiz`, `$guest`) — every player owns a host for sessions, attached connections, and inventory.
+- Anchor spaces declared by demo catalogs: `$dubspace`, `$taskspace`. The `$catalog_registry` and similar v1-ops singletons.
+
+Authority to instantiate self-hosting classes is narrower than ordinary `create()`. Because each instance reserves a real host resource, the `assertCanCreateObject` check requires wizard authority (or an explicit programmer capability grant under v1-ops); ordinary programmer-creates-own-fertile-parent authority is not sufficient. See [permissions.md §11.4](permissions.md#114-progr-and-actor) and [reference/cloudflare.md §R1.1](../reference/cloudflare.md#r11-routing).
+
+The relationship between `host_placement` and `anchor`:
+
+- `host_placement = "self"` is the runtime materialization of `instances_self_host`. The runtime stamps it on the new instance during `create`.
+- `anchor` is independent and continues to govern atomicity scope (§4.1). A non-self-hosted object may still anchor to a self-hosted ancestor for atomicity; in practice, most objects do not anchor at all (default `null`).
+- The implementation routes a request for an object in this order: if `host_placement = "self"`, the object is its own host; else if its `anchor` resolves to a self-hosted host, route there; else if its `location` resolves to a self-hosted host, route there; else fall back to the gateway/owner host. The catalog-installed pattern of `host_placement: "self"` on `the_dubspace` and anchored controls under it is the canonical example.
+
+### 4.3 Containment and cross-host invariants
+
+`obj.location = container` and `container.contents includes obj` are bidirectional: every move updates both sides. In a single-host world this is one in-memory operation, persisted in a single transaction. Across hosts, the invariant becomes a distributed responsibility:
+
+- The object's `location` field is the **source of truth**. It lives with the object on its own host; the move primitive writes it transactionally on the host that owns the object.
+- Each container's `contents` is a **cache** maintained by push-mirror RPC from the host that owns the moving object. When an object's `location` changes, the moving host RPCs the source container's host (`contents.delete(obj)`) and the target container's host (`contents.add(obj, {title})`).
+- The cache may drift if a push fails. A reconcile sweep — triggered on `:look` or by periodic policy — verifies each `contents` entry by querying the member's actual `location` via Directory and prunes ghosts. Ghost entries do not affect routing or correctness; they affect rendering until reconciled.
+
+The Directory does not track `location`. It routes `id → host` only. Containment lives with the container; the Directory's job stays scoped to host lookup. See [reference/cloudflare.md §R1.1](../reference/cloudflare.md#r11-routing) for the wire-level mechanics.
+
 ---
 
 ## 5. Identity and addressing
