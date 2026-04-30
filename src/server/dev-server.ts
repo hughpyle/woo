@@ -347,13 +347,13 @@ async function handleRestApi(req: http.IncomingMessage, res: http.ServerResponse
     const target = resolveRestObject(route.id, session);
 
     if (req.method === "GET" && route.rest.length === 0) {
-      json(res, world.describe(target));
+      json(res, world.describeForActor(target, session.actor));
       return true;
     }
 
     if (req.method === "GET" && route.rest.length === 2 && route.rest[0] === "properties") {
       const name = route.rest[1];
-      const value = world.getProp(target, name);
+      const value = world.getPropForActor(session.actor, target, name);
       const info = restPropertyInfo(target, name);
       const ownVersion = world.object(target).propertyVersions.get(name);
       json(res, { ...info, value, version: ownVersion ?? info.version });
@@ -366,6 +366,17 @@ async function handleRestApi(req: http.IncomingMessage, res: http.ServerResponse
       const args = Array.isArray(body.args) ? (body.args as WooValue[]) : [];
       const actor = resolveRestActor(req, body.actor, session);
       const frameId = typeof body.id === "string" ? body.id : undefined;
+
+      if (verb === "call" && !Object.prototype.hasOwnProperty.call(body, "space") && isSpaceLike(target)) {
+        const inner = Array.isArray(body.args) ? body.args[0] : null;
+        if (!inner || typeof inner !== "object" || Array.isArray(inner)) throw wooError("E_INVARG", "$space:call expects args[0] to be a message map");
+        const message = messageFromRestMap(inner as Record<string, WooValue>, actor, session);
+        const result = world.call(frameId, session.id, target, message);
+        if (result.op === "error") return restError(res, result.error, statusForError(result.error));
+        broadcastApplied(result);
+        json(res, result);
+        return true;
+      }
 
       if (Object.prototype.hasOwnProperty.call(body, "space") && body.space !== null) {
         const space = resolveRestObject(String(body.space), session);
@@ -455,9 +466,23 @@ function resolveRestActor(req: http.IncomingMessage, actorValue: unknown, sessio
   if (requested === session.actor) return requested;
   if (world.object(session.actor).flags.wizard) {
     world.object(requested);
+    world.recordWizardAction(session.actor, "impersonate", { actor: requested, via: "REST X-Woo-Impersonate-Actor" });
     return requested;
   }
   throw wooError("E_PERM", "actor does not match session actor", { actor: requested, session_actor: session.actor });
+}
+
+function messageFromRestMap(value: Record<string, WooValue>, actor: ObjRef, session: Session): Message {
+  if (typeof value.target !== "string" || typeof value.verb !== "string") {
+    throw wooError("E_INVARG", "message map requires string target and verb");
+  }
+  return {
+    actor,
+    target: resolveRestObject(value.target, session),
+    verb: value.verb,
+    args: Array.isArray(value.args) ? value.args : [],
+    body: value.body && typeof value.body === "object" && !Array.isArray(value.body) ? (value.body as Record<string, WooValue>) : undefined
+  };
 }
 
 function isSpaceLike(obj: ObjRef): boolean {
@@ -526,9 +551,11 @@ function parseLastEventSeq(value: string, space: ObjRef): number | null {
 }
 
 function appliedFromLogEntry(entry: SpaceLogEntry): AppliedFrame & { ts: number } {
-  const observations: Observation[] = entry.applied_ok
-    ? []
-    : [{ type: "$error", code: entry.error?.code ?? "E_INTERNAL", message: entry.error?.message ?? entry.error?.code ?? "error", value: entry.error?.value ?? null }];
+  const observations: Observation[] = entry.observations?.length
+    ? entry.observations
+    : entry.applied_ok
+      ? []
+      : [{ type: "$error", code: entry.error?.code ?? "E_INTERNAL", message: entry.error?.message ?? entry.error?.code ?? "error", value: entry.error?.value ?? null }];
   return { op: "applied", space: entry.space, seq: entry.seq, message: entry.message, observations, ts: entry.ts };
 }
 

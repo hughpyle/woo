@@ -280,8 +280,17 @@ export class WooWorld {
       contents_count: obj.contents.size,
       properties: this.properties(objRef),
       verbs: this.verbs(objRef),
+      schemas: this.schemas(objRef),
       children: Array.from(obj.children),
       contents: Array.from(obj.contents)
+    };
+  }
+
+  describeForActor(objRef: ObjRef, actor: ObjRef): Record<string, WooValue> {
+    const description = this.canReadProperty(actor, objRef, "description") ? this.getProp(objRef, "description") : null;
+    return {
+      ...this.describe(objRef),
+      description
     };
   }
 
@@ -297,6 +306,16 @@ export class WooWorld {
     return Array.from(names).sort();
   }
 
+  getPropForActor(actor: ObjRef, objRef: ObjRef, name: string): WooValue {
+    if (!this.canReadProperty(actor, objRef, name)) throw wooError("E_PERM", `${actor} cannot read ${objRef}.${name}`, { actor, obj: objRef, property: name });
+    return this.getProp(objRef, name);
+  }
+
+  canReadProperty(actor: ObjRef, objRef: ObjRef, name: string): boolean {
+    const info = this.propertyInfo(objRef, name);
+    return Boolean(this.object(actor).flags.wizard) || info.owner === actor || String(info.perms).includes("r");
+  }
+
   propOrNull(objRef: ObjRef, name: string): WooValue {
     try {
       return this.getProp(objRef, name);
@@ -310,6 +329,15 @@ export class WooWorld {
     this.collectVerbNames(objRef, names);
     if (this.canCarryFeatures(objRef)) {
       for (const feature of this.featureList(objRef)) this.collectVerbNames(feature, names);
+    }
+    return Array.from(names).sort();
+  }
+
+  schemas(objRef: ObjRef): WooValue[] {
+    const names = new Set<string>();
+    this.collectSchemaNames(objRef, names);
+    if (this.canCarryFeatures(objRef)) {
+      for (const feature of this.featureList(objRef)) this.collectSchemaNames(feature, names);
     }
     return Array.from(names).sort();
   }
@@ -353,6 +381,18 @@ export class WooWorld {
         };
       }
       current = obj.parent;
+    }
+    const target = this.object(objRef);
+    if (target.properties.has(name)) {
+      return {
+        name,
+        owner: target.owner,
+        perms: "rw",
+        defined_on: objRef,
+        type_hint: null,
+        version: target.propertyVersions.get(name) ?? 1,
+        has_value: true
+      };
     }
     throw wooError("E_PROPNF", `property not found: ${name}`, name);
   }
@@ -556,6 +596,7 @@ export class WooWorld {
         ts: Date.now(),
         actor: message.actor,
         message: cloneValue(message) as Message,
+        observations: [],
         applied_ok: true
       };
       const log = this.logs.get(spaceRef) ?? [];
@@ -604,6 +645,7 @@ export class WooWorld {
         }
       }
 
+      logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
       const frame = { op: "applied" as const, id, space: spaceRef, seq, ts: logEntry.ts, message, observations };
       this.persist(true);
       return frame;
@@ -628,6 +670,7 @@ export class WooWorld {
           ts,
           actor: message.actor,
           message: cloneValue(message) as Message,
+          observations: [],
           applied_ok: true
         };
         const log = this.logs.get(spaceRef) ?? [];
@@ -676,14 +719,16 @@ export class WooWorld {
             observations.push({ type: "task_awaiting_read", source: spaceRef, task, player: parked.player });
           }
           logEntry.applied_ok = true;
-          repo.recordLogOutcome(spaceRef, seq, true);
+          logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
+          repo.recordLogOutcome(spaceRef, seq, true, observations);
         } catch (err) {
           const error = normalizeError(err);
           logEntry.applied_ok = false;
           logEntry.error = error;
           observations.length = 0;
           observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null, trace: error.trace ?? [] });
-          repo.recordLogOutcome(spaceRef, seq, false, error);
+          logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
+          repo.recordLogOutcome(spaceRef, seq, false, observations, error);
         }
 
         frame = { op: "applied", id, space: spaceRef, seq, ts: logEntry.ts, message, observations };
@@ -1319,6 +1364,15 @@ export class WooWorld {
     }
   }
 
+  private collectSchemaNames(startRef: ObjRef | null, names: Set<string>): void {
+    let current: ObjRef | null = startRef;
+    while (current) {
+      const obj = this.object(current);
+      for (const name of obj.eventSchemas.keys()) names.add(name);
+      current = obj.parent;
+    }
+  }
+
   private authorizePresence(actor: ObjRef, space: ObjRef): void {
     if (this.isWizard(actor)) return;
     if (!this.hasPresence(actor, space)) {
@@ -1344,7 +1398,7 @@ export class WooWorld {
     return Boolean(this.object(actor).flags.wizard);
   }
 
-  private recordWizardAction(actor: ObjRef, action: string, details: Record<string, WooValue>): void {
+  recordWizardAction(actor: ObjRef, action: string, details: Record<string, WooValue>): void {
     const raw = this.propOrNull("$system", "wizard_actions");
     const actions = Array.isArray(raw) ? raw : [];
     this.setProp("$system", "wizard_actions", [...actions, { ts: Date.now(), actor, action, ...details }]);
@@ -1617,6 +1671,7 @@ export class WooWorld {
         ts: Date.now(),
         actor,
         message: cloneValue(message) as Message,
+        observations: [],
         applied_ok: true
       };
       const log = this.logs.get(spaceRef) ?? [];
@@ -1645,6 +1700,7 @@ export class WooWorld {
         }
       }
 
+      logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
       const frame = { op: "applied" as const, space: space.id, seq, ts: logEntry.ts, message, observations };
       this.persist(true);
       return frame;
@@ -1681,6 +1737,7 @@ export class WooWorld {
           ts,
           actor,
           message: cloneValue(message) as Message,
+          observations: [],
           applied_ok: true
         };
         const log = this.logs.get(spaceRef) ?? [];
@@ -1712,14 +1769,16 @@ export class WooWorld {
             observations.push({ type: "task_awaiting_read", source: spaceRef, task: resumedTask, player: parked.player });
           }
           logEntry.applied_ok = true;
-          repo.recordLogOutcome(spaceRef, seq, true);
+          logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
+          repo.recordLogOutcome(spaceRef, seq, true, observations);
         } catch (err) {
           const error = normalizeError(err);
           logEntry.applied_ok = false;
           logEntry.error = error;
           observations.length = 0;
           observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null, trace: error.trace ?? [] });
-          repo.recordLogOutcome(spaceRef, seq, false, error);
+          logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
+          repo.recordLogOutcome(spaceRef, seq, false, observations, error);
         }
 
         frame = { op: "applied", space: space.id, seq, ts: logEntry.ts, message, observations };
@@ -1905,6 +1964,7 @@ export class WooWorld {
       return this.replay(ctx.thisObj, from, limit).map((entry) => ({
         seq: entry.seq,
         message: entry.message as unknown as WooValue,
+        observations: entry.observations as unknown as WooValue,
         applied_ok: entry.applied_ok,
         error: entry.error as unknown as WooValue
       }));

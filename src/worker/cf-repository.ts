@@ -32,7 +32,7 @@ import type {
   SpaceSnapshotRecord,
   WorldRepository
 } from "../core/repository";
-import { wooError, type ErrorValue, type Message, type ObjRef, type SpaceLogEntry, type VerbDef, type WooValue } from "../core/types";
+import { wooError, type ErrorValue, type Message, type ObjRef, type Observation, type SpaceLogEntry, type VerbDef, type WooValue } from "../core/types";
 
 type Row = Record<string, unknown>;
 
@@ -165,9 +165,10 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
       for (const [, entries] of world.logs) {
         for (const entry of entries) {
           this.sql.exec(
-            "INSERT INTO space_message(space_id, seq, ts, actor, message, applied_ok, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO space_message(space_id, seq, ts, actor, message, observations, applied_ok, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             entry.space, entry.seq, entry.ts, entry.actor,
             stringifyValue(entry.message as unknown as WooValue),
+            stringifyValue((entry.observations ?? []) as unknown as WooValue),
             entry.applied_ok ? 1 : 0,
             entry.error ? stringifyValue(entry.error as unknown as WooValue) : null
           );
@@ -427,23 +428,25 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
     });
     const ts = Date.now();
     this.sql.exec(
-      "INSERT INTO space_message(space_id, seq, ts, actor, message, applied_ok, error) VALUES (?, ?, ?, ?, ?, NULL, NULL)",
-      space, seq, ts, actor, stringifyValue(message as unknown as WooValue)
+      "INSERT INTO space_message(space_id, seq, ts, actor, message, observations, applied_ok, error) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",
+      space, seq, ts, actor, stringifyValue(message as unknown as WooValue), stringifyValue([])
     );
     return { seq, ts };
   }
 
-  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, error?: ErrorValue): void {
-    const row = this.one("SELECT applied_ok, error FROM space_message WHERE space_id = ? AND seq = ?", space, seq);
+  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, observations: Observation[] = [], error?: ErrorValue): void {
+    const row = this.one("SELECT applied_ok, observations, error FROM space_message WHERE space_id = ? AND seq = ?", space, seq);
     if (!row) throw wooError("E_STORAGE", `log entry not found: ${space}:${seq}`);
     if (row.applied_ok !== null && row.applied_ok !== undefined) {
       const existing = Boolean(row.applied_ok);
       const existingError = row.error ? parseValue(String(row.error)) : undefined;
-      if (existing === applied_ok && JSON.stringify(existingError ?? null) === JSON.stringify(error ?? null)) return;
+      const existingObservations = row.observations ? parseValue(String(row.observations)) : [];
+      if (existing === applied_ok && JSON.stringify(existingError ?? null) === JSON.stringify(error ?? null) && JSON.stringify(existingObservations) === JSON.stringify(observations)) return;
       throw wooError("E_STORAGE", `log outcome already recorded: ${space}:${seq}`);
     }
     this.sql.exec(
-      "UPDATE space_message SET applied_ok = ?, error = ? WHERE space_id = ? AND seq = ?",
+      "UPDATE space_message SET observations = ?, applied_ok = ?, error = ? WHERE space_id = ? AND seq = ?",
+      stringifyValue(observations as unknown as WooValue),
       applied_ok ? 1 : 0,
       error ? stringifyValue(error as unknown as WooValue) : null,
       space, seq
@@ -681,6 +684,7 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
         ts INTEGER NOT NULL,
         actor TEXT NOT NULL,
         message TEXT NOT NULL,
+        observations TEXT NOT NULL DEFAULT '[]',
         applied_ok INTEGER,
         error TEXT,
         PRIMARY KEY (space_id, seq)
@@ -721,6 +725,16 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
       )`
     ];
     for (const stmt of stmts) this.sql.exec(stmt);
+    this.ensureColumn("space_message", "observations", "TEXT NOT NULL DEFAULT '[]'");
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    if (this.tableColumns(table).has(column)) return;
+    this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  private tableColumns(table: string): Set<string> {
+    return new Set(this.all(`PRAGMA table_info(${table})`).map((row) => String(row.name)));
   }
 }
 
@@ -790,6 +804,7 @@ function logEntryFromRow(row: Row): SpaceLogEntry {
     ts: Number(row.ts),
     actor: String(row.actor),
     message: parseValue(String(row.message)) as unknown as Message,
+    observations: row.observations ? (parseValue(String(row.observations)) as unknown as Observation[]) : [],
     applied_ok: Boolean(row.applied_ok),
     error: row.error ? (parseValue(String(row.error)) as unknown as ErrorValue) : undefined
   };

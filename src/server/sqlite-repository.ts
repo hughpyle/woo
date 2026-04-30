@@ -13,7 +13,7 @@ import type {
   SpaceSnapshotRecord,
   WorldRepository
 } from "../core/repository";
-import { wooError, type ErrorValue, type Message, type ObjRef, type SpaceLogEntry, type VerbDef, type WooValue } from "../core/types";
+import { wooError, type ErrorValue, type Message, type ObjRef, type Observation, type SpaceLogEntry, type VerbDef, type WooValue } from "../core/types";
 
 type Row = Record<string, any>;
 
@@ -157,9 +157,9 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
         insertSession.run(...(hasAttachmentColumn ? [...values, "{}"] : values));
       }
 
-      const insertLog = this.db.prepare("INSERT INTO space_message(space_id, seq, ts, actor, message, applied_ok, error) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      const insertLog = this.db.prepare("INSERT INTO space_message(space_id, seq, ts, actor, message, observations, applied_ok, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
       for (const [space, entries] of world.logs) {
-        for (const entry of entries) insertLog.run(space, entry.seq, entry.ts, entry.actor, stringifyValue(entry.message as unknown as WooValue), entry.applied_ok ? 1 : 0, entry.error ? stringifyValue(entry.error as unknown as WooValue) : null);
+        for (const entry of entries) insertLog.run(space, entry.seq, entry.ts, entry.actor, stringifyValue(entry.message as unknown as WooValue), stringifyValue((entry.observations ?? []) as unknown as WooValue), entry.applied_ok ? 1 : 0, entry.error ? stringifyValue(entry.error as unknown as WooValue) : null);
       }
 
       const insertSnapshot = this.db.prepare("INSERT INTO space_snapshot(space_id, seq, ts, state, hash) VALUES (?, ?, ?, ?, ?)");
@@ -359,23 +359,24 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
     this.saveProperty(space, { name: "next_seq", def: nextSeq?.def ?? null, value: seq + 1, version: (nextSeq?.version ?? 0) + 1 });
     const ts = Date.now();
     this.db
-      .prepare("INSERT INTO space_message(space_id, seq, ts, actor, message, applied_ok, error) VALUES (?, ?, ?, ?, ?, NULL, NULL)")
-      .run(space, seq, ts, actor, stringifyValue(message as unknown as WooValue));
+      .prepare("INSERT INTO space_message(space_id, seq, ts, actor, message, observations, applied_ok, error) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)")
+      .run(space, seq, ts, actor, stringifyValue(message as unknown as WooValue), stringifyValue([]));
     return { seq, ts };
   }
 
-  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, error?: ErrorValue): void {
-    const row = this.db.prepare("SELECT applied_ok, error FROM space_message WHERE space_id = ? AND seq = ?").get(space, seq) as Row | undefined;
+  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, observations: Observation[] = [], error?: ErrorValue): void {
+    const row = this.db.prepare("SELECT applied_ok, observations, error FROM space_message WHERE space_id = ? AND seq = ?").get(space, seq) as Row | undefined;
     if (!row) throw wooError("E_STORAGE", `log entry not found: ${space}:${seq}`);
     if (row.applied_ok !== null && row.applied_ok !== undefined) {
       const existing = Boolean(row.applied_ok);
       const existingError = row.error ? parseValue(row.error) : undefined;
-      if (existing === applied_ok && JSON.stringify(existingError ?? null) === JSON.stringify(error ?? null)) return;
+      const existingObservations = row.observations ? parseValue(row.observations) : [];
+      if (existing === applied_ok && JSON.stringify(existingError ?? null) === JSON.stringify(error ?? null) && JSON.stringify(existingObservations) === JSON.stringify(observations)) return;
       throw wooError("E_STORAGE", `log outcome already recorded: ${space}:${seq}`);
     }
     this.db
-      .prepare("UPDATE space_message SET applied_ok = ?, error = ? WHERE space_id = ? AND seq = ?")
-      .run(applied_ok ? 1 : 0, error ? stringifyValue(error as unknown as WooValue) : null, space, seq);
+      .prepare("UPDATE space_message SET observations = ?, applied_ok = ?, error = ? WHERE space_id = ? AND seq = ?")
+      .run(stringifyValue(observations as unknown as WooValue), applied_ok ? 1 : 0, error ? stringifyValue(error as unknown as WooValue) : null, space, seq);
   }
 
   readLog(space: ObjRef, from: number, limit: number): LogReadResult {
@@ -553,6 +554,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
         ts INTEGER NOT NULL,
         actor TEXT NOT NULL,
         message TEXT NOT NULL,
+        observations TEXT NOT NULL DEFAULT '[]',
         applied_ok INTEGER,
         error TEXT,
         PRIMARY KEY (space_id, seq)
@@ -595,6 +597,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
     this.ensureColumn("session", "expires_at", "INTEGER");
     this.ensureColumn("session", "last_detach_at", "INTEGER");
     this.ensureColumn("session", "token_class", "TEXT NOT NULL DEFAULT 'guest'");
+    this.ensureColumn("space_message", "observations", "TEXT NOT NULL DEFAULT '[]'");
     this.db.exec("DROP TABLE IF EXISTS session_socket");
   }
 
@@ -717,6 +720,7 @@ function logEntryFromRow(row: Row): SpaceLogEntry {
     ts: Number(row.ts),
     actor: row.actor,
     message: parseValue(row.message) as unknown as Message,
+    observations: row.observations ? (parseValue(row.observations) as unknown as Observation[]) : [],
     applied_ok: Boolean(row.applied_ok),
     error: row.error ? (parseValue(row.error) as unknown as ErrorValue) : undefined
   };

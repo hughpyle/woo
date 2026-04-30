@@ -7,6 +7,14 @@ compatibility_flags = ["nodejs_compat"]
 enabled = true
 head_sampling_rate = 1.0
 
+# Static assets: the bundled SPA is built to dist/ via `npm run build`.
+# The Worker entry routes /api/* and /healthz to the DO; everything else
+# falls through to ASSETS.fetch so the browser gets index.html + the JS/CSS bundle.
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
 # v1: a single DO hosts the whole world. Cross-DO anchor-cluster routing is
 # a v1.1 refactor; until then env.WOO.idFromName("world") points at one DO.
 [[durable_objects.bindings]]

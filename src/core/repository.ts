@@ -1,4 +1,4 @@
-import { cloneValue, wooError, type ErrorValue, type Message, type ObjRef, type PropertyDef, type Session, type SpaceLogEntry, type VerbDef, type WooObject, type WooValue } from "./types";
+import { cloneValue, wooError, type ErrorValue, type Message, type ObjRef, type Observation, type PropertyDef, type Session, type SpaceLogEntry, type VerbDef, type WooObject, type WooValue } from "./types";
 
 export type SerializedObject = {
   id: ObjRef;
@@ -136,7 +136,8 @@ export interface ObjectRepository {
    *
    * `$space:call` uses this for the behavior body: the accepted log row and seq
    * allocation stay in the outer transaction, while failed behavior mutations
-   * roll back to the savepoint before `recordLogOutcome(..., false, error)`.
+   * roll back to the savepoint before
+   * `recordLogOutcome(..., false, observations, error)`.
    *
    * The CF backend relies on nested `state.storage.transactionSync` savepoint
    * behavior; local SQLite uses `SAVEPOINT` / `ROLLBACK TO`; in-memory backends
@@ -234,14 +235,15 @@ export interface ObjectRepository {
   appendLog(space: ObjRef, actor: ObjRef, message: Message): { seq: number; ts: number };
 
   /**
-   * Update the pending log row with the behavior outcome. Called inside the
+   * Update the pending log row with the behavior outcome and replayable
+   * observations. Called inside the
    * same outer `transaction()` as `appendLog`, after the behavior savepoint has
    * either completed or rolled back (see §R3.4).
    *
    * Idempotent: calling twice with the same outcome is a no-op; calling with a
    * different outcome raises (an outcome should be immutable once set).
    */
-  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, error?: ErrorValue): void;
+  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, observations?: Observation[], error?: ErrorValue): void;
 
   /** Read at most `limit` log entries with `seq >= from`. Caller checks for `has_more`. */
   readLog(space: ObjRef, from: number, limit: number): LogReadResult;
@@ -555,19 +557,20 @@ export class InMemoryObjectRepository implements ObjectRepository, WorldReposito
     this.saveProperty(space, { name: "next_seq", def: nextSeq?.def ?? null, value: seq + 1, version: (nextSeq?.version ?? 0) + 1 });
     const ts = Date.now();
     const entries = this.logs.get(space) ?? [];
-    entries.push({ space, seq, ts, actor, message: cloneRepoValue(message as unknown as WooValue) as unknown as Message, applied_ok: null });
+    entries.push({ space, seq, ts, actor, message: cloneRepoValue(message as unknown as WooValue) as unknown as Message, observations: [], applied_ok: null });
     this.logs.set(space, entries);
     return { seq, ts };
   }
 
-  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, error?: ErrorValue): void {
+  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, observations: Observation[] = [], error?: ErrorValue): void {
     const entry = (this.logs.get(space) ?? []).find((item) => item.seq === seq);
     if (!entry) throw wooError("E_STORAGE", `log entry not found: ${space}:${seq}`);
     if (entry.applied_ok !== null) {
-      if (entry.applied_ok === applied_ok && valuesEqualOrUndefined(entry.error, error)) return;
+      if (entry.applied_ok === applied_ok && valuesEqualOrUndefined(entry.error, error) && JSON.stringify(entry.observations ?? []) === JSON.stringify(observations)) return;
       throw wooError("E_STORAGE", `log outcome already recorded: ${space}:${seq}`);
     }
     entry.applied_ok = applied_ok;
+    entry.observations = cloneRepoValue(observations as unknown as WooValue) as unknown as Observation[];
     if (error) entry.error = cloneRepoValue(error as unknown as WooValue) as unknown as ErrorValue;
   }
 
@@ -734,6 +737,7 @@ function finalizeLogEntry(entry: PendingSpaceLogEntry): SpaceLogEntry {
     ts: entry.ts,
     actor: entry.actor,
     message: cloneRepoValue(entry.message as unknown as WooValue) as unknown as Message,
+    observations: cloneRepoValue((entry.observations ?? []) as unknown as WooValue) as unknown as Observation[],
     applied_ok: entry.applied_ok,
     error: entry.error ? (cloneRepoValue(entry.error as unknown as WooValue) as unknown as ErrorValue) : undefined
   };
