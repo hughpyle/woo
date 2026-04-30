@@ -24,6 +24,10 @@ export default {
   async fetch(request: Request, env: Env, _ctx: unknown): Promise<Response> {
     const url = new URL(request.url);
 
+    // Strip any x-woo-internal-* / x-woo-host-key the public client tried to
+    // inject; those headers are reserved for trusted gateway → DO forwarding.
+    request = sanitizePublicHeaders(request);
+
     if (request.method === "POST" && url.pathname === "/api/auth") {
       const response = await forwardToHost(env, WORLD_HOST, request);
       await registerAuthResponse(env, response.clone());
@@ -89,7 +93,11 @@ async function resolveHostForObjectRoute(
 }
 
 async function forwardToHost(env: Env, host: string, request: Request): Promise<Response> {
-  const headers = cleanInternalHeaders(request.headers);
+  // Don't strip x-woo-internal-* here — withDirectorySession may have set
+  // them upstream so the target DO can bind the session via
+  // ensureSessionForActor. Inbound public copies are stripped once at the
+  // gateway entry by sanitizePublicHeaders.
+  const headers = new Headers(request.headers);
   headers.set("x-woo-host-key", host);
   const routed = new Request(request, { headers });
   const id = env.WOO.idFromName(host);
@@ -215,6 +223,11 @@ function cleanInternalHeaders(input: Headers): Headers {
     }
   }
   return headers;
+}
+
+function sanitizePublicHeaders(request: Request): Request {
+  const headers = cleanInternalHeaders(request.headers);
+  return new Request(request, { headers });
 }
 
 function parseObjectRoute(pathname: string): { id: string; rest: string[] } | null {
