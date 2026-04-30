@@ -88,6 +88,12 @@ Minimum categories:
 - Metering failures.
 - Durable task resume once v0.5b owns task parking.
 
+Status: landed as `tests/conformance.test.ts`. The harness runs backend-visible
+world semantics against `InMemoryObjectRepository` and SQLite using the same
+cases. JSON-folder remains covered as import/export, not live storage. The VM
+opcode matrix still lives in `tests/vm.test.ts`; fold it into this harness only
+when there is a second VM backend to compare.
+
 The harness should run the same semantic cases against the in-memory and SQLite
 backends. That prevents "SQLite exists" from becoming weaker than "SQLite
 preserves the specified behavior."
@@ -150,13 +156,22 @@ Implemented so far:
   - Partial object dumps contain only selected object files and are explicitly
     not loadable as a complete world repository.
 
+Landed after the first v0.5 notes pass:
+
+- Repository-backed operations for the local runtime. `WooWorld` now enables
+  incremental persistence after bootstrap when the repository implements
+  `ObjectRepository`: object/session/task/snapshot changes use per-object
+  methods, and sequenced calls/resumes use `transaction()` plus behavior
+  `savepoint()`. Whole-world `save()` remains a startup/bootstrap compatibility
+  path and a JSON-folder import/export shape, not the hot mutation path.
+- Cross-backend conformance harness. The suite covers sequenced call lifecycle,
+  behavior-failure rollback, idempotency, replay, direct-vs-sequenced
+  observations, restart reconstruction, sessions/reap, parked `FORK` and `READ`
+  tasks, taskspace hierarchy, and source authoring/version checks across memory
+  and SQLite.
+
 Still open:
 
-- Repository-backed operations instead of whole-world save/load. Every mutation
-  currently calls `persist()` which serializes the entire `SerializedWorld` and
-  hands it to `repository.save`. Acceptable at v0.5 scale; a per-object or
-  per-transaction interface (`saveObject`, `getObject`, transactional batch) is
-  required before this is suitable for production load.
 - READ disconnect grace-period handling and task killing for sessions that stay
   detached past the identity.md grace window.
 - Lower-latency or alarm-backed scheduler wakeups. The local dev scheduler uses
@@ -164,9 +179,10 @@ Still open:
   than the poll cadence can slip up to ~250ms past `resume_at`. Production needs
   alarm-backed scheduling (Cloudflare DO alarms or equivalent) that fires at
   exactly the next-due `resume_at`.
-- Cross-backend conformance harness beyond the current focused persistence
-  tests.
 - Full DSL compiler.
+- Failure-injection conformance for crash-mid-transaction recovery. The current
+  backends reject pending log outcomes before commit; a simulated-crash backend
+  is still needed to exercise storage interruption at each transaction boundary.
 
 Known acceptable shortcuts:
 

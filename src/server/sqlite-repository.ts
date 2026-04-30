@@ -1,13 +1,26 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ParkedTaskRecord, SerializedObject, SerializedWorld, SpaceSnapshotRecord, WorldRepository } from "../core/repository";
-import { wooError, type ObjRef, type SpaceLogEntry, type VerbDef, type WooValue } from "../core/types";
+import type {
+  LogReadResult,
+  ObjectRepository,
+  ParkedTaskRecord,
+  SerializedObject,
+  SerializedProperty,
+  SerializedSession,
+  SerializedVerb,
+  SerializedWorld,
+  SpaceSnapshotRecord,
+  WorldRepository
+} from "../core/repository";
+import { wooError, type ErrorValue, type Message, type ObjRef, type SpaceLogEntry, type VerbDef, type WooValue } from "../core/types";
 
 type Row = Record<string, any>;
 
-export class SQLiteWorldRepository implements WorldRepository {
+export class LocalSQLiteRepository implements WorldRepository, ObjectRepository {
   private db: DatabaseSync;
+  private transactionDepth = 0;
+  private savepointCounter = 0;
 
   constructor(private filename: string) {
     if (filename !== ":memory:") mkdirSync(dirname(filename), { recursive: true });
@@ -67,15 +80,7 @@ export class SQLiteWorldRepository implements WorldRepository {
     const logRows = this.db.prepare("SELECT * FROM space_message ORDER BY space_id, seq").all() as Row[];
     const logs = Array.from(groupBy(logRows, "space_id").entries()).map(([space, entries]) => [
       space,
-      entries.map((row) => ({
-        space: row.space_id,
-        seq: Number(row.seq),
-        ts: Number(row.ts),
-        actor: row.actor,
-        message: parseValue(row.message),
-        applied_ok: Boolean(row.applied_ok),
-        error: row.error ? parseValue(row.error) : undefined
-      })) as SpaceLogEntry[]
+      entries.map(logEntryFromRow) as SpaceLogEntry[]
     ]) as [ObjRef, SpaceLogEntry[]][];
 
     const snapshots = (this.db.prepare("SELECT * FROM space_snapshot ORDER BY space_id, seq").all() as Row[]).map(snapshotFromRow);
@@ -180,6 +185,297 @@ export class SQLiteWorldRepository implements WorldRepository {
     return row ? snapshotFromRow(row) : null;
   }
 
+  loadObject(id: ObjRef): SerializedObject | null {
+    const row = this.db.prepare("SELECT * FROM object WHERE id = ?").get(id) as Row | undefined;
+    if (!row) return null;
+    return {
+      id: row.id,
+      name: row.name,
+      parent: row.parent,
+      owner: row.owner,
+      location: row.location,
+      anchor: row.anchor,
+      flags: flagsFromInt(Number(row.flags)),
+      created: Number(row.created),
+      modified: Number(row.modified),
+      propertyDefs: (this.db.prepare("SELECT * FROM property_def WHERE object_id = ? ORDER BY name").all(id) as Row[]).map((def) => ({
+        name: def.name,
+        defaultValue: parseValue(def.default_val),
+        typeHint: def.type_hint ?? undefined,
+        owner: def.owner,
+        perms: def.perms,
+        version: Number(def.version)
+      })),
+      properties: (this.db.prepare("SELECT * FROM property_value WHERE object_id = ? ORDER BY name").all(id) as Row[]).map((value) => [value.name, parseValue(value.value)]),
+      propertyVersions: (this.db.prepare("SELECT * FROM property_version WHERE object_id = ? ORDER BY name").all(id) as Row[]).map((version) => [version.name, Number(version.version)]),
+      verbs: (this.db.prepare("SELECT * FROM verb WHERE object_id = ? ORDER BY name").all(id) as Row[]).map(verbFromRow),
+      children: (this.db.prepare("SELECT child_ref FROM child WHERE object_id = ? ORDER BY child_ref").all(id) as Row[]).map((child) => child.child_ref),
+      contents: (this.db.prepare("SELECT content_ref FROM content WHERE object_id = ? ORDER BY content_ref").all(id) as Row[]).map((content) => content.content_ref),
+      eventSchemas: (this.db.prepare("SELECT * FROM event_schema WHERE object_id = ? ORDER BY type").all(id) as Row[]).map((schema) => [schema.type, parseValue(schema.schema) as Record<string, WooValue>])
+    };
+  }
+
+  saveObject(obj: SerializedObject): void {
+    this.transaction(() => {
+      this.deleteObjectRows(obj.id);
+      this.db
+        .prepare("INSERT INTO object(id, name, parent, owner, location, anchor, flags, created, modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(obj.id, obj.name, obj.parent, obj.owner, obj.location, obj.anchor, flagsToInt(obj.flags), obj.created, obj.modified);
+      for (const def of obj.propertyDefs) {
+        this.db
+          .prepare("INSERT INTO property_def(object_id, name, default_val, type_hint, owner, perms, version) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .run(obj.id, def.name, stringifyValue(def.defaultValue), def.typeHint ?? null, def.owner, def.perms, def.version);
+      }
+      for (const [name, value] of obj.properties) this.db.prepare("INSERT INTO property_value(object_id, name, value) VALUES (?, ?, ?)").run(obj.id, name, stringifyValue(value));
+      for (const [name, version] of obj.propertyVersions) this.db.prepare("INSERT INTO property_version(object_id, name, version) VALUES (?, ?, ?)").run(obj.id, name, version);
+      for (const verb of obj.verbs) this.saveVerb(obj.id, verb);
+      for (const child of obj.children) this.addChild(obj.id, child);
+      for (const content of obj.contents) this.addContent(obj.id, content);
+      for (const [type, schema] of obj.eventSchemas) this.saveEventSchema(obj.id, type, schema);
+    });
+  }
+
+  deleteObject(id: ObjRef): void {
+    this.transaction(() => this.deleteObjectRows(id));
+  }
+
+  listHostedObjects(): ObjRef[] {
+    return (this.db.prepare("SELECT id FROM object ORDER BY id").all() as Row[]).map((row) => row.id);
+  }
+
+  loadProperty(id: ObjRef, name: string): SerializedProperty | null {
+    const def = this.db.prepare("SELECT * FROM property_def WHERE object_id = ? AND name = ?").get(id, name) as Row | undefined;
+    const value = this.db.prepare("SELECT value FROM property_value WHERE object_id = ? AND name = ?").get(id, name) as Row | undefined;
+    const version = this.db.prepare("SELECT version FROM property_version WHERE object_id = ? AND name = ?").get(id, name) as Row | undefined;
+    if (!def && !value && !version) return null;
+    return {
+      name,
+      def: def
+        ? {
+            name,
+            defaultValue: parseValue(def.default_val),
+            typeHint: def.type_hint ?? undefined,
+            owner: def.owner,
+            perms: def.perms,
+            version: Number(def.version)
+          }
+        : null,
+      value: value ? parseValue(value.value) : undefined,
+      version: version ? Number(version.version) : def ? Number(def.version) : 0
+    };
+  }
+
+  saveProperty(id: ObjRef, prop: SerializedProperty): void {
+    this.ensureHostedObject(id);
+    if (prop.def) {
+      this.db
+        .prepare("INSERT OR REPLACE INTO property_def(object_id, name, default_val, type_hint, owner, perms, version) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(id, prop.name, stringifyValue(prop.def.defaultValue), prop.def.typeHint ?? null, prop.def.owner, prop.def.perms, prop.def.version);
+    } else {
+      this.db.prepare("DELETE FROM property_def WHERE object_id = ? AND name = ?").run(id, prop.name);
+    }
+    if (prop.value !== undefined) this.db.prepare("INSERT OR REPLACE INTO property_value(object_id, name, value) VALUES (?, ?, ?)").run(id, prop.name, stringifyValue(prop.value));
+    else this.db.prepare("DELETE FROM property_value WHERE object_id = ? AND name = ?").run(id, prop.name);
+    this.db.prepare("INSERT OR REPLACE INTO property_version(object_id, name, version) VALUES (?, ?, ?)").run(id, prop.name, prop.version);
+  }
+
+  deleteProperty(id: ObjRef, name: string): void {
+    this.db.prepare("DELETE FROM property_def WHERE object_id = ? AND name = ?").run(id, name);
+    this.db.prepare("DELETE FROM property_value WHERE object_id = ? AND name = ?").run(id, name);
+    this.db.prepare("DELETE FROM property_version WHERE object_id = ? AND name = ?").run(id, name);
+  }
+
+  listPropertyNames(id: ObjRef): string[] {
+    return (
+      this.db
+        .prepare("SELECT name FROM property_def WHERE object_id = ? UNION SELECT name FROM property_value WHERE object_id = ? ORDER BY name")
+        .all(id, id) as Row[]
+    ).map((row) => row.name);
+  }
+
+  loadVerb(id: ObjRef, name: string): SerializedVerb | null {
+    const row = this.db.prepare("SELECT * FROM verb WHERE object_id = ? AND name = ?").get(id, name) as Row | undefined;
+    return row ? verbFromRow(row) : null;
+  }
+
+  saveVerb(id: ObjRef, verb: SerializedVerb): void {
+    this.ensureHostedObject(id);
+    this.db
+      .prepare("INSERT OR REPLACE INTO verb(object_id, name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(id, verb.name, verb.kind, stringifyValue(verb.aliases), verb.owner, verb.perms, stringifyValue(verb.arg_spec), verb.source, verb.source_hash, verb.version, stringifyValue(verb.line_map), verb.kind === "native" ? verb.native : null, verb.kind === "bytecode" ? stringifyValue(verb.bytecode as unknown as WooValue) : null);
+  }
+
+  deleteVerb(id: ObjRef, name: string): void {
+    this.db.prepare("DELETE FROM verb WHERE object_id = ? AND name = ?").run(id, name);
+  }
+
+  listVerbNames(id: ObjRef): string[] {
+    return (this.db.prepare("SELECT name FROM verb WHERE object_id = ? ORDER BY name").all(id) as Row[]).map((row) => row.name);
+  }
+
+  loadChildren(id: ObjRef): ObjRef[] {
+    return (this.db.prepare("SELECT child_ref FROM child WHERE object_id = ? ORDER BY child_ref").all(id) as Row[]).map((row) => row.child_ref);
+  }
+
+  addChild(id: ObjRef, child: ObjRef): void {
+    this.ensureHostedObject(id);
+    this.db.prepare("INSERT OR IGNORE INTO child(object_id, child_ref) VALUES (?, ?)").run(id, child);
+  }
+
+  removeChild(id: ObjRef, child: ObjRef): void {
+    this.db.prepare("DELETE FROM child WHERE object_id = ? AND child_ref = ?").run(id, child);
+  }
+
+  loadContents(id: ObjRef): ObjRef[] {
+    return (this.db.prepare("SELECT content_ref FROM content WHERE object_id = ? ORDER BY content_ref").all(id) as Row[]).map((row) => row.content_ref);
+  }
+
+  addContent(id: ObjRef, child: ObjRef): void {
+    this.ensureHostedObject(id);
+    this.db.prepare("INSERT OR IGNORE INTO content(object_id, content_ref) VALUES (?, ?)").run(id, child);
+  }
+
+  removeContent(id: ObjRef, child: ObjRef): void {
+    this.db.prepare("DELETE FROM content WHERE object_id = ? AND content_ref = ?").run(id, child);
+  }
+
+  loadEventSchemas(id: ObjRef): [string, Record<string, WooValue>][] {
+    return (this.db.prepare("SELECT type, schema FROM event_schema WHERE object_id = ? ORDER BY type").all(id) as Row[]).map((row) => [row.type, parseValue(row.schema) as Record<string, WooValue>]);
+  }
+
+  saveEventSchema(id: ObjRef, type: string, schema: Record<string, WooValue>): void {
+    this.ensureHostedObject(id);
+    this.db.prepare("INSERT OR REPLACE INTO event_schema(object_id, type, schema) VALUES (?, ?, ?)").run(id, type, stringifyValue(schema as WooValue));
+  }
+
+  deleteEventSchema(id: ObjRef, type: string): void {
+    this.db.prepare("DELETE FROM event_schema WHERE object_id = ? AND type = ?").run(id, type);
+  }
+
+  appendLog(space: ObjRef, actor: ObjRef, message: Message): { seq: number; ts: number } {
+    this.ensureHostedObject(space);
+    const seq = this.currentSeq(space);
+    const nextSeq = this.loadProperty(space, "next_seq");
+    this.saveProperty(space, { name: "next_seq", def: nextSeq?.def ?? null, value: seq + 1, version: (nextSeq?.version ?? 0) + 1 });
+    const ts = Date.now();
+    this.db
+      .prepare("INSERT INTO space_message(space_id, seq, ts, actor, message, applied_ok, error) VALUES (?, ?, ?, ?, ?, NULL, NULL)")
+      .run(space, seq, ts, actor, stringifyValue(message as unknown as WooValue));
+    return { seq, ts };
+  }
+
+  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, error?: ErrorValue): void {
+    const row = this.db.prepare("SELECT applied_ok, error FROM space_message WHERE space_id = ? AND seq = ?").get(space, seq) as Row | undefined;
+    if (!row) throw wooError("E_STORAGE", `log entry not found: ${space}:${seq}`);
+    if (row.applied_ok !== null && row.applied_ok !== undefined) {
+      const existing = Boolean(row.applied_ok);
+      const existingError = row.error ? parseValue(row.error) : undefined;
+      if (existing === applied_ok && JSON.stringify(existingError ?? null) === JSON.stringify(error ?? null)) return;
+      throw wooError("E_STORAGE", `log outcome already recorded: ${space}:${seq}`);
+    }
+    this.db
+      .prepare("UPDATE space_message SET applied_ok = ?, error = ? WHERE space_id = ? AND seq = ?")
+      .run(applied_ok ? 1 : 0, error ? stringifyValue(error as unknown as WooValue) : null, space, seq);
+  }
+
+  readLog(space: ObjRef, from: number, limit: number): LogReadResult {
+    const rows = this.db.prepare("SELECT * FROM space_message WHERE space_id = ? AND seq >= ? ORDER BY seq LIMIT ?").all(space, from, limit + 1) as Row[];
+    const page = rows.slice(0, limit);
+    return {
+      messages: page.map(logEntryFromRow),
+      next_seq: this.currentSeq(space),
+      has_more: rows.length > limit
+    };
+  }
+
+  currentSeq(space: ObjRef): number {
+    const prop = this.loadProperty(space, "next_seq");
+    if (typeof prop?.value === "number") return prop.value;
+    const row = this.db.prepare("SELECT MAX(seq) AS max_seq FROM space_message WHERE space_id = ?").get(space) as Row | undefined;
+    return Number(row?.max_seq ?? 0) + 1;
+  }
+
+  loadLatestSnapshot(space: ObjRef): SpaceSnapshotRecord | null {
+    const row = this.db.prepare("SELECT * FROM space_snapshot WHERE space_id = ? ORDER BY seq DESC LIMIT 1").get(space) as Row | undefined;
+    return row ? snapshotFromRow(row) : null;
+  }
+
+  truncateLog(space: ObjRef, covered_seq: number): number {
+    const result = this.db.prepare("DELETE FROM space_message WHERE space_id = ? AND seq <= ?").run(space, covered_seq);
+    return Number(result.changes ?? 0);
+  }
+
+  loadSession(session_id: string): SerializedSession | null {
+    const row = this.db.prepare("SELECT * FROM session WHERE id = ?").get(session_id) as Row | undefined;
+    return row ? sessionFromRow(row) : null;
+  }
+
+  saveSession(record: SerializedSession): void {
+    const hasAttachmentColumn = this.tableColumns("session").has("attachment");
+    const stmt = this.db.prepare(
+      hasAttachmentColumn
+        ? "INSERT OR REPLACE INTO session(id, actor, started, expires_at, last_detach_at, token_class, attachment) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        : "INSERT OR REPLACE INTO session(id, actor, started, expires_at, last_detach_at, token_class) VALUES (?, ?, ?, ?, ?, ?)"
+    );
+    const values = [record.id, record.actor, record.started, record.expiresAt ?? null, record.lastDetachAt ?? null, record.tokenClass ?? "guest"];
+    stmt.run(...(hasAttachmentColumn ? [...values, "{}"] : values));
+  }
+
+  deleteSession(session_id: string): void {
+    this.db.prepare("DELETE FROM session WHERE id = ?").run(session_id);
+  }
+
+  loadExpiredSessions(now: number): SerializedSession[] {
+    return (this.db.prepare("SELECT * FROM session ORDER BY id").all() as Row[]).map(sessionFromRow).filter((session) => (session.expiresAt !== undefined && session.expiresAt <= now) || (session.lastDetachAt !== undefined && session.lastDetachAt !== null && session.lastDetachAt <= now));
+  }
+
+  saveTask(task: ParkedTaskRecord): void {
+    this.db
+      .prepare("INSERT OR REPLACE INTO task(id, parked_on, state, resume_at, awaiting_player, correlation_id, serialized, created, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(task.id, task.parked_on, task.state, task.resume_at, task.awaiting_player, task.correlation_id, stringifyValue(task.serialized), task.created, task.origin);
+  }
+
+  deleteTask(id: string): void {
+    this.db.prepare("DELETE FROM task WHERE id = ?").run(id);
+  }
+
+  loadTask(id: string): ParkedTaskRecord | null {
+    const row = this.db.prepare("SELECT * FROM task WHERE id = ?").get(id) as Row | undefined;
+    return row ? taskFromRow(row) : null;
+  }
+
+  loadDueTasks(now: number): ParkedTaskRecord[] {
+    return (this.db.prepare("SELECT * FROM task WHERE state = 'suspended' AND resume_at <= ? ORDER BY resume_at, created, id").all(now) as Row[]).map(taskFromRow);
+  }
+
+  loadAwaitingReadTasks(player: ObjRef): ParkedTaskRecord[] {
+    return (this.db.prepare("SELECT * FROM task WHERE state = 'awaiting_read' AND awaiting_player = ? ORDER BY created, id").all(player) as Row[]).map(taskFromRow);
+  }
+
+  earliestResumeAt(): number | null {
+    const row = this.db.prepare("SELECT MIN(resume_at) AS resume_at FROM task WHERE state = 'suspended' AND resume_at IS NOT NULL").get() as Row | undefined;
+    return row?.resume_at === null || row?.resume_at === undefined ? null : Number(row.resume_at);
+  }
+
+  nextCounter(name: string): number {
+    let next = 1;
+    this.transaction(() => {
+      const key = `counter:${name}`;
+      next = Number(this.loadMeta(key) ?? 1);
+      this.saveMeta(key, String(next + 1));
+    });
+    return next;
+  }
+
+  loadMeta(key: string): string | null {
+    const row = this.db.prepare("SELECT value FROM world_meta WHERE key = ?").get(key) as Row | undefined;
+    return row?.value ?? null;
+  }
+
+  saveMeta(key: string, value: string): void {
+    this.db.prepare("INSERT OR REPLACE INTO world_meta(key, value) VALUES (?, ?)").run(key, value);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -257,7 +553,7 @@ export class SQLiteWorldRepository implements WorldRepository {
         ts INTEGER NOT NULL,
         actor TEXT NOT NULL,
         message TEXT NOT NULL,
-        applied_ok INTEGER NOT NULL,
+        applied_ok INTEGER,
         error TEXT,
         PRIMARY KEY (space_id, seq)
       );
@@ -312,13 +608,51 @@ export class SQLiteWorldRepository implements WorldRepository {
     return new Set(rows.map((row) => String(row.name)));
   }
 
-  private transaction(fn: () => void): void {
+  private ensureHostedObject(id: ObjRef): void {
+    if (!this.db.prepare("SELECT 1 FROM object WHERE id = ?").get(id)) throw wooError("E_OBJNF", `object not hosted here: ${id}`, id);
+  }
+
+  private deleteObjectRows(id: ObjRef): void {
+    for (const table of ["event_schema", "content", "child", "verb", "property_version", "property_value", "property_def"]) {
+      this.db.prepare(`DELETE FROM ${table} WHERE object_id = ?`).run(id);
+    }
+    this.db.prepare("DELETE FROM object WHERE id = ?").run(id);
+  }
+
+  private assertNoPendingLogOutcomes(): void {
+    const row = this.db.prepare("SELECT space_id, seq FROM space_message WHERE applied_ok IS NULL LIMIT 1").get() as Row | undefined;
+    if (row) throw wooError("E_STORAGE", `pending log outcome at transaction commit: ${row.space_id}:${row.seq}`);
+  }
+
+  transaction<T>(fn: () => T): T {
+    // Nested transaction() calls intentionally flatten. Use savepoint() when
+    // the inner scope needs rollback isolation without aborting the outer unit.
+    if (this.transactionDepth > 0) return fn();
     this.db.exec("BEGIN IMMEDIATE");
+    this.transactionDepth = 1;
     try {
-      fn();
+      const result = fn();
+      this.assertNoPendingLogOutcomes();
       this.db.exec("COMMIT");
+      return result;
     } catch (err) {
       this.db.exec("ROLLBACK");
+      throw err;
+    } finally {
+      this.transactionDepth = 0;
+    }
+  }
+
+  savepoint<T>(fn: () => T): T {
+    const name = `woo_sp_${++this.savepointCounter}`;
+    this.db.exec(`SAVEPOINT ${name}`);
+    try {
+      const result = fn();
+      this.db.exec(`RELEASE SAVEPOINT ${name}`);
+      return result;
+    } catch (err) {
+      this.db.exec(`ROLLBACK TO SAVEPOINT ${name}`);
+      this.db.exec(`RELEASE SAVEPOINT ${name}`);
       throw err;
     }
   }
@@ -361,6 +695,30 @@ function taskFromRow(row: Row): ParkedTaskRecord {
     serialized: parseValue(row.serialized),
     created: Number(row.created),
     origin: row.origin
+  };
+}
+
+function sessionFromRow(row: Row): SerializedSession {
+  return {
+    id: row.id,
+    actor: row.actor,
+    started: Number(row.started),
+    expiresAt: row.expires_at === null || row.expires_at === undefined ? undefined : Number(row.expires_at),
+    lastDetachAt: row.last_detach_at === null || row.last_detach_at === undefined ? null : Number(row.last_detach_at),
+    tokenClass: row.token_class as "guest" | "bearer" | "apikey" | undefined
+  };
+}
+
+function logEntryFromRow(row: Row): SpaceLogEntry {
+  if (row.applied_ok === null || row.applied_ok === undefined) throw wooError("E_STORAGE", `log entry has no committed outcome: ${row.space_id}:${row.seq}`);
+  return {
+    space: row.space_id,
+    seq: Number(row.seq),
+    ts: Number(row.ts),
+    actor: row.actor,
+    message: parseValue(row.message) as unknown as Message,
+    applied_ok: Boolean(row.applied_ok),
+    error: row.error ? (parseValue(row.error) as unknown as ErrorValue) : undefined
   };
 }
 

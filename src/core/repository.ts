@@ -1,4 +1,4 @@
-import type { ErrorValue, Message, ObjRef, PropertyDef, Session, SpaceLogEntry, VerbDef, WooObject, WooValue } from "./types";
+import { cloneValue, wooError, type ErrorValue, type Message, type ObjRef, type PropertyDef, type Session, type SpaceLogEntry, type VerbDef, type WooObject, type WooValue } from "./types";
 
 export type SerializedObject = {
   id: ObjRef;
@@ -70,7 +70,7 @@ export interface WorldRepository {
 // ---------------------------------------------------------------------------
 // ObjectRepository: per-object persistence interface.
 //
-// Per spec/reference/cloudflare.md §R4. The runtime accesses storage exclusively
+// Per spec/reference/cloudflare.md §R3. The runtime accesses storage exclusively
 // through this interface; backends (in-memory, local SQLite, Cloudflare DO
 // SQLite) implement it. This is the contract the world-decomposition refactor
 // should converge on.
@@ -124,10 +124,25 @@ export interface ObjectRepository {
    * `state.storage.transactionSync`; the in-memory backend snapshot-and-restores;
    * the local SQLite backend uses BEGIN/COMMIT/ROLLBACK.
    *
-   * Implementations may flatten nested calls (treat the inner `transaction` as a
-   * no-op) since woo's runtime never legitimately needs nested rollback scopes.
+   * Implementations may flatten nested `transaction` calls. Rollback scopes
+   * inside a transaction use `savepoint` below.
    */
   transaction<T>(fn: () => T): T;
+
+  /**
+   * Execute `fn` inside a rollback scope nested within the current transaction.
+   * If `fn` throws, mutations made inside the savepoint are rolled back, then
+   * the error is rethrown and the outer transaction remains usable.
+   *
+   * `$space:call` uses this for the behavior body: the accepted log row and seq
+   * allocation stay in the outer transaction, while failed behavior mutations
+   * roll back to the savepoint before `recordLogOutcome(..., false, error)`.
+   *
+   * The CF backend relies on nested `state.storage.transactionSync` savepoint
+   * behavior; local SQLite uses `SAVEPOINT` / `ROLLBACK TO`; in-memory backends
+   * snapshot and restore at this boundary.
+   */
+  savepoint<T>(fn: () => T): T;
 
   // ----- Object identity & metadata -----
 
@@ -200,34 +215,28 @@ export interface ObjectRepository {
 
   // ----- $sequenced_log surface (per spec/semantics/sequenced-log.md) -----
   //
-  // Two-phase write per spec/reference/cloudflare.md §R3.2:
-  //   1. `appendLog` allocates the seq and persists the message. After it
-  //      returns, the message is durably in the log; replay will see it.
-  //      The row's outcome (applied_ok, error) is unset at this point —
-  //      "in-flight."
-  //   2. `recordLogOutcome` is called once after the behavior either commits
-  //      successfully or fails. It updates the same row.
-  //
-  // Crash recovery: rows with no recorded outcome at boot are reconciled per
-  // §R3.3 — replayed if safe, otherwise marked `applied_ok = false` with
-  // `error = E_HOST_CRASH`.
+  // Two-step write per spec/reference/cloudflare.md §R3.2:
+  //   1. `appendLog` allocates the seq and inserts a pending row inside the
+  //      caller's `transaction()`.
+  //   2. The behavior body runs inside `savepoint()`.
+  //   3. `recordLogOutcome` updates the same row before the outer transaction
+  //      commits. A committed row always has a final outcome.
 
   /**
-   * Atomically: allocate `seq = next_seq`, increment `next_seq`, and persist
-   * `(seq, ts, actor, message)` to the log. Returns the assigned seq + ts.
-   * The row is in-flight (no outcome) until `recordLogOutcome` is called.
+   * Within the caller's transaction: allocate `seq = next_seq`, increment
+   * `next_seq`, and insert `(seq, ts, actor, message, applied_ok = NULL)`.
+   * Returns the assigned seq + ts.
    *
-   * Implementations guarantee the seq increment + append are one transaction;
-   * partial state is impossible. `appendLog` is NOT wrapped in the caller's
-   * `transaction()` scope — the message must commit independently of the
-   * behavior's success/failure.
+   * Callers must finish the row with `recordLogOutcome` before the outer
+   * transaction commits. If the transaction aborts, the seq allocation and
+   * pending row abort with it.
    */
   appendLog(space: ObjRef, actor: ObjRef, message: Message): { seq: number; ts: number };
 
   /**
-   * Update the in-flight log row with the behavior outcome. Called from inside
-   * the same `transaction()` as the behavior's mutations on the success path,
-   * or from a fresh `transaction()` on the failure path (see §R3.4).
+   * Update the pending log row with the behavior outcome. Called inside the
+   * same outer `transaction()` as `appendLog`, after the behavior savepoint has
+   * either completed or rolled back (see §R3.4).
    *
    * Idempotent: calling twice with the same outcome is a no-op; calling with a
    * different outcome raises (an outcome should be immutable once set).
@@ -333,4 +342,403 @@ export class InMemoryWorldRepository implements WorldRepository {
     const snapshots = this.stored?.snapshots.filter((snapshot) => snapshot.space_id === space).sort((a, b) => b.seq - a.seq) ?? [];
     return snapshots[0] ? structuredClone(snapshots[0]) : null;
   }
+}
+
+type PendingSpaceLogEntry = Omit<SpaceLogEntry, "applied_ok"> & { applied_ok: boolean | null };
+
+type InMemoryObjectRepositoryState = {
+  objects: Map<ObjRef, SerializedObject>;
+  sessions: Map<string, SerializedSession>;
+  logs: Map<ObjRef, PendingSpaceLogEntry[]>;
+  snapshots: SpaceSnapshotRecord[];
+  tasks: Map<string, ParkedTaskRecord>;
+  counters: Map<string, number>;
+  meta: Map<string, string>;
+};
+
+export class InMemoryObjectRepository implements ObjectRepository, WorldRepository {
+  private objects = new Map<ObjRef, SerializedObject>();
+  private sessions = new Map<string, SerializedSession>();
+  private logs = new Map<ObjRef, PendingSpaceLogEntry[]>();
+  private snapshots: SpaceSnapshotRecord[] = [];
+  private tasks = new Map<string, ParkedTaskRecord>();
+  private counters = new Map<string, number>();
+  private meta = new Map<string, string>();
+  private transactionDepth = 0;
+
+  load(): SerializedWorld | null {
+    if (this.objects.size === 0) return null;
+    return {
+      version: 1,
+      taskCounter: Number(this.meta.get("taskCounter") ?? 1),
+      parkedTaskCounter: Number(this.meta.get("parkedTaskCounter") ?? 1),
+      sessionCounter: Number(this.meta.get("sessionCounter") ?? 1),
+      objects: Array.from(this.objects.values()).map(cloneSerializedObject),
+      sessions: Array.from(this.sessions.values()).map((session) => cloneRepoValue(session)),
+      logs: Array.from(this.logs.entries()).map(([space, entries]) => [space, entries.map(finalizeLogEntry)]),
+      snapshots: this.snapshots.map((snapshot) => cloneRepoValue(snapshot)),
+      parkedTasks: Array.from(this.tasks.values()).map((task) => cloneRepoValue(task))
+    };
+  }
+
+  save(world: SerializedWorld): void {
+    this.transaction(() => {
+      this.objects.clear();
+      this.sessions.clear();
+      this.logs.clear();
+      this.snapshots = [];
+      this.tasks.clear();
+      this.counters.clear();
+      this.meta.clear();
+      this.meta.set("version", String(world.version));
+      this.meta.set("taskCounter", String(world.taskCounter));
+      this.meta.set("parkedTaskCounter", String(world.parkedTaskCounter));
+      this.meta.set("sessionCounter", String(world.sessionCounter));
+      for (const obj of world.objects) this.objects.set(obj.id, cloneSerializedObject(obj));
+      for (const session of world.sessions) this.sessions.set(session.id, cloneRepoValue(session));
+      for (const [space, entries] of world.logs) this.logs.set(space, entries.map((entry) => ({ ...cloneRepoValue(entry), applied_ok: entry.applied_ok })));
+      this.snapshots = world.snapshots.map((snapshot) => cloneRepoValue(snapshot));
+      for (const task of world.parkedTasks) this.tasks.set(task.id, cloneRepoValue(task));
+    });
+  }
+
+  transaction<T>(fn: () => T): T {
+    // Nested transaction() calls intentionally flatten. Use savepoint() when
+    // the inner scope needs rollback isolation without aborting the outer unit.
+    if (this.transactionDepth > 0) return fn();
+    const before = this.snapshotState();
+    this.transactionDepth = 1;
+    try {
+      const result = fn();
+      this.assertNoPendingLogOutcomes();
+      return result;
+    } catch (err) {
+      this.restoreState(before);
+      throw err;
+    } finally {
+      this.transactionDepth = 0;
+    }
+  }
+
+  savepoint<T>(fn: () => T): T {
+    const before = this.snapshotState();
+    try {
+      return fn();
+    } catch (err) {
+      this.restoreState(before);
+      throw err;
+    }
+  }
+
+  loadObject(id: ObjRef): SerializedObject | null {
+    const obj = this.objects.get(id);
+    return obj ? cloneSerializedObject(obj) : null;
+  }
+
+  saveObject(obj: SerializedObject): void {
+    this.objects.set(obj.id, cloneSerializedObject(obj));
+  }
+
+  deleteObject(id: ObjRef): void {
+    this.objects.delete(id);
+  }
+
+  listHostedObjects(): ObjRef[] {
+    return Array.from(this.objects.keys()).sort();
+  }
+
+  loadProperty(id: ObjRef, name: string): SerializedProperty | null {
+    const obj = this.objects.get(id);
+    if (!obj) return null;
+    const def = obj.propertyDefs.find((item) => item.name === name) ?? null;
+    const valueEntry = obj.properties.find(([propName]) => propName === name);
+    const versionEntry = obj.propertyVersions.find(([propName]) => propName === name);
+    if (!def && valueEntry === undefined && versionEntry === undefined) return null;
+    return {
+      name,
+      def: def ? { ...def, defaultValue: cloneRepoValue(def.defaultValue) } : null,
+      value: valueEntry ? cloneRepoValue(valueEntry[1]) : undefined,
+      version: versionEntry?.[1] ?? def?.version ?? 0
+    };
+  }
+
+  saveProperty(id: ObjRef, prop: SerializedProperty): void {
+    const obj = this.requireObject(id);
+    obj.propertyDefs = obj.propertyDefs.filter((item) => item.name !== prop.name);
+    if (prop.def) obj.propertyDefs.push({ ...prop.def, defaultValue: cloneRepoValue(prop.def.defaultValue) });
+    obj.properties = obj.properties.filter(([name]) => name !== prop.name);
+    if (prop.value !== undefined) obj.properties.push([prop.name, cloneRepoValue(prop.value)]);
+    obj.propertyVersions = obj.propertyVersions.filter(([name]) => name !== prop.name);
+    obj.propertyVersions.push([prop.name, prop.version]);
+  }
+
+  deleteProperty(id: ObjRef, name: string): void {
+    const obj = this.requireObject(id);
+    obj.propertyDefs = obj.propertyDefs.filter((item) => item.name !== name);
+    obj.properties = obj.properties.filter(([propName]) => propName !== name);
+    obj.propertyVersions = obj.propertyVersions.filter(([propName]) => propName !== name);
+  }
+
+  listPropertyNames(id: ObjRef): string[] {
+    const obj = this.requireObject(id);
+    return Array.from(new Set([...obj.propertyDefs.map((def) => def.name), ...obj.properties.map(([name]) => name)])).sort();
+  }
+
+  loadVerb(id: ObjRef, name: string): SerializedVerb | null {
+    return cloneMaybe(this.objects.get(id)?.verbs.find((verb) => verb.name === name) ?? null);
+  }
+
+  saveVerb(id: ObjRef, verb: SerializedVerb): void {
+    const obj = this.requireObject(id);
+    obj.verbs = obj.verbs.filter((item) => item.name !== verb.name);
+    obj.verbs.push(cloneRepoValue(verb as unknown as WooValue) as unknown as SerializedVerb);
+  }
+
+  deleteVerb(id: ObjRef, name: string): void {
+    const obj = this.requireObject(id);
+    obj.verbs = obj.verbs.filter((verb) => verb.name !== name);
+  }
+
+  listVerbNames(id: ObjRef): string[] {
+    return this.requireObject(id)
+      .verbs.map((verb) => verb.name)
+      .sort();
+  }
+
+  loadChildren(id: ObjRef): ObjRef[] {
+    return [...this.requireObject(id).children].sort();
+  }
+
+  addChild(id: ObjRef, child: ObjRef): void {
+    const obj = this.requireObject(id);
+    if (!obj.children.includes(child)) obj.children.push(child);
+  }
+
+  removeChild(id: ObjRef, child: ObjRef): void {
+    const obj = this.requireObject(id);
+    obj.children = obj.children.filter((item) => item !== child);
+  }
+
+  loadContents(id: ObjRef): ObjRef[] {
+    return [...this.requireObject(id).contents].sort();
+  }
+
+  addContent(id: ObjRef, child: ObjRef): void {
+    const obj = this.requireObject(id);
+    if (!obj.contents.includes(child)) obj.contents.push(child);
+  }
+
+  removeContent(id: ObjRef, child: ObjRef): void {
+    const obj = this.requireObject(id);
+    obj.contents = obj.contents.filter((item) => item !== child);
+  }
+
+  loadEventSchemas(id: ObjRef): [string, Record<string, WooValue>][] {
+    return this.requireObject(id).eventSchemas.map(([type, schema]) => [type, cloneRepoValue(schema as WooValue) as Record<string, WooValue>]);
+  }
+
+  saveEventSchema(id: ObjRef, type: string, schema: Record<string, WooValue>): void {
+    const obj = this.requireObject(id);
+    obj.eventSchemas = obj.eventSchemas.filter(([name]) => name !== type);
+    obj.eventSchemas.push([type, cloneRepoValue(schema as WooValue) as Record<string, WooValue>]);
+  }
+
+  deleteEventSchema(id: ObjRef, type: string): void {
+    const obj = this.requireObject(id);
+    obj.eventSchemas = obj.eventSchemas.filter(([name]) => name !== type);
+  }
+
+  appendLog(space: ObjRef, actor: ObjRef, message: Message): { seq: number; ts: number } {
+    this.requireObject(space);
+    const seq = this.currentSeq(space);
+    const nextSeq = this.loadProperty(space, "next_seq");
+    this.saveProperty(space, { name: "next_seq", def: nextSeq?.def ?? null, value: seq + 1, version: (nextSeq?.version ?? 0) + 1 });
+    const ts = Date.now();
+    const entries = this.logs.get(space) ?? [];
+    entries.push({ space, seq, ts, actor, message: cloneRepoValue(message as unknown as WooValue) as unknown as Message, applied_ok: null });
+    this.logs.set(space, entries);
+    return { seq, ts };
+  }
+
+  recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, error?: ErrorValue): void {
+    const entry = (this.logs.get(space) ?? []).find((item) => item.seq === seq);
+    if (!entry) throw wooError("E_STORAGE", `log entry not found: ${space}:${seq}`);
+    if (entry.applied_ok !== null) {
+      if (entry.applied_ok === applied_ok && valuesEqualOrUndefined(entry.error, error)) return;
+      throw wooError("E_STORAGE", `log outcome already recorded: ${space}:${seq}`);
+    }
+    entry.applied_ok = applied_ok;
+    if (error) entry.error = cloneRepoValue(error as unknown as WooValue) as unknown as ErrorValue;
+  }
+
+  readLog(space: ObjRef, from: number, limit: number): LogReadResult {
+    const all = (this.logs.get(space) ?? []).filter((entry) => entry.seq >= from).sort((left, right) => left.seq - right.seq);
+    const page = all.slice(0, limit);
+    return {
+      messages: page.map(finalizeLogEntry),
+      next_seq: this.currentSeq(space),
+      has_more: all.length > limit
+    };
+  }
+
+  currentSeq(space: ObjRef): number {
+    const prop = this.loadProperty(space, "next_seq");
+    if (typeof prop?.value === "number") return prop.value;
+    return Math.max(0, ...(this.logs.get(space) ?? []).map((entry) => entry.seq)) + 1;
+  }
+
+  saveSpaceSnapshot(snapshot: SpaceSnapshotRecord): void {
+    this.snapshots = this.snapshots.filter((item) => !(item.space_id === snapshot.space_id && item.seq === snapshot.seq));
+    this.snapshots.push(cloneRepoValue(snapshot as unknown as WooValue) as unknown as SpaceSnapshotRecord);
+  }
+
+  loadLatestSnapshot(space: ObjRef): SpaceSnapshotRecord | null {
+    return cloneMaybe(this.snapshots.filter((snapshot) => snapshot.space_id === space).sort((left, right) => right.seq - left.seq)[0] ?? null);
+  }
+
+  truncateLog(space: ObjRef, covered_seq: number): number {
+    const before = this.logs.get(space) ?? [];
+    const after = before.filter((entry) => entry.seq > covered_seq);
+    this.logs.set(space, after);
+    return before.length - after.length;
+  }
+
+  loadSession(session_id: string): SerializedSession | null {
+    return cloneMaybe(this.sessions.get(session_id) ?? null);
+  }
+
+  saveSession(record: SerializedSession): void {
+    this.sessions.set(record.id, cloneRepoValue(record as unknown as WooValue) as unknown as SerializedSession);
+  }
+
+  deleteSession(session_id: string): void {
+    this.sessions.delete(session_id);
+  }
+
+  loadExpiredSessions(now: number): SerializedSession[] {
+    return Array.from(this.sessions.values())
+      .filter((session) => (session.expiresAt !== undefined && session.expiresAt <= now) || (session.lastDetachAt !== undefined && session.lastDetachAt !== null && session.lastDetachAt <= now))
+      .map((session) => cloneRepoValue(session as unknown as WooValue) as unknown as SerializedSession);
+  }
+
+  saveTask(task: ParkedTaskRecord): void {
+    this.tasks.set(task.id, cloneRepoValue(task as unknown as WooValue) as unknown as ParkedTaskRecord);
+  }
+
+  deleteTask(id: string): void {
+    this.tasks.delete(id);
+  }
+
+  loadTask(id: string): ParkedTaskRecord | null {
+    return cloneMaybe(this.tasks.get(id) ?? null);
+  }
+
+  loadDueTasks(now: number): ParkedTaskRecord[] {
+    return Array.from(this.tasks.values())
+      .filter((task) => task.state === "suspended" && task.resume_at !== null && task.resume_at <= now)
+      .sort((left, right) => (left.resume_at ?? 0) - (right.resume_at ?? 0) || left.created - right.created || left.id.localeCompare(right.id))
+      .map((task) => cloneRepoValue(task as unknown as WooValue) as unknown as ParkedTaskRecord);
+  }
+
+  loadAwaitingReadTasks(player: ObjRef): ParkedTaskRecord[] {
+    return Array.from(this.tasks.values())
+      .filter((task) => task.state === "awaiting_read" && task.awaiting_player === player)
+      .sort((left, right) => left.created - right.created || left.id.localeCompare(right.id))
+      .map((task) => cloneRepoValue(task as unknown as WooValue) as unknown as ParkedTaskRecord);
+  }
+
+  earliestResumeAt(): number | null {
+    const times = Array.from(this.tasks.values())
+      .filter((task) => task.state === "suspended" && task.resume_at !== null)
+      .map((task) => task.resume_at as number);
+    return times.length === 0 ? null : Math.min(...times);
+  }
+
+  nextCounter(name: string): number {
+    const next = this.counters.get(name) ?? 1;
+    this.counters.set(name, next + 1);
+    return next;
+  }
+
+  loadMeta(key: string): string | null {
+    return this.meta.get(key) ?? null;
+  }
+
+  saveMeta(key: string, value: string): void {
+    this.meta.set(key, value);
+  }
+
+  private requireObject(id: ObjRef): SerializedObject {
+    const obj = this.objects.get(id);
+    if (!obj) throw wooError("E_OBJNF", `object not hosted here: ${id}`, id);
+    return obj;
+  }
+
+  private snapshotState(): InMemoryObjectRepositoryState {
+    return {
+      objects: new Map(Array.from(this.objects.entries()).map(([id, obj]) => [id, cloneSerializedObject(obj)])),
+      sessions: new Map(Array.from(this.sessions.entries()).map(([id, session]) => [id, cloneRepoValue(session as unknown as WooValue) as unknown as SerializedSession])),
+      logs: new Map(Array.from(this.logs.entries()).map(([space, entries]) => [space, entries.map((entry) => cloneRepoValue(entry as unknown as WooValue) as unknown as PendingSpaceLogEntry)])),
+      snapshots: this.snapshots.map((snapshot) => cloneRepoValue(snapshot as unknown as WooValue) as unknown as SpaceSnapshotRecord),
+      tasks: new Map(Array.from(this.tasks.entries()).map(([id, task]) => [id, cloneRepoValue(task as unknown as WooValue) as unknown as ParkedTaskRecord])),
+      counters: new Map(this.counters),
+      meta: new Map(this.meta)
+    };
+  }
+
+  private restoreState(state: InMemoryObjectRepositoryState): void {
+    this.objects = new Map(Array.from(state.objects.entries()).map(([id, obj]) => [id, cloneSerializedObject(obj)]));
+    this.sessions = new Map(Array.from(state.sessions.entries()).map(([id, session]) => [id, cloneRepoValue(session as unknown as WooValue) as unknown as SerializedSession]));
+    this.logs = new Map(Array.from(state.logs.entries()).map(([space, entries]) => [space, entries.map((entry) => cloneRepoValue(entry as unknown as WooValue) as unknown as PendingSpaceLogEntry)]));
+    this.snapshots = state.snapshots.map((snapshot) => cloneRepoValue(snapshot as unknown as WooValue) as unknown as SpaceSnapshotRecord);
+    this.tasks = new Map(Array.from(state.tasks.entries()).map(([id, task]) => [id, cloneRepoValue(task as unknown as WooValue) as unknown as ParkedTaskRecord]));
+    this.counters = new Map(state.counters);
+    this.meta = new Map(state.meta);
+  }
+
+  private assertNoPendingLogOutcomes(): void {
+    for (const [space, entries] of this.logs) {
+      const pending = entries.find((entry) => entry.applied_ok === null);
+      if (pending) throw wooError("E_STORAGE", `pending log outcome at transaction commit: ${space}:${pending.seq}`);
+    }
+  }
+}
+
+function cloneSerializedObject(obj: SerializedObject): SerializedObject {
+  return {
+    ...obj,
+    flags: { ...obj.flags },
+    propertyDefs: obj.propertyDefs.map((def) => ({ ...def, defaultValue: cloneRepoValue(def.defaultValue) })),
+    properties: obj.properties.map(([name, value]) => [name, cloneRepoValue(value)]),
+    propertyVersions: obj.propertyVersions.map(([name, version]) => [name, version]),
+    verbs: obj.verbs.map((verb) => cloneRepoValue(verb as unknown as WooValue) as unknown as VerbDef),
+    children: [...obj.children],
+    contents: [...obj.contents],
+    eventSchemas: obj.eventSchemas.map(([type, schema]) => [type, cloneRepoValue(schema as WooValue) as Record<string, WooValue>])
+  };
+}
+
+function cloneRepoValue<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function cloneMaybe<T>(value: T | null): T | null {
+  return value === null ? null : cloneRepoValue(value);
+}
+
+function finalizeLogEntry(entry: PendingSpaceLogEntry): SpaceLogEntry {
+  if (entry.applied_ok === null) throw wooError("E_STORAGE", `log entry has no committed outcome: ${entry.space}:${entry.seq}`);
+  return {
+    space: entry.space,
+    seq: entry.seq,
+    ts: entry.ts,
+    actor: entry.actor,
+    message: cloneRepoValue(entry.message as unknown as WooValue) as unknown as Message,
+    applied_ok: entry.applied_ok,
+    error: entry.error ? (cloneRepoValue(entry.error as unknown as WooValue) as unknown as ErrorValue) : undefined
+  };
+}
+
+function valuesEqualOrUndefined(left: ErrorValue | undefined, right: ErrorValue | undefined): boolean {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }

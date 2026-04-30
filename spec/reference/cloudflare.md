@@ -74,6 +74,10 @@ interface ObjectRepository {
   // (space.md §S3.2). The CF backend uses storage.transactionSync; in-memory
   // backends snapshot-and-restore; local SQLite uses BEGIN/COMMIT/ROLLBACK.
   transaction<T>(fn: () => T): T;
+  // Nested rollback scope inside the current transaction. Used around the
+  // behavior body so failed mutations roll back while the accepted log row
+  // remains in the outer transaction.
+  savepoint<T>(fn: () => T): T;
 
   // Object identity & metadata -----------------------------------------------
   loadObject(id: ObjRef): SerializedObject | null;
@@ -107,8 +111,8 @@ interface ObjectRepository {
   deleteEventSchema(id: ObjRef, type: string): void;
 
   // $sequenced_log surface ---------------------------------------------------
-  // Two-phase: appendLog allocates the seq + commits the message; recordLogOutcome
-  // updates the row with applied_ok and (optional) error after behavior runs.
+  // Two-step: appendLog inserts a pending row; recordLogOutcome updates it with
+  // applied_ok and (optional) error before the same outer transaction commits.
   // See §R3.2 below.
   appendLog(space: ObjRef, actor: ObjRef, message: Message): { seq: number; ts: number };
   recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, error?: ErrorValue): void;
@@ -143,52 +147,44 @@ interface ObjectRepository {
 
 ### R3.2 Two-phase log writes
 
-`$space:call` ([space.md §S2](../semantics/space.md#s2-the-call-lifecycle)) commits a message to the log *before* its behavior runs (step 3); the behavior's outcome is determined later (step 7 or 8). The repository surfaces this with two operations:
+`$space:call` ([space.md §S2](../semantics/space.md#s2-the-call-lifecycle)) allocates a `seq` and inserts the message before its behavior runs (step 3); the behavior's outcome is determined later (step 7 or 8). The repository surfaces this with two operations inside one outer `transaction(fn)`:
 
-1. **`appendLog(space, actor, message)`** — atomic seq allocation + message persistence. Returns `{seq, ts}`. After this returns, the message is durably in the log; replay will see it.
-2. **`recordLogOutcome(space, seq, applied_ok, error?)`** — called after the behavior completes (success path) or rolls back (failure path), updating the same row with the outcome.
+1. **`appendLog(space, actor, message)`** — atomic seq allocation + pending message-row insert. Returns `{seq, ts}`. The row has no outcome yet (`applied_ok IS NULL` in SQL terms).
+2. **`recordLogOutcome(space, seq, applied_ok, error?)`** — called after the behavior savepoint completes (success path) or rolls back (failure path), updating the same row with the outcome before the outer transaction commits.
 
-Between `appendLog` and `recordLogOutcome` the row is **in-flight** (`applied_ok IS NULL` in SQL terms). The runtime guarantees that for any persisted in-flight row, exactly one of the following will eventually happen:
+The pending state is an implementation detail of the still-open transaction. A committed log row always has `applied_ok = true` or `applied_ok = false`; replay never sees a pending row.
 
-- `recordLogOutcome` is called within the same anchor-cluster transaction as the behavior's commit (the normal path).
-- The host crashes before `recordLogOutcome`, leaving the row in-flight on disk.
+### R3.3 Crash recovery footnote
 
-### R3.3 Crash recovery for in-flight log rows
-
-When a DO restarts and finds rows with `applied_ok IS NULL`, it must reconcile them. Two paths, picked per row:
-
-- **Replay** the message through the verb body. If behavior is deterministic per [space.md §S4](../semantics/space.md#s4-determinism-and-replay), the result reproduces and `recordLogOutcome` finishes the row normally. Default for all rows where the target verb still exists and is unchanged since `appendLog`.
-- **Mark crashed** (`applied_ok = false`, `error = E_HOST_CRASH`) when replay is unsafe — the verb was deleted, the bytecode version changed, or the anchored state has been mutated by a later sequenced call. This preserves the seq slot in the log so observers see a deterministic gap-recovery story; the call effectively "happened but produced no mutations and an error observation."
-
-Reconciliation runs once at boot, before any new calls are accepted. Implementations log every reconciled row at info level (`event: "log_reconciled"`).
+With the savepoint model, a host crash before `recordLogOutcome` aborts the whole outer transaction; no in-flight row is committed. If a backend ever finds a committed row with `applied_ok IS NULL`, that is storage corruption or an old-format migration bug. It should refuse new calls on that log and surface `E_STORAGE` for operator repair rather than guessing at replay.
 
 ### R3.4 Transactions and rollback scope
 
-`transaction(fn)` is the unit-of-work primitive. `$space:call` runs:
+`transaction(fn)` is the outer unit of work; `savepoint(fn)` is the behavior rollback scope. `$space:call` runs:
 
 ```
-const { seq, ts } = repo.appendLog(space, actor, message);
-try {
-  repo.transaction(() => {
-    runVerbBody(...);                     // mutations land in this tx
+repo.transaction(() => {
+  const { seq, ts } = repo.appendLog(space, actor, message);
+  try {
+    repo.savepoint(() => {
+      runVerbBody(...);                   // mutations land in this savepoint
+    });
     repo.recordLogOutcome(space, seq, true);
-  });
-} catch (err) {
-  repo.transaction(() => {
+  } catch (err) {
     repo.recordLogOutcome(space, seq, false, normalizeError(err));
-  });
-}
+  }
+});
 ```
 
-`appendLog` is **outside** the behavior's transaction so the log row commits regardless of the behavior's outcome. The behavior's mutations and the success-path `recordLogOutcome` commit together. A failure rolls back the mutations but the log row stays — `recordLogOutcome` is then called in a fresh transaction with `applied_ok = false`.
+`appendLog` is outside the behavior savepoint but inside the outer transaction. A successful behavior releases the savepoint and records `applied_ok = true`. A failed behavior rolls back to the savepoint, preserving the pending log row and `next_seq`, then records `applied_ok = false` with the normalized error. The outer transaction commits the log row and its final outcome in one write boundary.
 
 Cross-anchor-cluster mutations (cross-DO RPCs from inside the verb body) are **not** in the rollback scope, per [space.md §S3.4](../semantics/space.md#s3-failure-rules-normative). Verb authors avoid them in sequenced flows; if they must, they accept the torn-state risk.
 
 ---
 
-## R4. Reserved
+## R4. Storage schema pointer
 
-(Previously held the SQL-schema pointer; merged into §R3. The number is preserved so existing cross-references — including comments in `src/core/repository.ts` — remain stable.)
+The concrete CF SQLite encoding lives in [persistence.md](persistence.md). The schema is not the runtime contract; [`ObjectRepository`](../../src/core/repository.ts) in §R3 is the contract. Backends may encode rows differently as long as they satisfy that interface.
 
 ---
 
@@ -655,11 +651,11 @@ Reserved for later:
 ## R15. v1 scope vs deferred
 
 Required for first deploy:
-- §R1, §R4, §R5, §R6.1, §R7, §R8, §R9, §R10.1–R10.4, §R11, §R12.
+- §R1, §R3, §R4, §R5, §R6.1, §R6.2, §R7, §R8, §R9, §R10.1–R10.4, §R11, §R12.
 - Single-region (CF picks closest region per DO).
 
 Deferred to v1.1+:
-- §R6.2 (mid-call SUSPEND across DOs — long-lived RPCs may bite).
+- Callback-shaped cross-DO async (`awaitable_call` or equivalent) that relaxes §R6.2.
 - QuotaAccountant DO (table scaffolded; alarm skipped at first; raise `E_QUOTA` only on hard caps from inline writes).
 - Snapshot policy automation (snapshots are still optional in v1-core).
 - Distributed tracing.

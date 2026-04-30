@@ -18,11 +18,11 @@ import {
   type SpaceLogEntry,
   type WooValue
 } from "../core/types";
-import { SQLiteWorldRepository } from "./sqlite-repository";
+import { LocalSQLiteRepository } from "./sqlite-repository";
 
 // Local dev server only: HTTP authoring endpoints are intentionally
 // unauthenticated for local poking. Do not deploy as-is.
-const repository = new SQLiteWorldRepository(process.env.WOO_DB ?? ".woo/dev.sqlite");
+const repository = new LocalSQLiteRepository(process.env.WOO_DB ?? ".woo/dev.sqlite");
 const world = createWorld({ repository });
 type AttachedSocket = { sessionId: string; actor: string; socketId: string };
 const sockets = new Map<WebSocket, AttachedSocket>();

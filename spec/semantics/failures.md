@@ -38,7 +38,7 @@ Each row cites its primary doc. This document only adds context not already cove
 | Network partition | originator can't reach receiver | `E_TIMEOUT` | originator times out; receiver may still apply | receiver may complete | retry; gap recovery covers any duplicate | [hosts.md §3.4 (6)](../protocol/hosts.md#34-task-migration-invariants) |
 | Duplicate RPC retry | client retries with same `id` | identical `applied` frame | correlation-id cache hit; no new seq | nothing | automatic | [wire.md §17.4](../protocol/wire.md#174-the-applied-push-model) |
 | Bytecode version skew | task resumes against incompatible bytecode | `E_VERSION` in applied | task aborts cleanly; never silently runs old code | applied with error | re-issue against current code | [hosts.md §3.4 (4)](../protocol/hosts.md#34-task-migration-invariants) |
-| Storage write failure (pre-sequence) | persistent storage rejects during validation, authorization, or seq commit | `op:"error"` w/ `E_STORAGE` | call rejected; **no seq advance**; nothing in log | nothing | client retry; investigate operator-side | (this doc, §F6) |
+| Storage write failure (call transaction) | persistent storage rejects before the outer call transaction commits | `op:"error"` w/ `E_STORAGE` | call rejected; **no visible seq advance**; nothing committed to log | nothing | client retry; investigate operator-side | (this doc, §F6) |
 | Storage write failure (during behavior) | storage fails during verb body | `op:"applied"` w/ `$error E_STORAGE` | mutations rolled back; seq stays in log | applied with error | behavior-failure semantics; investigate operator-side | (this doc, §F6) |
 | Quota exceeded | per-task / per-owner / per-space cap hit | `E_QUOTA` in applied | call rejected before behavior runs | nothing | wait, request more quota | [permissions.md §11.7](permissions.md#117-storage-quotas-and-accounting), [tasks.md §16.7](tasks.md#167-fork-and-suspend-caps) |
 | Inbound rate limit | client over `connection_*` budget | `op:"error"` w/ `E_RATE` | excess frames dropped at WS | nothing | client backoff | [wire.md §17.5](../protocol/wire.md#175-backpressure-and-rate-limiting) |
@@ -94,13 +94,13 @@ Tick weights for cross-host operations (`GET_PROP` remote 100, `CALL_VERB` remot
 
 ## F6. Storage and persistence failures
 
-The persistence layer (`spec/reference/persistence.md`) gives per-opcode atomicity (a single SQLite transaction). A verb body is *not* atomic across yield points; cross-DO ops give other tasks the chance to interleave. Storage-level failures fall into two categories with **distinct, definite semantics**:
+The persistence layer (`spec/reference/persistence.md`) gives per-opcode atomicity. A sequenced call runs in one outer host transaction, with the behavior body inside a savepoint ([cloudflare.md §R3.4](../reference/cloudflare.md#r34-transactions-and-rollback-scope)). A verb body is *not* atomic across yield points; cross-DO ops give other tasks the chance to interleave. Storage-level failures fall into two categories with **distinct, definite semantics**:
 
-**Pre-sequence storage failure.** If persistent storage fails during validation, authorization, or the seq commit (the `(seq, message)` log append) itself, the call is rejected: `op:"error"` with code `E_STORAGE`. **No `seq` is allocated.** Nothing is in the log. From all observers, the call did not happen. This is the only correct semantic: the seq+log append *is* the commit point ([space.md §S2 step 3](space.md#s2-the-call-lifecycle)) — if it fails, there is no call to recover.
+**Call-transaction storage failure.** If persistent storage fails before the outer call transaction commits — including validation/authorization storage reads, seq allocation, pending log insert, outcome update, or final commit — the call is rejected: `op:"error"` with code `E_STORAGE`. **No `seq` is visible.** Nothing is committed to the log. From all observers, the call did not happen.
 
-**Post-sequence storage failure (during behavior).** If storage fails during the verb body — a property write that the storage layer rejects — the failure is treated as a behavior failure: `op:"applied"` with a `$error E_STORAGE` observation, mutations rolled back, the message stays at its assigned `seq`. Same shape as any other behavior failure.
+**Behavior storage rejection.** If a storage operation inside the behavior savepoint raises an error that leaves the outer transaction usable, the failure is treated as a behavior failure: `op:"applied"` with a `$error E_STORAGE` observation, behavior mutations rolled back to the savepoint, and the message committed at its assigned `seq` with `applied_ok = false`. Same shape as any other behavior failure.
 
-The cases are deliberately disjoint. The runtime never reaches a state where "seq advanced but the message is not durably in the log" — that combination is impossible by construction. If the storage layer returns success on the seq+log commit, the seq is durable; if it returns failure, the seq was never assigned.
+The cases are deliberately disjoint. The runtime never reaches a state where "seq advanced but the message is not durably in the log" — that combination is impossible by construction. If the outer transaction commits, the seq, message, and outcome are durable together; if it aborts, the seq was never visible.
 
 Other storage incidents:
 

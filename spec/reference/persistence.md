@@ -147,9 +147,10 @@ CREATE INDEX task_resume_at ON task(resume_at) WHERE state = 'suspended';
 
 -- Sequenced messages accepted by a hosted $space.
 -- A DO may host more than one $space (anchored cluster); rows are scoped per space.
--- Two-phase write per cloudflare.md §R3.2: appendLog inserts with applied_ok=NULL;
--- recordLogOutcome updates applied_ok and error after the behavior runs. Rows
--- with applied_ok IS NULL at boot are reconciled per cloudflare.md §R3.3.
+-- Two-step write per cloudflare.md §R3.2: appendLog inserts with applied_ok=NULL;
+-- recordLogOutcome updates applied_ok and error after the behavior savepoint.
+-- Both happen in one outer transaction, so committed rows should never retain
+-- applied_ok=NULL; a null committed row is storage corruption or migration debt.
 -- See semantics/space.md.
 CREATE TABLE space_message (
   space_id    TEXT NOT NULL,

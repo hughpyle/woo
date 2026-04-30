@@ -1,11 +1,11 @@
 import { claimBytecode, setControlBytecode, setPropBytecode, setStatusBytecode, setValueBytecode } from "./fixtures";
 import { compileWooSource } from "./dsl-compiler";
-import type { WorldRepository } from "./repository";
+import type { ObjectRepository, WorldRepository } from "./repository";
 import { hashSource } from "./source-hash";
 import type { ObjRef, TinyBytecode, VerbDef, WooValue } from "./types";
 import { WooWorld } from "./world";
 
-export function createWorld(options: { repository?: WorldRepository } = {}): WooWorld {
+export function createWorld(options: { repository?: WorldRepository & Partial<ObjectRepository> } = {}): WooWorld {
   const world = new WooWorld(options.repository);
   const stored = options.repository?.load();
   if (stored) {
@@ -16,6 +16,7 @@ export function createWorld(options: { repository?: WorldRepository } = {}): Woo
     world.withPersistencePaused(() => bootstrap(world));
     world.persist();
   }
+  world.enableIncrementalPersistence();
   return world;
 }
 

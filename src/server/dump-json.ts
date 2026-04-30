@@ -1,12 +1,12 @@
 import { dumpSerializedObjectsToJsonFolder, dumpSerializedWorldToJsonFolder } from "./json-folder-repository";
-import { SQLiteWorldRepository } from "./sqlite-repository";
+import { LocalSQLiteRepository } from "./sqlite-repository";
 
 const args = parseArgs(process.argv.slice(2));
 const db = args.db ?? ".woo/dev.sqlite";
 const out = args.out ?? ".woo/json-dump";
 const objects = args.object ?? [];
 
-const repo = new SQLiteWorldRepository(db);
+const repo = new LocalSQLiteRepository(db);
 try {
   const world = repo.load();
   if (!world) {
