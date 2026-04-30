@@ -37,6 +37,7 @@ The sections below distinguish three flavors of pending item:
 - ~~taskspace domain invariants~~ — done (Domain Invariants section in `spec/taskspace-demo.md`)
 - ~~minimal authoring on-ramp~~ — first draft in `spec/authoring/minimal-ide.md`
 - broader authoring system: schema editor, history/replay viewer, version/rollback UI, package import/export
+- woo-flavoured rewrite of [yduj's duck tutorial](https://www.hayseed.net/MOO/yduj-duck-tutorial.text) — the canonical "build your first verb on a duck" walkthrough, ported to woo's DSL, dispatch model, and authoring surface. Aimed at first-time programmers (the original audience), not engineers porting from MOO.
 
 ## deferred specs (placeholder docs to write)
 
