@@ -1019,7 +1019,10 @@ export class WooWorld {
     if (this.callDepth >= MAX_CALL_DEPTH) throw wooError("E_CALL_DEPTH", "maximum verb call depth exceeded");
     this.callDepth += 1;
     try {
-      const { definer, verb } = startAt === undefined ? this.resolveVerb(target, verbName) : this.resolveVerbFrom(startAt, verbName);
+      // startAt is `undefined` for an ordinary call and a definer ref for `pass()`.
+      // Cross-host dispatch serializes `undefined` as JSON `null`, so treat both
+      // as "no parent override" and fall back to the standard resolveVerb walk.
+      const { definer, verb } = startAt == null ? this.resolveVerb(target, verbName) : this.resolveVerbFrom(startAt, verbName);
       this.assertCanExecuteVerb(ctx.progr, target, verbName, verb);
       const runCtx: CallContext = {
         ...ctx,
