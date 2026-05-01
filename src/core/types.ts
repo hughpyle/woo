@@ -178,7 +178,9 @@ export type MetricEvent =
   | { kind: "compose_look"; room: ObjRef; present_count: number; contents_count: number; remote_titles: number; ms: number }
   | { kind: "cross_host_rpc"; route: string; host: string; ms: number }
   | { kind: "subscribers_write"; space: ObjRef; size: number; delta: number }
-  | { kind: "applied"; space: ObjRef; seq: number; verb: string; ms: number };
+  | { kind: "applied"; space: ObjRef; seq: number; verb: string; ms: number }
+  | { kind: "mcp_request"; method: string; tool?: string; ms: number; status: "ok" | "error" }
+  | { kind: "init"; phase: "world" | "mcp_gateway"; ms: number };
 
 export type SequencedMessage = {
   space: ObjRef;

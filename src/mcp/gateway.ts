@@ -50,10 +50,13 @@ export class McpGateway {
 
   async handle(request: Request): Promise<Response> {
     const headers = request.headers;
+    const startedAt = Date.now();
+    const probe = await jsonRpcProbeFromRequest(request);
 
     if (request.method === "DELETE") {
       const id = headers.get(MCP_SESSION_HEADER);
       if (id) this.closeSession(id);
+      this.world.recordMetric({ kind: "mcp_request", method: "session_delete", ms: Date.now() - startedAt, status: "ok" });
       return new Response(null, { status: 204 });
     }
 
@@ -61,15 +64,18 @@ export class McpGateway {
     let entry: SessionEntry | undefined = sessionHeader ? this.sessions.get(sessionHeader) : undefined;
 
     if (sessionHeader && !entry) {
+      this.world.recordMetric({ kind: "mcp_request", method: probe.method ?? "unknown", tool: probe.tool, ms: Date.now() - startedAt, status: "error" });
       return mcpError(request, 404, -32001, "E_NOSESSION", "MCP session not found; reinitialize");
     }
 
     if (!entry) {
       if (request.method !== "POST") {
+        this.world.recordMetric({ kind: "mcp_request", method: probe.method ?? "unknown", tool: probe.tool, ms: Date.now() - startedAt, status: "error" });
         return mcpError(request, 401, -32001, "E_NOSESSION", "mcp gateway requires Mcp-Session-Id (or POST + auth token to initialize)");
       }
       const token = authTokenFromHeaders(headers);
       if (!token) {
+        this.world.recordMetric({ kind: "mcp_request", method: probe.method ?? "unknown", tool: probe.tool, ms: Date.now() - startedAt, status: "error" });
         return mcpError(request, 401, -32001, "E_NOSESSION", "first MCP request must include Mcp-Token or Authorization: Bearer <token>");
       }
       try {
@@ -77,6 +83,7 @@ export class McpGateway {
         entry = this.bind(woo);
       } catch (err) {
         const error = err as { code?: string; message?: string };
+        this.world.recordMetric({ kind: "mcp_request", method: probe.method ?? "unknown", tool: probe.tool, ms: Date.now() - startedAt, status: "error" });
         return mcpError(request, 401, -32001, error.code ?? "E_NOSESSION", error.message ?? "auth failed");
       }
     }
@@ -88,9 +95,11 @@ export class McpGateway {
         this.sessions.set(transportId, entry);
         this.host.bindSession(transportId, entry.woo.actor);
       }
+      this.world.recordMetric({ kind: "mcp_request", method: probe.method ?? "unknown", tool: probe.tool, ms: Date.now() - startedAt, status: "ok" });
       return response;
     } catch (err) {
       const error = err as { code?: string; message?: string };
+      this.world.recordMetric({ kind: "mcp_request", method: probe.method ?? "unknown", tool: probe.tool, ms: Date.now() - startedAt, status: "error" });
       return mcpError(request, 500, -32603, error.code ?? "E_INTERNAL", error.message ?? "internal MCP gateway error");
     }
   }
@@ -184,6 +193,25 @@ async function mcpError(request: Request, status: number, rpcCode: number, code:
     status,
     headers: { "content-type": "application/json; charset=utf-8" }
   });
+}
+
+async function jsonRpcProbeFromRequest(request: Request): Promise<{ method: string | null; tool?: string }> {
+  if (request.method !== "POST") return { method: null };
+  try {
+    const parsed = await request.clone().json() as unknown;
+    const single = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (!single || typeof single !== "object") return { method: null };
+    const m = (single as { method?: unknown }).method;
+    const method = typeof m === "string" ? m : null;
+    if (method === "tools/call") {
+      const params = (single as { params?: { name?: unknown } }).params;
+      const name = params && typeof params.name === "string" ? params.name : undefined;
+      return { method, tool: name };
+    }
+    return { method };
+  } catch {
+    return { method: null };
+  }
 }
 
 async function jsonRpcIdFromRequest(request: Request): Promise<string | number | null> {

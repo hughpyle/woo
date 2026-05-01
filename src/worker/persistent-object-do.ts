@@ -187,6 +187,7 @@ export class PersistentObjectDO {
 
   private getMcpGateway(world: WooWorld): McpGateway {
     if (!this.mcpGateway) {
+      const initStart = Date.now();
       this.mcpGateway = new McpGateway(world, {
         serverName: "woo",
         dispatch: {
@@ -212,6 +213,7 @@ export class PersistentObjectDO {
           broadcastLiveEvents: (result) => this.broadcastLiveEvents(world, result)
         }
       });
+      world.recordMetric({ kind: "init", phase: "mcp_gateway", ms: Date.now() - initStart });
     }
     return this.mcpGateway;
   }
@@ -222,11 +224,13 @@ export class PersistentObjectDO {
       return this.world;
     }
     let initialized: WooWorld | null = null;
+    let coldInitStart: number | null = null;
     await this.state.blockConcurrencyWhile(async () => {
       if (this.world) {
         initialized = this.world;
         return;
       }
+      coldInitStart = Date.now();
       const world = hostKey === WORLD_HOST
         ? createWorld({ repository: this.repo, catalogs: parseAutoInstallCatalogs(this.env.WOO_AUTO_INSTALL_CATALOGS) })
         : await this.createHostScopedWorld(hostKey as ObjRef);
@@ -248,6 +252,9 @@ export class PersistentObjectDO {
       initialized = world;
     });
     const world = initialized!;
+    if (coldInitStart !== null) {
+      world.recordMetric({ kind: "init", phase: "world", ms: Date.now() - coldInitStart });
+    }
     if (hostKey === WORLD_HOST) await this.registerObjectRoutes(world);
     return world;
   }
@@ -364,6 +371,25 @@ export class PersistentObjectDO {
           return response.value;
         };
         if (memo) return await memoizeHostOperation(memo.reads, `prop:${progr}:${objRef}:${name}`, read);
+        return await read();
+      },
+      describeObject: async (nameActor, readActor, objRef, memo) => {
+        const read = async () => {
+          const host = await hostForObject(objRef, memo);
+          if (!host || host === localHost) {
+            return {
+              name: world.propOrNullForActor(nameActor, objRef, "name"),
+              description: world.propOrNullForActor(readActor, objRef, "description"),
+              aliases: world.propOrNullForActor(readActor, objRef, "aliases")
+            };
+          }
+          return await this.forwardInternalChecked<{ name: WooValue | null; description: WooValue | null; aliases: WooValue | null }>(
+            host,
+            "/__internal/remote-describe",
+            { name_actor: nameActor, read_actor: readActor, obj: objRef }
+          );
+        };
+        if (memo) return await memoizeHostOperation(memo.reads, `describe:${nameActor}:${readActor}:${objRef}`, read);
         return await read();
       },
       location: async (objRef, memo) => {
@@ -767,6 +793,17 @@ export class PersistentObjectDO {
         const obj = String(body.obj ?? "") as ObjRef;
         const name = String(body.name ?? "");
         return jsonResponse({ value: await world.getPropChecked(progr, obj, name) });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/remote-describe") {
+        const nameActor = String(body.name_actor ?? "") as ObjRef;
+        const readActor = String(body.read_actor ?? "") as ObjRef;
+        const obj = String(body.obj ?? "") as ObjRef;
+        return jsonResponse({
+          name: world.propOrNullForActor(nameActor, obj, "name"),
+          description: world.propOrNullForActor(readActor, obj, "description"),
+          aliases: world.propOrNullForActor(readActor, obj, "aliases")
+        });
       }
 
       if (request.method === "POST" && pathname === "/__internal/remote-location") {
