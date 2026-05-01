@@ -84,6 +84,8 @@ export type HostBridge = {
   dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue>;
   moveObject(objRef: ObjRef, targetRef: ObjRef): Promise<void>;
   mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void>;
+  setActorPresence(actor: ObjRef, space: ObjRef, present: boolean): Promise<void>;
+  setSpaceSubscriber(space: ObjRef, actor: ObjRef, present: boolean): Promise<void>;
   contents(objRef: ObjRef): Promise<ObjRef[]>;
 };
 
@@ -717,8 +719,10 @@ export class WooWorld {
   }
 
   hasPresence(actor: ObjRef, space: ObjRef): boolean {
-    const presence = this.getProp(actor, "presence_in");
-    return Array.isArray(presence) && presence.includes(space);
+    const presence = this.propOrNull(actor, "presence_in");
+    if (Array.isArray(presence) && presence.includes(space)) return true;
+    const subscribers = this.propOrNull(space, "subscribers");
+    return Array.isArray(subscribers) && subscribers.includes(actor);
   }
 
   async call(frameId: string | undefined, sessionId: string, space: ObjRef, message: Message): Promise<AppliedFrame | ErrorFrame> {
@@ -1177,6 +1181,14 @@ export class WooWorld {
     this.persist();
   }
 
+  setActorPresence(actor: ObjRef, space: ObjRef, present: boolean): boolean {
+    return this.updateActorPresenceLocal(actor, space, present);
+  }
+
+  setSpaceSubscriber(space: ObjRef, actor: ObjRef, present: boolean): boolean {
+    return this.updateSpaceSubscriberLocal(space, actor, present);
+  }
+
   chparentAuthoredObject(actor: ObjRef, objRef: ObjRef, parentRef: ObjRef): void {
     this.assertCanAuthorObject(actor, objRef);
     this.assertCanCreateObject(actor, parentRef, actor);
@@ -1483,6 +1495,7 @@ export class WooWorld {
       if (hosted.has(id)) {
         add(obj.anchor);
         add(obj.location);
+        for (const item of obj.contents) add(item);
       }
       if (this.canCarryFeaturesIfKnown(id)) {
         const rawFeatures = obj.properties.get("features");
@@ -2098,26 +2111,64 @@ export class WooWorld {
     return this.updatePresence(actor, space, false);
   }
 
+  private async updatePresenceChecked(actor: ObjRef, space: ObjRef, present: boolean): Promise<boolean> {
+    const actorRemote = await this.remoteHostForObject(actor);
+    const spaceRemote = await this.remoteHostForObject(space);
+    if (!actorRemote && !spaceRemote) return this.updatePresence(actor, space, present);
+    if (!this.hostBridge && (actorRemote || spaceRemote)) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+    let changed = false;
+    if (actorRemote) {
+      await this.hostBridge!.setActorPresence(actor, space, present);
+      changed = true;
+    } else {
+      changed = this.updateActorPresenceLocal(actor, space, present) || changed;
+    }
+    if (spaceRemote) {
+      await this.hostBridge!.setSpaceSubscriber(space, actor, present);
+      changed = true;
+    } else {
+      changed = this.updateSpaceSubscriberLocal(space, actor, present) || changed;
+    }
+    return changed;
+  }
+
   private updatePresence(actor: ObjRef, space: ObjRef, present: boolean): boolean {
+    const actorChanged = this.updateActorPresenceLocal(actor, space, present);
+    const spaceChanged = this.updateSpaceSubscriberLocal(space, actor, present);
+    const changed = actorChanged || spaceChanged;
+    this.assertPresenceMirror(actor, space, present);
+    return changed;
+  }
+
+  private updateActorPresenceLocal(actor: ObjRef, space: ObjRef, present: boolean): boolean {
     this.object(actor);
-    this.object(space);
     const rawPresence = this.getProp(actor, "presence_in");
-    const rawSubscribers = this.getProp(space, "subscribers");
     if (!Array.isArray(rawPresence)) throw wooError("E_TYPE", `${actor}.presence_in must be a list`, rawPresence);
-    if (!Array.isArray(rawSubscribers)) throw wooError("E_TYPE", `${space}.subscribers must be a list`, rawSubscribers);
 
     const presence = rawPresence.filter((item): item is ObjRef => typeof item === "string");
-    const subscribers = rawSubscribers.filter((item): item is ObjRef => typeof item === "string");
     const nextPresence = present ? addUnique(presence, space) : presence.filter((item) => item !== space);
-    const nextSubscribers = present ? addUnique(subscribers, actor) : subscribers.filter((item) => item !== actor);
-    const changed = !valuesEqual(nextPresence, rawPresence) || !valuesEqual(nextSubscribers, rawSubscribers);
+    const changed = !valuesEqual(nextPresence, rawPresence);
     if (!changed) return false;
 
     this.withPersistenceDeferred(() => {
       this.setProp(actor, "presence_in", nextPresence);
+    });
+    return true;
+  }
+
+  private updateSpaceSubscriberLocal(space: ObjRef, actor: ObjRef, present: boolean): boolean {
+    this.object(space);
+    const rawSubscribers = this.getProp(space, "subscribers");
+    if (!Array.isArray(rawSubscribers)) throw wooError("E_TYPE", `${space}.subscribers must be a list`, rawSubscribers);
+
+    const subscribers = rawSubscribers.filter((item): item is ObjRef => typeof item === "string");
+    const nextSubscribers = present ? addUnique(subscribers, actor) : subscribers.filter((item) => item !== actor);
+    const changed = !valuesEqual(nextSubscribers, rawSubscribers);
+    if (!changed) return false;
+
+    this.withPersistenceDeferred(() => {
       this.setProp(space, "subscribers", nextSubscribers);
     });
-    this.assertPresenceMirror(actor, space, present);
     return true;
   }
 
@@ -2773,7 +2824,7 @@ export class WooWorld {
     const actorName = this.objectDisplayName(actor);
     const ts = Date.now();
     if (oldLocation && oldLocation !== room && this.objects.has(oldLocation) && this.inheritsFrom(oldLocation, "$space")) {
-      this.updatePresence(actor, oldLocation, false);
+      await this.updatePresenceChecked(actor, oldLocation, false);
       ctx.observe({
         type: "left",
         source: oldLocation,
@@ -2784,7 +2835,7 @@ export class WooWorld {
         ts
       });
     }
-    this.updatePresence(actor, room, true);
+    await this.updatePresenceChecked(actor, room, true);
     if (!this.objects.has(actor) || this.object(actor).location !== room) await this.moveObjectChecked(actor, room);
     ctx.observe({ type: "entered", source: room, actor, room, text: `${actorName} entered.`, ts });
     const look = await this.composeRoomLook({ ...ctx, thisObj: room }, room);
@@ -2796,7 +2847,7 @@ export class WooWorld {
     const actor = ctx.actor;
     const room = ctx.thisObj;
     const actorName = this.objectDisplayName(actor);
-    this.updatePresence(actor, room, false);
+    await this.updatePresenceChecked(actor, room, false);
     const homeValue = this.propOrNull(actor, "home");
     const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
     if (this.objects.has(actor) && this.object(actor).location === room && this.objects.has(home)) await this.moveObjectChecked(actor, home);
@@ -2815,8 +2866,8 @@ export class WooWorld {
     const target = this.resolveRoomExit(ctx.thisObj, exitName);
     if (!this.inheritsFrom(target, "$space")) throw wooError("E_TYPE", `${target} is not a room or space`, target);
     const actorName = this.objectDisplayName(ctx.actor);
-    this.updatePresence(ctx.actor, ctx.thisObj, false);
-    this.updatePresence(ctx.actor, target, true);
+    await this.updatePresenceChecked(ctx.actor, ctx.thisObj, false);
+    await this.updatePresenceChecked(ctx.actor, target, true);
     await this.moveObjectChecked(ctx.actor, target);
     const title = await this.titleForLook(ctx, ctx.thisObj, target);
     const ts = Date.now();

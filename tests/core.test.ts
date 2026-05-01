@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { compileVerb, definePropertyVersioned, definePropertyVersionedAs, installVerb, installVerbAs } from "../src/core/authoring";
-import { bootstrap, createWorld, createWorldFromSerialized, nonEmptyHostScopedWorld, scopeSerializedWorldToHost } from "../src/core/bootstrap";
+import { bootstrap, createWorld, createWorldFromSerialized, mergeHostScopedSeed, nonEmptyHostScopedWorld, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
 import type { CallContext, HostBridge, WooWorld } from "../src/core/world";
 import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
@@ -73,6 +73,14 @@ class LocalHostBridge implements HostBridge {
 
   async mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void> {
     this.worldFor(containerRef).mirrorContents(containerRef, objRef, present);
+  }
+
+  async setActorPresence(actor: ObjRef, space: ObjRef, present: boolean): Promise<void> {
+    this.worldFor(actor).setActorPresence(actor, space, present);
+  }
+
+  async setSpaceSubscriber(space: ObjRef, actor: ObjRef, present: boolean): Promise<void> {
+    this.worldFor(space).setSpaceSubscriber(space, actor, present);
   }
 
   async contents(objRef: ObjRef): Promise<ObjRef[]> {
@@ -541,6 +549,38 @@ describe("woo core", () => {
     expect(ids).toContain("slot_1");
     expect(ids).not.toContain("the_taskspace");
     expect(ids).not.toContain("the_chatroom");
+  });
+
+  it("merges fresh host seed into a stale host slice without wiping dynamic room state", async () => {
+    const staleWorld = createWorld();
+    const session = staleWorld.auth("guest:merge-host-seed");
+    staleWorld.object("the_chatroom").name = "Lobby";
+    staleWorld.setProp("the_chatroom", "name", "Lobby");
+    staleWorld.setProp("the_chatroom", "subscribers", [session.actor]);
+    staleWorld.setProp("the_chatroom", "next_seq", 42);
+    staleWorld.object("the_chatroom").contents.delete("the_lamp");
+    staleWorld.objects.delete("the_lamp");
+    staleWorld.objects.delete("the_towel");
+    staleWorld.objects.delete("the_mug");
+    staleWorld.object("the_deck").contents.delete("the_towel");
+
+    const fresh = createWorld().exportWorld();
+    const staleScoped = nonEmptyHostScopedWorld(staleWorld.exportWorld(), "the_chatroom");
+    const freshScoped = nonEmptyHostScopedWorld(fresh, "the_chatroom");
+    expect(staleScoped).not.toBeNull();
+    expect(freshScoped).not.toBeNull();
+
+    const merged = mergeHostScopedSeed(staleScoped!, freshScoped!);
+    const reloaded = createWorldFromSerialized(merged, { persist: false });
+
+    expect(reloaded.object("the_chatroom").name).toBe("Living Room");
+    expect(reloaded.getProp("the_chatroom", "name")).toBe("Living Room");
+    expect(reloaded.getProp("the_chatroom", "subscribers")).toEqual([session.actor]);
+    expect(reloaded.getProp("the_chatroom", "next_seq")).toBe(42);
+    expect(reloaded.object("the_lamp").location).toBe("the_chatroom");
+    expect(reloaded.object("the_chatroom").contents.has("the_lamp")).toBe(true);
+    expect(reloaded.object("the_mug").location).toBe("the_chatroom");
+    expect(reloaded.object("the_chatroom").contents.has("the_mug")).toBe(true);
   });
 
   it("normalizes legacy d permission shorthand while importing worlds", async () => {

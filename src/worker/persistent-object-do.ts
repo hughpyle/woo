@@ -30,7 +30,7 @@
 // - Worker-side GitHub tap install (/api/tap/install) — local catalogs
 //   cover the demos; remote-tap install is local-Node only for now.
 
-import { createWorld, createWorldFromSerialized, nonEmptyHostScopedWorld } from "../core/bootstrap";
+import { createWorld, createWorldFromSerialized, mergeHostScopedSeed, nonEmptyHostScopedWorld } from "../core/bootstrap";
 import { parseAutoInstallCatalogs } from "../core/local-catalogs";
 import {
   handleRestProtocolRequest,
@@ -236,7 +236,15 @@ export class PersistentObjectDO {
         stored_tasks: stored.parkedTasks.length
       });
     }
-    if (!scoped) scoped = nonEmptyHostScopedWorld(await this.fetchHostSeed(hostKey), hostKey);
+    let freshSeed: SerializedWorld | null = null;
+    try {
+      freshSeed = nonEmptyHostScopedWorld(await this.fetchHostSeed(hostKey), hostKey);
+    } catch (err) {
+      if (!scoped) throw err;
+      console.warn("woo.cluster_seed_refresh_failed", { host: hostKey, error: normalizeError(err) });
+    }
+    if (scoped && freshSeed) scoped = mergeHostScopedSeed(scoped, freshSeed);
+    if (!scoped) scoped = freshSeed;
     if (!scoped) throw wooError("E_OBJNF", `no host-scoped seed for ${hostKey}`, hostKey);
     return createWorldFromSerialized(scoped, { repository: this.repo });
   }
@@ -327,6 +335,22 @@ export class PersistentObjectDO {
           return;
         }
         await this.forwardInternalChecked(host, "/__internal/mirror-contents", { container: containerRef, obj: objRef, present });
+      },
+      setActorPresence: async (actor, space, present) => {
+        const host = await hostForObject(actor);
+        if (!host || host === localHost) {
+          world.setActorPresence(actor, space, present);
+          return;
+        }
+        await this.forwardInternalChecked(host, "/__internal/actor-presence", { actor, space, present });
+      },
+      setSpaceSubscriber: async (space, actor, present) => {
+        const host = await hostForObject(space);
+        if (!host || host === localHost) {
+          world.setSpaceSubscriber(space, actor, present);
+          return;
+        }
+        await this.forwardInternalChecked(host, "/__internal/space-subscriber", { space, actor, present });
       },
       contents: async (objRef) => {
         const host = await hostForObject(objRef);
@@ -582,6 +606,24 @@ export class PersistentObjectDO {
         world.mirrorContents(
           String(body.container ?? "") as ObjRef,
           String(body.obj ?? "") as ObjRef,
+          body.present === true
+        );
+        return jsonResponse({ ok: true });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/actor-presence") {
+        world.setActorPresence(
+          String(body.actor ?? "") as ObjRef,
+          String(body.space ?? "") as ObjRef,
+          body.present === true
+        );
+        return jsonResponse({ ok: true });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/space-subscriber") {
+        world.setSpaceSubscriber(
+          String(body.space ?? "") as ObjRef,
+          String(body.actor ?? "") as ObjRef,
           body.present === true
         );
         return jsonResponse({ ok: true });

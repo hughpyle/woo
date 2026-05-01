@@ -15,6 +15,7 @@ const LOCAL_CATALOG_DUBSPACE_CONTROL_GUARDS_MIGRATION = "2026-04-30-dubspace-con
 const LOCAL_CATALOG_ROOM_LOOK_SELF_MIGRATION = "2026-04-30-room-look-self";
 const LOCAL_CATALOG_CHAT_THREE_ROOM_MIGRATION = "2026-05-01-chat-three-room-demo";
 const LOCAL_CATALOG_CHAT_OBSERVATION_OUTPUT_MIGRATION = "2026-05-01-chat-observation-output";
+const LOCAL_CATALOG_CHAT_ROOM_CONTENTS_REPAIR_MIGRATION = "2026-05-01-chat-room-contents-repair";
 
 export const DEFAULT_LOCAL_CATALOGS = bundledCatalogAliases();
 
@@ -63,13 +64,15 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): v
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_ROOM_LOOK_SELF_MIGRATION, { allowImplementationHints: true });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_THREE_ROOM_MIGRATION, { allowImplementationHints: true });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_OBSERVATION_OUTPUT_MIGRATION, { allowImplementationHints: true });
+  runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_ROOM_CONTENTS_REPAIR_MIGRATION, { allowImplementationHints: true, reconcileSeedHooks: true, only: "chat" });
 }
 
-function runLocalCatalogMigration(world: WooWorld, names: readonly string[], id: string, options: { allowImplementationHints?: boolean } = {}): void {
+function runLocalCatalogMigration(world: WooWorld, names: readonly string[], id: string, options: { allowImplementationHints?: boolean; reconcileSeedHooks?: boolean; only?: string } = {}): void {
   if (migrationApplied(world, id)) return;
   for (const name of names) {
+    if (options.only && name !== options.only) continue;
     if (!localCatalogInstalled(world, name)) continue;
-    repairCatalogManifest(world, LOCAL_CATALOGS.get(name)!, { actor: "$wiz", allowImplementationHints: options.allowImplementationHints });
+    repairCatalogManifest(world, LOCAL_CATALOGS.get(name)!, { actor: "$wiz", allowImplementationHints: options.allowImplementationHints, reconcileSeedHooks: options.reconcileSeedHooks });
   }
   markMigrationApplied(world, id);
 }

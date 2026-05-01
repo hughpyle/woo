@@ -112,6 +112,14 @@ class LocalHostBridge implements HostBridge {
     this.worldFor(containerRef).mirrorContents(containerRef, objRef, present);
   }
 
+  async setActorPresence(actor: ObjRef, space: ObjRef, present: boolean): Promise<void> {
+    this.worldFor(actor).setActorPresence(actor, space, present);
+  }
+
+  async setSpaceSubscriber(space: ObjRef, actor: ObjRef, present: boolean): Promise<void> {
+    this.worldFor(space).setSpaceSubscriber(space, actor, present);
+  }
+
   async contents(objRef: ObjRef): Promise<ObjRef[]> {
     return this.worldFor(objRef).contentsOf(objRef);
   }
@@ -398,6 +406,57 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       expect(home.object("conf_satchel").location).toBe("conf_room_b");
       expect(home.object(actor).contents.has("conf_satchel")).toBe(false);
       expect(roomB.object("conf_room_b").contents.has("conf_satchel")).toBe(true);
+    } finally {
+      roomBHarness.cleanup();
+      roomAHarness.cleanup();
+      homeHarness.cleanup();
+    }
+  });
+
+  it("moves chat actors across room hosts with presence and contents mirrors", async () => {
+    const homeHarness = make();
+    const roomAHarness = make();
+    const roomBHarness = make();
+    try {
+      const home = homeHarness.world;
+      const roomA = roomAHarness.world;
+      const roomB = roomBHarness.world;
+      const session = home.auth("guest:conf-cross-host-room-exit");
+      const actor = session.actor;
+      const worlds = new Map<string, WooWorld>([
+        ["home", home],
+        ["room-a", roomA],
+        ["room-b", roomB]
+      ]);
+      const routes = new Map<ObjRef, string>([
+        [actor, "home"],
+        ["the_chatroom", "room-a"],
+        ["the_deck", "room-b"],
+        ["the_hot_tub", "room-b"]
+      ]);
+      home.setHostBridge(new LocalHostBridge("home", worlds, routes));
+      roomA.setHostBridge(new LocalHostBridge("room-a", worlds, routes));
+      roomB.setHostBridge(new LocalHostBridge("room-b", worlds, routes));
+
+      roomA.createObject({ id: actor, name: actor, parent: "$guest", owner: "$wiz" });
+      home.setActorPresence(actor, "the_chatroom", true);
+      roomA.setActorPresence(actor, "the_chatroom", true);
+      roomA.setSpaceSubscriber("the_chatroom", actor, true);
+
+      const moved = await roomA.directCall("walk-se", actor, "the_chatroom", "southeast", []);
+      expect(moved.op).toBe("result");
+      expect(home.object(actor).location).toBe("the_deck");
+      expect(home.hasPresence(actor, "the_chatroom")).toBe(false);
+      expect(home.hasPresence(actor, "the_deck")).toBe(true);
+      expect(roomA.getProp("the_chatroom", "subscribers")).not.toContain(actor);
+      expect(roomB.getProp("the_deck", "subscribers")).toContain(actor);
+      expect(roomB.object("the_deck").contents.has(actor)).toBe(true);
+
+      const west = await roomB.directCall("walk-west", actor, "the_deck", "west", []);
+      expect(west.op).toBe("result");
+      expect(home.object(actor).location).toBe("the_chatroom");
+      expect(roomA.getProp("the_chatroom", "subscribers")).toContain(actor);
+      expect(roomB.getProp("the_deck", "subscribers")).not.toContain(actor);
     } finally {
       roomBHarness.cleanup();
       roomAHarness.cleanup();

@@ -80,6 +80,12 @@ type InstalledCatalogRecord = {
   provenance: Record<string, WooValue>;
 };
 
+const DYNAMIC_SEED_PROPERTIES = new Set([
+  "next_seq",
+  "subscribers",
+  "last_snapshot_seq"
+]);
+
 export type InstallCatalogOptions = {
   actor?: ObjRef;
   tap?: string;
@@ -91,6 +97,7 @@ export type InstallCatalogOptions = {
 export type RepairCatalogOptions = {
   actor?: ObjRef;
   allowImplementationHints?: boolean;
+  reconcileSeedHooks?: boolean;
 };
 
 export function installCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: InstallCatalogOptions = {}): InstalledCatalogRecord {
@@ -163,6 +170,7 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
 export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: RepairCatalogOptions = {}): void {
   const actor = options.actor ?? "$wiz";
   const allowImplementationHints = options.allowImplementationHints ?? false;
+  const reconcileSeedHooks = options.reconcileSeedHooks ?? false;
   const existing = installedCatalogs(world);
   const localObjects = new Map<string, ObjRef>();
   const localSeeds = new Map<string, ObjRef>();
@@ -189,6 +197,8 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
         const anchor = hook.anchor ? resolveObjectRef(world, hook.anchor, localObjects, localSeeds, existing) : null;
         const location = hook.location ? resolveObjectRef(world, hook.location, localObjects, localSeeds, existing) : null;
         world.createObject({ id, name: hook.name ?? id, parent, owner: actor, anchor, location });
+      } else if (reconcileSeedHooks) {
+        reconcileSeedObject(world, id, hook, manifest, actor, localObjects, localSeeds, existing);
       }
       localSeeds.set(hook.as, id);
       setDescriptionIfEmpty(world, id, catalogDescription(hook.description, hook.name ?? id, manifest.name));
@@ -198,6 +208,47 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
     }
     if (world.objects.has(hook.consumer) && world.objects.has(hook.feature)) attachFeature(world, hook.consumer, hook.feature);
   }
+}
+
+function reconcileSeedObject(
+  world: WooWorld,
+  id: ObjRef,
+  hook: Extract<CatalogSeedHook, { kind: "create_instance" }>,
+  manifest: CatalogManifest,
+  actor: ObjRef,
+  localObjects: Map<string, ObjRef>,
+  localSeeds: Map<string, ObjRef>,
+  existing: InstalledCatalogRecord[]
+): void {
+  const obj = world.object(id);
+  const parent = resolveObjectRef(world, hook.class, localObjects, localSeeds, existing);
+  const anchor = hook.anchor ? resolveObjectRef(world, hook.anchor, localObjects, localSeeds, existing) : null;
+  const location = hook.location ? resolveObjectRef(world, hook.location, localObjects, localSeeds, existing) : null;
+  if (obj.parent !== parent) {
+    if (obj.parent && world.objects.has(obj.parent)) world.object(obj.parent).children.delete(id);
+    obj.parent = parent;
+    world.object(parent).children.add(id);
+  }
+  if (obj.owner !== actor) obj.owner = actor;
+  obj.anchor = anchor;
+  if (hook.name) {
+    obj.name = hook.name;
+    world.setProp(id, "name", hook.name);
+  }
+  if (hook.description) world.setProp(id, "description", catalogDescription(hook.description, hook.name ?? id, manifest.name));
+  for (const [name, value] of Object.entries(hook.properties ?? {})) {
+    if (DYNAMIC_SEED_PROPERTIES.has(name) && obj.properties.has(name)) continue;
+    world.setProp(id, name, value);
+  }
+  if (obj.location !== location && (!obj.location || !world.objects.has(obj.location))) {
+    if (obj.location && world.objects.has(obj.location)) world.object(obj.location).contents.delete(id);
+    obj.location = location;
+    if (location && world.objects.has(location)) world.object(location).contents.add(id);
+  } else if (obj.location && world.objects.has(obj.location)) {
+    world.object(obj.location).contents.add(id);
+  }
+  obj.modified = Date.now();
+  world.persist(true);
 }
 
 function installProperty(world: WooWorld, obj: ObjRef, property: CatalogPropertyDef, owner: ObjRef): void {

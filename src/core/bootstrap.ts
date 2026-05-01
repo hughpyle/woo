@@ -1,6 +1,6 @@
 import { setPropBytecode, setValueBytecode } from "./fixtures";
 import { installLocalCatalogs } from "./local-catalogs";
-import type { ObjectRepository, SerializedWorld, WorldRepository } from "./repository";
+import type { ObjectRepository, SerializedObject, SerializedWorld, WorldRepository } from "./repository";
 import { hashSource } from "./source-hash";
 import type { ObjRef, TinyBytecode, WooValue } from "./types";
 import { normalizeVerbPerms } from "./verb-perms";
@@ -47,6 +47,40 @@ export function nonEmptyHostScopedWorld(serialized: SerializedWorld, host: ObjRe
   return scoped.objects.length > 0 ? scoped : null;
 }
 
+export function mergeHostScopedSeed(stored: SerializedWorld, seed: SerializedWorld): SerializedWorld {
+  const merged = cloneSerializedWorld(stored);
+  const objects = new Map(merged.objects.map((obj) => [obj.id, obj]));
+  const seedIds = new Set(seed.objects.map((obj) => obj.id));
+
+  for (const seedObj of seed.objects) {
+    const current = objects.get(seedObj.id);
+    if (!current) {
+      const next = cloneSerializedObject(seedObj);
+      merged.objects.push(next);
+      objects.set(next.id, next);
+      continue;
+    }
+    mergeSeedObject(current, seedObj);
+  }
+
+  reconcileSeedContainment(objects, seedIds);
+  merged.objectCounter = Math.max(merged.objectCounter ?? 1, seed.objectCounter ?? 1);
+  merged.parkedTaskCounter = Math.max(merged.parkedTaskCounter ?? 1, seed.parkedTaskCounter ?? 1);
+  merged.sessionCounter = Math.max(merged.sessionCounter ?? 1, seed.sessionCounter ?? 1);
+  for (const [space, entries] of seed.logs) {
+    if (!merged.logs.some(([existing]) => existing === space)) merged.logs.push([space, cloneSerialized(entries)]);
+  }
+  for (const snapshot of seed.snapshots) {
+    if (!merged.snapshots.some((existing) => existing.space_id === snapshot.space_id && existing.seq === snapshot.seq)) {
+      merged.snapshots.push(cloneSerialized(snapshot));
+    }
+  }
+  for (const task of seed.parkedTasks) {
+    if (!merged.parkedTasks.some((existing) => existing.id === task.id)) merged.parkedTasks.push(cloneSerialized(task));
+  }
+  return merged;
+}
+
 export function bootstrap(world: WooWorld, options: BootstrapOptions = {}): WooWorld {
   seedUniversal(world);
   seedDemoScaffold(world);
@@ -54,6 +88,92 @@ export function bootstrap(world: WooWorld, options: BootstrapOptions = {}): WooW
   seedGuests(world);
   world.rebuildGuestPool();
   return world;
+}
+
+const DYNAMIC_HOST_SEED_PROPERTIES = new Set([
+  "next_seq",
+  "subscribers",
+  "last_snapshot_seq",
+  "presence_in",
+  "session_id",
+  "focus_list",
+  "bootstrap_token_used",
+  "wizard_actions",
+  "applied_migrations",
+  "installed_catalogs"
+]);
+
+function mergeSeedObject(current: SerializedObject, seed: SerializedObject): void {
+  current.name = seed.name;
+  current.parent = seed.parent;
+  current.owner = seed.owner;
+  if (!current.location) current.location = seed.location;
+  current.anchor = seed.anchor;
+  current.flags = cloneSerialized(seed.flags);
+  current.modified = Math.max(current.modified ?? 0, seed.modified ?? 0);
+  current.propertyDefs = cloneSerialized(seed.propertyDefs);
+  current.verbs = cloneSerialized(seed.verbs);
+  current.eventSchemas = cloneSerialized(seed.eventSchemas);
+  current.children = mergeUnique(current.children, seed.children);
+
+  const properties = new Map(current.properties);
+  const versions = new Map(current.propertyVersions);
+  for (const [name, value] of seed.properties) {
+    if (name === "features" && properties.has(name) && Array.isArray(properties.get(name)) && Array.isArray(value)) {
+      properties.set(name, mergeUnique(properties.get(name) as string[], value.map(String)));
+      continue;
+    }
+    if (name === "features_version" && properties.has(name)) {
+      const currentVersion = Number(properties.get(name) ?? 0);
+      const seedVersion = Number(value ?? 0);
+      properties.set(name, Math.max(Number.isFinite(currentVersion) ? currentVersion : 0, Number.isFinite(seedVersion) ? seedVersion : 0));
+      continue;
+    }
+    if (DYNAMIC_HOST_SEED_PROPERTIES.has(name) && properties.has(name)) continue;
+    properties.set(name, cloneSerialized(value));
+  }
+  for (const [name, version] of seed.propertyVersions) {
+    if (DYNAMIC_HOST_SEED_PROPERTIES.has(name) && versions.has(name)) continue;
+    versions.set(name, Math.max(Number(versions.get(name) ?? 0), version));
+  }
+  current.properties = Array.from(properties.entries());
+  current.propertyVersions = Array.from(versions.entries());
+}
+
+function reconcileSeedContainment(objects: Map<ObjRef, SerializedObject>, seedIds: Set<ObjRef>): void {
+  for (const container of objects.values()) {
+    container.contents = container.contents.filter((id) => !seedIds.has(id) || objects.get(id)?.location === container.id);
+  }
+  for (const obj of objects.values()) {
+    if (!seedIds.has(obj.id) || !obj.location) continue;
+    const container = objects.get(obj.location);
+    if (container && !container.contents.includes(obj.id)) container.contents.push(obj.id);
+  }
+
+  for (const parent of objects.values()) {
+    parent.children = parent.children.filter((id) => !seedIds.has(id) || objects.get(id)?.parent === parent.id);
+  }
+  for (const obj of objects.values()) {
+    if (!seedIds.has(obj.id) || !obj.parent) continue;
+    const parent = objects.get(obj.parent);
+    if (parent && !parent.children.includes(obj.id)) parent.children.push(obj.id);
+  }
+}
+
+function mergeUnique<T>(left: readonly T[], right: readonly T[]): T[] {
+  return Array.from(new Set([...left, ...right]));
+}
+
+function cloneSerializedWorld(value: SerializedWorld): SerializedWorld {
+  return cloneSerialized(value);
+}
+
+function cloneSerializedObject(value: SerializedObject): SerializedObject {
+  return cloneSerialized(value);
+}
+
+function cloneSerialized<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function seedUniversal(world: WooWorld): void {

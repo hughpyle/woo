@@ -484,6 +484,48 @@ describe("local catalogs", () => {
     expect(world.objectRoutes().find((route) => route.id === "the_towel")).toBeUndefined();
   });
 
+  it("repairs stale chat room seed metadata and missing room contents", () => {
+    const world = createWorld();
+    world.setProp("$system", "applied_migrations", [
+      "2026-04-30-source-catalog-verbs",
+      "2026-04-30-catalog-placement-metadata",
+      "2026-04-30-chat-cockatoo",
+      "2026-04-30-chat-look-contents",
+      "2026-04-30-chat-command-parser",
+      "2026-04-30-dubspace-control-guards",
+      "2026-04-30-room-look-self",
+      "2026-05-01-chat-three-room-demo",
+      "2026-05-01-chat-observation-output"
+    ]);
+    world.object("the_chatroom").name = "Lobby";
+    world.setProp("the_chatroom", "name", "Lobby");
+    world.setProp("the_chatroom", "description", "The first runnable chat room.");
+    world.setProp("the_chatroom", "next_seq", 37);
+    world.setProp("the_chatroom", "subscribers", ["guest_1"]);
+    for (const id of ["the_lamp", "the_towel", "the_mug"]) {
+      const obj = world.objects.get(id);
+      if (obj?.location && world.objects.has(obj.location)) world.object(obj.location).contents.delete(id);
+      world.objects.delete(id);
+    }
+
+    installLocalCatalogs(world, ["chat"]);
+
+    expect(world.object("the_chatroom").name).toBe("Living Room");
+    expect(world.getProp("the_chatroom", "description")).toContain("bright, open living room");
+    expect(world.objects.has("the_lamp")).toBe(true);
+    expect(world.objects.has("the_towel")).toBe(true);
+    expect(world.objects.has("the_mug")).toBe(true);
+    expect(world.object("the_lamp").location).toBe("the_chatroom");
+    expect(world.object("the_towel").location).toBe("the_deck");
+    expect(world.object("the_mug").location).toBe("the_chatroom");
+    expect(world.object("the_chatroom").contents.has("the_lamp")).toBe(true);
+    expect(world.object("the_chatroom").contents.has("the_mug")).toBe(true);
+    expect(world.object("the_deck").contents.has("the_towel")).toBe(true);
+    expect(world.getProp("the_chatroom", "next_seq")).toBe(37);
+    expect(world.getProp("the_chatroom", "subscribers")).toEqual(["guest_1"]);
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-01-chat-room-contents-repair");
+  });
+
   it("migrates the cockatoo into worlds installed before it landed", async () => {
     const world = createWorld();
     // Reset to before the cockatoo migration ran
