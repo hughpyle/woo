@@ -1212,6 +1212,29 @@ export class WooWorld {
     return this.updateSpaceSubscriberLocal(space, actor, present);
   }
 
+  async setPresenceForActor(actor: ObjRef, space: ObjRef, present: boolean): Promise<boolean> {
+    return await this.updatePresenceChecked(actor, space, present);
+  }
+
+  async observeToSpace(ctx: CallContext, space: ObjRef, event: Observation): Promise<void> {
+    const type = assertString(event.type);
+    const observation: Observation = { ...event, type, source: event.source ?? space };
+    const remote = await this.remoteHostForObject(space);
+    if (!remote) {
+      if (!this.inheritsFrom(space, "$space")) throw wooError("E_TYPE", `${space} is not a space`, space);
+    } else {
+      try {
+        const subscribers = await this.getPropChecked(ctx.progr, space, "subscribers");
+        if (Array.isArray(subscribers)) {
+          (observation as Record<string, WooValue>)._audience_override = subscribers.filter((item): item is ObjRef => typeof item === "string");
+        }
+      } catch {
+        (observation as Record<string, WooValue>)._audience_override = [];
+      }
+    }
+    ctx.observe(observation);
+  }
+
   chparentAuthoredObject(actor: ObjRef, objRef: ObjRef, parentRef: ObjRef): void {
     this.assertCanAuthorObject(actor, objRef);
     this.assertCanCreateObject(actor, parentRef, actor);
@@ -2786,10 +2809,6 @@ export class WooWorld {
     this.nativeHandlers.set("room_go", (ctx, args) => this.roomExit(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("room_take", (ctx, args) => this.roomTake(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("room_drop", (ctx, args) => this.roomDrop(ctx, assertString(args[0] ?? "")));
-    this.nativeHandlers.set("dubspace_enter", (ctx) => this.dubspaceEnter(ctx));
-    this.nativeHandlers.set("dubspace_leave", (ctx) => this.dubspaceLeave(ctx));
-    this.nativeHandlers.set("pinboard_enter", (ctx) => this.pinboardEnter(ctx));
-    this.nativeHandlers.set("pinboard_leave", (ctx) => this.pinboardLeave(ctx));
     this.nativeHandlers.set("chat_command_plan", (ctx, args) => this.chatCommandPlan(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("chat_command", async (ctx, args) => {
       const plan = await this.chatCommandPlan(ctx, assertString(args[0] ?? ""));
@@ -2981,103 +3000,6 @@ export class WooWorld {
     if (this.objects.has(room)) this.mirrorContents(room, actor, false);
     ctx.observe({ type: "left", source: room, actor, room, text: `${actorName} left.`, ts: Date.now() });
     return this.chatPresent(room);
-  }
-
-  private async pinboardEnter(ctx: CallContext): Promise<WooValue> {
-    const board = ctx.thisObj;
-    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor);
-    const boardName = await this.objectDisplayNameAsync(ctx.progr, board);
-    const ts = Date.now();
-    await this.updatePresenceChecked(ctx.actor, board, true);
-    ctx.observe({ type: "pinboard_entered", source: board, actor: ctx.actor, board, text: `${actorName} starts working at ${boardName}.`, ts });
-    await this.observePinboardRoomActivity(ctx, `${actorName} starts working at ${boardName}.`, ts);
-    return await this.chatPresentAsync(board, ctx.progr);
-  }
-
-  private async pinboardLeave(ctx: CallContext): Promise<WooValue> {
-    const board = ctx.thisObj;
-    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor);
-    const boardName = await this.objectDisplayNameAsync(ctx.progr, board);
-    const ts = Date.now();
-    await this.updatePresenceChecked(ctx.actor, board, false);
-    ctx.observe({ type: "pinboard_left", source: board, actor: ctx.actor, board, text: `${actorName} steps back from ${boardName}.`, ts });
-    await this.observePinboardRoomActivity(ctx, `${actorName} steps back from ${boardName}.`, ts);
-    return await this.chatPresentAsync(board, ctx.progr);
-  }
-
-  private async observePinboardRoomActivity(ctx: CallContext, text: string, ts: number): Promise<void> {
-    const room = await this.mountedRoomFor(ctx);
-    if (!room) return;
-    const observation: Observation = { type: "pinboard_activity", source: room, board: ctx.thisObj, actor: ctx.actor, text, ts };
-    if (await this.remoteHostForObject(room)) {
-      try {
-        const subscribers = await this.getPropChecked(ctx.progr, room, "subscribers");
-        if (Array.isArray(subscribers)) {
-          (observation as Record<string, WooValue>)._audience_override = subscribers.filter((item): item is ObjRef => typeof item === "string");
-        }
-      } catch {
-        (observation as Record<string, WooValue>)._audience_override = [];
-      }
-    }
-    ctx.observe(observation);
-  }
-
-  private async mountedRoomFor(ctx: CallContext): Promise<ObjRef | null> {
-    const explicit = await this.propOrNullForActorAsync(ctx.progr, ctx.thisObj, "mount_room");
-    if (typeof explicit === "string") return explicit;
-    if (!this.objects.has(ctx.thisObj)) return null;
-    const location = this.object(ctx.thisObj).location;
-    return location && this.objects.has(location) && this.inheritsFrom(location, "$space") ? location : null;
-  }
-
-  private async dubspaceEnter(ctx: CallContext): Promise<WooValue> {
-    const space = ctx.thisObj;
-    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor);
-    const spaceName = await this.objectDisplayNameAsync(ctx.progr, space);
-    const ts = Date.now();
-    const operators = this.operatorList(space);
-    await this.updatePresenceChecked(ctx.actor, space, true);
-    if (!operators.includes(ctx.actor)) this.setProp(space, "operators", [...operators, ctx.actor]);
-    const text = `${actorName} steps up to ${spaceName}.`;
-    ctx.observe({ type: "dubspace_entered", source: space, actor: ctx.actor, space, text, ts });
-    await this.observeMountedRoomActivity(ctx, "dubspace_activity", "space", text, ts);
-    return this.operatorList(space);
-  }
-
-  private async dubspaceLeave(ctx: CallContext): Promise<WooValue> {
-    const space = ctx.thisObj;
-    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor);
-    const spaceName = await this.objectDisplayNameAsync(ctx.progr, space);
-    const ts = Date.now();
-    const operators = this.operatorList(space).filter((item) => item !== ctx.actor);
-    await this.updatePresenceChecked(ctx.actor, space, false);
-    this.setProp(space, "operators", operators);
-    const text = `${actorName} steps away from ${spaceName}.`;
-    ctx.observe({ type: "dubspace_left", source: space, actor: ctx.actor, space, text, ts });
-    await this.observeMountedRoomActivity(ctx, "dubspace_activity", "space", text, ts);
-    return operators;
-  }
-
-  private operatorList(space: ObjRef): ObjRef[] {
-    const raw = this.propOrNull(space, "operators");
-    return Array.isArray(raw) ? raw.filter((item): item is ObjRef => typeof item === "string") : [];
-  }
-
-  private async observeMountedRoomActivity(ctx: CallContext, type: string, refKey: string, text: string, ts: number): Promise<void> {
-    const room = await this.mountedRoomFor(ctx);
-    if (!room) return;
-    const observation: Observation = { type, source: room, actor: ctx.actor, text, ts, [refKey]: ctx.thisObj };
-    if (await this.remoteHostForObject(room)) {
-      try {
-        const subscribers = await this.getPropChecked(ctx.progr, room, "subscribers");
-        if (Array.isArray(subscribers)) {
-          (observation as Record<string, WooValue>)._audience_override = subscribers.filter((item): item is ObjRef => typeof item === "string");
-        }
-      } catch {
-        (observation as Record<string, WooValue>)._audience_override = [];
-      }
-    }
-    ctx.observe(observation);
   }
 
   private async roomExit(ctx: CallContext, rawExit: string): Promise<WooValue> {

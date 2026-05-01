@@ -28,9 +28,11 @@ Online demo: https://woo.hughpyle.workers.dev/
 Current example apps installed from the local build include: a small chat-room
 with many of the LambdaMOO chat behaviors (and a cockatoo); "Dubspace", a
 realtime interactive audio playground; "Pinboard", a shared spatial text-note
-board; "Taskspace", a task-management workspace (e.g. for AI agents), and a
-very minimal IDE/inspector.  The demo UI is just a placeholder.  There's no
-immediate plan to have objects declare their own UI.
+board; "Taskspace", a task-management workspace, and a very minimal IDE/inspector.
+
+The UI is demo/proof-of-concept, not "product".  There's no immediate plan to
+have objects declare their own UI, but eventually that will make sense if we
+can figure out a stable target.
 
 ## Specification
 

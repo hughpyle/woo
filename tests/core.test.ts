@@ -338,6 +338,37 @@ describe("woo core", () => {
     expect(remote.getProp("remote_box", "value")).toBe("remote");
   });
 
+  it("routes mounted-space direct observations to a remote room audience", async () => {
+    const chat = createWorld();
+    const pinboard = createWorld();
+    const actor = chat.auth("guest:mounted-space-actor");
+    const watcher = chat.auth("guest:mounted-space-watcher");
+    const worlds = new Map<string, WooWorld>([
+      ["chat", chat],
+      ["pinboard", pinboard]
+    ]);
+    const routes = new Map<ObjRef, string>([
+      [actor.actor, "chat"],
+      [watcher.actor, "chat"],
+      ["the_deck", "chat"],
+      ["the_pinboard", "pinboard"]
+    ]);
+    chat.setHostBridge(new LocalHostBridge("chat", worlds, routes));
+    pinboard.setHostBridge(new LocalHostBridge("pinboard", worlds, routes));
+
+    chat.setActorPresence(watcher.actor, "the_deck", true);
+    chat.setSpaceSubscriber("the_deck", watcher.actor, true);
+
+    const entered = await pinboard.directCall("remote-mounted-pinboard-enter", actor.actor, "the_pinboard", "enter", []);
+
+    expect(entered.op).toBe("result");
+    if (entered.op !== "result") return;
+    expect(entered.observations.map((obs) => obs.type)).toEqual(["pinboard_entered", "pinboard_activity"]);
+    expect(entered.observations[1]).toMatchObject({ source: "the_deck", board: "the_pinboard", actor: actor.actor });
+    expect(entered.observationAudiences?.[0]).toEqual([actor.actor]);
+    expect(entered.observationAudiences?.[1]).toEqual([watcher.actor]);
+  });
+
   it("checks VM property mutations against the running progr", async () => {
     const { world, session, actor } = authedWorld();
     world.createObject({ id: "private_box", name: "Private Box", parent: "$thing", owner: "$wiz" });

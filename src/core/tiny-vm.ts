@@ -106,7 +106,7 @@ const DEFAULT_WALL_MS = 10_000;
 const MAX_VM_FRAMES = 128;
 const MAX_RUNTIME_LOCALS = 1_024;
 const MAX_RUNTIME_STACK = 4_096;
-const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "move", "chparent", "has_flag", "random", "contents", "task_perms", "caller_perms", "set_task_perms"];
+const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "move", "chparent", "has_flag", "random", "contents", "task_perms", "caller_perms", "set_task_perms", "set_presence", "observe_to_space"];
 
 export async function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): Promise<WooValue> {
   return (await runVmFrames([makeFrame(ctx, bytecode, args)])).result;
@@ -825,6 +825,18 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         }
         frame.ctx.progr = next;
         return next;
+      }
+      case "set_presence": {
+        if (builtinArgs.length !== 2) throw wooError("E_INVARG", "set_presence expects space and present");
+        const present = builtinArgs[1];
+        if (typeof present !== "boolean") throw wooError("E_TYPE", "set_presence present argument must be boolean", present);
+        return await frame.ctx.world.setPresenceForActor(frame.ctx.actor, assertObj(builtinArgs[0]), present);
+      }
+      case "observe_to_space": {
+        if (builtinArgs.length !== 2) throw wooError("E_INVARG", "observe_to_space expects space and event");
+        const event = assertMap(builtinArgs[1]);
+        await frame.ctx.world.observeToSpace(frame.ctx, assertObj(builtinArgs[0]), { ...event, type: assertString(event.type) });
+        return null;
       }
       default:
         throw wooError("E_INVARG", `unknown builtin: ${name}`);

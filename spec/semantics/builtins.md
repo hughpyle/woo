@@ -87,8 +87,19 @@ caller-controlled work; non-wizard frames cannot use it to escalate.
 
 ### 19.6 Events / IO
 
-`emit(target, event)`, `subscribe(self, source, type)`, `unsubscribe`,  
+`emit(target, event)`, `observe_to_space(space, event)`, `set_presence(space, present)`,  
+`subscribe(self, source, type)`, `unsubscribe`,  
 `event_schema(obj, type)`, `declare_event(obj, type, schema)`.
+
+`observe_to_space(space, event)` records `event` on the current invocation route
+but routes live delivery to the subscribers of `space`. It is for ordinary
+object behavior such as a mounted pinboard or control surface emitting visible
+activity to its containing room; it does not make the containing-room relation a
+core property.
+
+`set_presence(space, present)` updates the current actor's presence mirror for a
+space (`actor.presence_in` and `space.subscribers`) through the host-safe
+presence primitive. It cannot set presence for another actor.
 
 ### 19.7 Sessions
 

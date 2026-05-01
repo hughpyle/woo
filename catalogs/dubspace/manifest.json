@@ -104,8 +104,7 @@
           "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": { "args": [] },
-          "source": "verb :enter() rxd { if (!(actor in this.operators)) { this.operators = this.operators + [actor]; } let text = actor.name + \" steps up to \" + this.name + \".\"; observe({ type: \"dubspace_entered\", actor: actor, space: this, text: text, ts: now() }); observe({ type: \"dubspace_activity\", source: this.mount_room, actor: actor, space: this, text: text, ts: now() }); return this.operators; }",
-          "implementation": { "kind": "native", "handler": "dubspace_enter" }
+          "source": "verb :enter() rxd { set_presence(this, true); if (!(actor in this.operators)) { this.operators = this.operators + [actor]; } let text = actor.name + \" steps up to \" + this.name + \".\"; observe({ type: \"dubspace_entered\", actor: actor, space: this, text: text, ts: now() }); if (this.mount_room != null) { observe_to_space(this.mount_room, { type: \"dubspace_activity\", source: this.mount_room, actor: actor, space: this, text: text, ts: now() }); } return this.operators; }"
         },
         {
           "name": "leave",
@@ -114,8 +113,7 @@
           "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": { "args": [] },
-          "source": "verb :leave() rxd { let next = []; for item in this.operators { if (item != actor) { next = next + [item]; } } this.operators = next; let text = actor.name + \" steps away from \" + this.name + \".\"; observe({ type: \"dubspace_left\", actor: actor, space: this, text: text, ts: now() }); observe({ type: \"dubspace_activity\", source: this.mount_room, actor: actor, space: this, text: text, ts: now() }); return this.operators; }",
-          "implementation": { "kind": "native", "handler": "dubspace_leave" }
+          "source": "verb :leave() rxd { set_presence(this, false); let next = []; for item in this.operators { if (item != actor) { next = next + [item]; } } this.operators = next; let text = actor.name + \" steps away from \" + this.name + \".\"; observe({ type: \"dubspace_left\", actor: actor, space: this, text: text, ts: now() }); if (this.mount_room != null) { observe_to_space(this.mount_room, { type: \"dubspace_activity\", source: this.mount_room, actor: actor, space: this, text: text, ts: now() }); } return this.operators; }"
         },
         {
           "name": "set_control",

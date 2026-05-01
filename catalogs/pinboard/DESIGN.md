@@ -162,7 +162,7 @@ pinboard should emit a small live summary to the Deck for visible manipulations:
 
 | Type | Payload |
 |---|---|
-| `pinboard_activity` | `{source: the_pinboard, actor, room: the_deck, text}` |
+| `pinboard_activity` | `{source: mounted room, board, actor, text}` |
 
 The UI must render pinboard state from board observations/state, not from the
 room summary text.

@@ -72,6 +72,16 @@ describe("local catalogs", () => {
     expect(taskspace.seed_hooks).toContainEqual({ kind: "attach_feature", consumer: "the_taskspace", feature: "chat:$conversational" });
   });
 
+  it("keeps mounted demo-space enter and leave verbs portable", async () => {
+    const world = createWorld({ catalogs: false });
+    installLocalCatalogs(world, ["chat", "dubspace", "pinboard"]);
+
+    expect(world.object("$dubspace").verbs.get("enter")?.kind).toBe("bytecode");
+    expect(world.object("$dubspace").verbs.get("leave")?.kind).toBe("bytecode");
+    expect(world.object("$pinboard").verbs.get("enter")?.kind).toBe("bytecode");
+    expect(world.object("$pinboard").verbs.get("leave")?.kind).toBe("bytecode");
+  });
+
   it("rejects missing catalog dependencies with the installed set in the error", async () => {
     const world = createWorld({ catalogs: false });
     const manifest: RuntimeCatalogManifest = {

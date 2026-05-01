@@ -6,7 +6,7 @@ Model Context Protocol surface that lets an LLM agent inhabit a woo world. The a
 
 The two existing inbound surfaces — [wire.md](wire.md) (WebSocket) and [rest.md](rest.md) (HTTP+SSE) — target browser clients and HTTP integrations respectively. MCP is the third, oriented at LLM agents that need affordances they can introspect, dry-run, and call without prior knowledge of the world's object graph. All three protocols hit the same call/applied/observe semantics; they differ only in framing and discovery.
 
-This spec assumes the MCP client supports dynamic tool lists (`notifications/tools/list_changed`). Clients that require a static manifest at connect time can still drive woo through whatever room verb the catalog provides as a parser entry point (e.g., `the_chatroom:command(text)`), but they lose the per-location structured-tool affordance and most of the value of this surface.
+This spec assumes the MCP client supports dynamic tool lists (`notifications/tools/list_changed`). Clients that cache tool metadata or require a static manifest at connect time can still drive woo through the stable control tools in §M2.0, or through whatever room verb the catalog provides as a parser entry point (e.g., `the_chatroom:command(text)`). They lose some of the per-location affordance, but they do not lose access to the world.
 
 ---
 
@@ -28,9 +28,22 @@ For Streamable HTTP, the first request carries that woo token in `Mcp-Token`. Cl
 
 ## M2. Tool surface
 
-**There is no universal tool layer.** Every tool the agent sees is a verb on some object in its reachable scope. Common-feeling tools (`command`, `look`, `say`, `wait`, `describe`) feel common because they come from common ancestors — `$space`, `$conversational`, `$actor` — and those ancestors are in scope from any catalog. New ancestors (a `$dubspace` the actor enters, a `$cockatoo` in the room) bring new verb-tools as their classes define them. The protocol does not curate a baseline; the world's class hierarchy does.
+**Dynamic object tools are the primary surface.** Every world-affordance tool the agent sees is a verb on some object in its reachable scope. Common-feeling tools (`command`, `look`, `say`, `wait`, `describe`) feel common because they come from common ancestors — `$space`, `$conversational`, `$actor` — and those ancestors are in scope from any catalog. New ancestors (a `$dubspace` the actor enters, a `$cockatoo` in the room) bring new verb-tools as their classes define them. The protocol does not curate a baseline of world behavior; the world's class hierarchy does.
 
 This means the MCP gateway is, mechanically, a thin shell around verb dispatch: enumerate reachable objects, filter their verbs, hand the list to the client.
+
+### M2.0 Stable control tools
+
+A small stable control plane exists for MCP clients whose tool metadata can lag the live world. These tools are not world behavior. `woo_call` does not bypass reachability, `tool_exposed`, or permissions; the actor-control wrappers (`woo_focus`, `woo_unfocus`, `woo_wait`) are explicitly part of the MCP protocol and dispatch to their corresponding `$actor` verbs under the actor's normal permissions.
+
+| Tool | Purpose |
+|---|---|
+| `woo_list_reachable_tools()` | Returns the current dynamic object-tool descriptors: name, canonical object, verb, route, args, and description. |
+| `woo_call(object, verb, args?)` | Finds the currently reachable dynamic tool for `<object>:<verb>` and invokes it through the normal direct/sequenced route. |
+| `woo_focus(target)` / `woo_unfocus(target)` | Stable protocol wrappers around the actor's `$actor:focus` / `$actor:unfocus` verbs. |
+| `woo_wait(timeout_ms?, limit?)` | Stable protocol wrapper around the actor's `$actor:wait` verb. |
+
+The wrappers exist because some MCP clients discover tools once, cache aggressively, or route calls through deferred metadata. A stale dynamic name like `the_pinboard__list_notes` may not be in the client's current cache even though `the_pinboard:list_notes` is reachable. `woo_call` gives the agent a canonical escape hatch without requiring the gateway to hardcode catalog objects or expose hidden verbs.
 
 ### M2.1 Verb-to-tool mapping
 
@@ -121,7 +134,7 @@ The dynamic tool set at any moment is computed against the actor's **reachable s
 6. **Working set.** Objects the actor has explicitly added to its scope via `$actor:focus(target)` (§M3.1). This is how task refs returned from `the_taskspace:list_tasks()` become callable: the agent calls `focus(t-7)` and `t-7`'s verbs (`claim`, `set_status`, `add_subtask`) join the tool list. Bounded; capped per implementation policy (default 32 entries).
 7. **Catalog-visible singletons.** Objects the catalog registry advertises as visible to this actor's class/role (per [discovery/catalogs.md](../discovery/catalogs.md)). v1-ops typically surfaces nothing here for ordinary actors; wizard actors get whatever wizard-discoverable singletons the catalog declares. There is no hardcoded list of "universal corenames" in the protocol — visibility is data-driven from the catalog registry, not from the MCP spec.
 
-The reachability set is recomputed after every tool call. If it differs from the previous set, the gateway sends `notifications/tools/list_changed`. Clients that tolerate stale tool lists for one turn can ignore the notification; clients that don't should re-list before their next decision.
+The reachability set is recomputed after every tool call. If it differs from the previous set, the gateway sends `notifications/tools/list_changed`. Clients that tolerate stale tool lists for one turn can ignore the notification; clients that don't should re-list before their next decision or use `woo_list_reachable_tools` / `woo_call`.
 
 Containment cycles and re-entrant rooms (a room as the contents of another room — see the chat catalog's hot tub) are walked once; the algorithm is a BFS bounded by the reachability set's natural boundary (objects not in any of the seven categories above).
 
@@ -231,7 +244,9 @@ woo's failure model ([../semantics/failures.md](../semantics/failures.md)) is pr
 - For sequenced calls that succeed-with-behavior-failure ([events.md §12.6](../semantics/events.md#126-observation-durability-follows-invocation-route)), the response is **not** `isError: true`. The applied frame committed at a real seq; `structuredContent.applied` carries the seq, and `structuredContent.observations` includes the `$error` observation. The tool succeeded; the verb body failed.
 - Routing/transport errors (gateway unreachable, session expired) use MCP's standard error envelope with woo codes in `data` (`E_NOSESSION`, `E_GATEWAY`).
 
-The agent's robustness contract: any tool may fail, including tools the agent saw seconds ago. The world is live; objects can be recycled and verbs rewritten between turns. The `tools/list_changed` notification is best-effort; the agent should treat `E_VERBNF` from a tool call as "re-list and try again" rather than as a fatal error.
+The gateway's robustness contract: if a dynamic tool name is missing from the server's current snapshot, the server refreshes reachability once before returning `unknown tool`. This handles a client calling a newly reachable object immediately after focus or movement. It does not make old names durable; if the refreshed list still lacks the tool, the call fails.
+
+The agent's robustness contract: any tool may fail, including tools the agent saw seconds ago. The world is live; objects can be recycled and verbs rewritten between turns. The `tools/list_changed` notification is best-effort; the agent should treat `E_VERBNF` from a tool call as "re-list and try again" rather than as a fatal error. Clients with deferred or stale tool metadata should prefer `woo_call(object, verb, args)` for the retry.
 
 ---
 
@@ -244,8 +259,12 @@ client → server: notifications/initialized
 
 (later, repeated)
 client → server: tools/list
-client ← server: tools/list result (verbs reachable from current location)
+client ← server: tools/list result (stable control tools plus verbs reachable from current location)
 client → server: tools/call { name: "the_chatroom__say", arguments: { text: "hi" } }
+client ← server: tools/call result { content, structuredContent }
+
+(static/cached clients)
+client → server: tools/call { name: "woo_call", arguments: { object: "the_chatroom", verb: "say", args: ["hi"] } }
 client ← server: tools/call result { content, structuredContent }
 
 (when actor moves or working set changes)

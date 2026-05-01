@@ -270,14 +270,30 @@ describe("McpGateway", () => {
     expect(list.ok).toBe(true);
     const listBody = (await list.json()) as { result: { tools: Array<{ name: string }> } };
     expect(Array.isArray(listBody.result.tools)).toBe(true);
+    expect(listBody.result.tools.some((t) => t.name === "woo_list_reachable_tools")).toBe(true);
+    expect(listBody.result.tools.some((t) => t.name === "woo_call")).toBe(true);
+    expect(listBody.result.tools.some((t) => t.name === "woo_focus")).toBe(true);
+    expect(listBody.result.tools.some((t) => t.name === "woo_wait")).toBe(true);
     expect(listBody.result.tools.some((t) => t.name.includes("wait"))).toBe(true);
     expect(listBody.result.tools.some((t) => t.name.includes("create_task"))).toBe(true);
 
-    // 3) tools/call — invoke create_task as a sequenced tool
+    // 3) Stable control tool — invoke a reachable direct verb by canonical handle.
+    const stableCall = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "woo_call", arguments: { object: "the_taskspace", verb: "list_tasks", args: [] } }
+    }, { "mcp-session-id": sessionId! }));
+    expect(stableCall.ok).toBe(true);
+    const stableCallBody = (await stableCall.json()) as { result: { isError?: boolean; structuredContent?: { result?: unknown } } };
+    expect(stableCallBody.result.isError).not.toBe(true);
+    expect(Array.isArray(stableCallBody.result.structuredContent?.result)).toBe(true);
+
+    // 4) tools/call — invoke create_task as a sequenced dynamic tool
     const createName = listBody.result.tools.find((t) => t.name.endsWith("__create_task"))!.name;
     const call = await gateway.handle(jsonRpcRequest("http://t/mcp", {
       jsonrpc: "2.0",
-      id: 3,
+      id: 4,
       method: "tools/call",
       params: { name: createName, arguments: { title: "via gateway", description: "from MCP" } }
     }, { "mcp-session-id": sessionId! }));
@@ -286,7 +302,7 @@ describe("McpGateway", () => {
     expect(callBody.result.isError).not.toBe(true);
     expect(callBody.result.structuredContent?.applied?.space).toBe("the_taskspace");
 
-    // 4) DELETE closes the session
+    // 5) DELETE closes the session
     const closed = await gateway.handle(new Request("http://t/mcp", {
       method: "DELETE",
       headers: { "mcp-session-id": sessionId! }
@@ -311,6 +327,112 @@ describe("McpGateway", () => {
 
     expect(init.ok).toBe(true);
     expect((init.headers.get("mcp-session-id") ?? "").length).toBeGreaterThan(0);
+  });
+
+  it("refreshes dynamic tool cache once when a stale client calls a newly reachable tool", async () => {
+    const world = bootstrapWorld();
+    const gateway = new McpGateway(world);
+
+    const init = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "vitest", version: "0.0.0" }
+      }
+    }, { "mcp-token": "guest:mcp-refresh" }));
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      method: "notifications/initialized"
+    }, { "mcp-session-id": sessionId! }));
+
+    const initial = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list"
+    }, { "mcp-session-id": sessionId! }));
+    const initialBody = (await initial.json()) as { result: { tools: Array<{ name: string }> } };
+    expect(initialBody.result.tools.some((t) => t.name === "the_pinboard__enter")).toBe(false);
+
+    const actor = Array.from(world.sessions.values())[0]?.actor;
+    expect(actor).toBeTruthy();
+    world.setProp(actor!, "focus_list", ["the_pinboard"]);
+
+    const staleCall = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "the_pinboard__enter", arguments: {} }
+    }, { "mcp-session-id": sessionId! }));
+    expect(staleCall.ok).toBe(true);
+    const staleCallBody = (await staleCall.json()) as { result: { isError?: boolean; structuredContent?: { observations?: Array<{ type?: string }> } } };
+    expect(staleCallBody.result.isError).not.toBe(true);
+    expect(staleCallBody.result.structuredContent?.observations?.some((o) => o.type === "pinboard_entered")).toBe(true);
+  });
+
+  it("keeps stable actor-control tools available when dynamic actor tools are hidden", async () => {
+    const world = bootstrapWorld();
+    for (const name of ["wait", "focus"]) {
+      const verb = world.object("$actor").verbs.get(name);
+      expect(verb).toBeDefined();
+      if (verb) verb.tool_exposed = false;
+    }
+    const gateway = new McpGateway(world);
+
+    const init = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "vitest", version: "0.0.0" }
+      }
+    }, { "mcp-token": "guest:mcp-stable-control" }));
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+    const actor = Array.from(world.sessions.values())[0]?.actor;
+    expect(actor).toBeTruthy();
+
+    await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      method: "notifications/initialized"
+    }, { "mcp-session-id": sessionId! }));
+
+    const list = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list"
+    }, { "mcp-session-id": sessionId! }));
+    const body = (await list.json()) as { result: { tools: Array<{ name: string }> } };
+    expect(body.result.tools.some((t) => t.name === "woo_wait")).toBe(true);
+    expect(body.result.tools.some((t) => t.name === "woo_focus")).toBe(true);
+    expect(body.result.tools.some((t) => t.name === `${actor}__wait`)).toBe(false);
+    expect(body.result.tools.some((t) => t.name === `${actor}__focus`)).toBe(false);
+
+    const waited = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "woo_wait", arguments: { timeout_ms: 0, limit: 1 } }
+    }, { "mcp-session-id": sessionId! }));
+    const waitedBody = (await waited.json()) as { result: { isError?: boolean } };
+    expect(waitedBody.result.isError).not.toBe(true);
+
+    const focused = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: { name: "woo_focus", arguments: { target: "the_taskspace" } }
+    }, { "mcp-session-id": sessionId! }));
+    const focusedBody = (await focused.json()) as { result: { isError?: boolean; structuredContent?: { result?: unknown } } };
+    expect(focusedBody.result.isError).not.toBe(true);
+    expect(focusedBody.result.structuredContent?.result).toContain("the_taskspace");
   });
 
   it("normalizes missing Accept headers for Codex-style initialize requests", async () => {
