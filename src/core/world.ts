@@ -2809,6 +2809,16 @@ export class WooWorld {
   }
 
   private async titleForLook(ctx: CallContext, room: ObjRef, item: ObjRef): Promise<string> {
+    // Cross-host dispatch from inside a held host-queue slot deadlocks: a
+    // composeRoomLook on the chatroom DO would dispatch `:title()` on every
+    // gateway-hosted item, and the gateway's queue is busy waiting on the
+    // very call that is now trying to call back. Until host-queue re-entrancy
+    // (or durable awaiting_call parking) lands, fall back to a local read of
+    // the standard display fields and avoid the recursive dispatch entirely
+    // for non-local items.
+    if (await this.remoteHostForObject(item)) {
+      return this.objects.has(item) ? this.object(item).name : item;
+    }
     try {
       const value = await this.dispatch({ ...ctx, caller: room, progr: ctx.actor }, item, "title", []);
       if (typeof value !== "string") throw wooError("E_TYPE", `${item}:title() must return a string`, value);
