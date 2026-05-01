@@ -58,30 +58,39 @@ export class McpGateway {
     const sessionHeader = headers.get(MCP_SESSION_HEADER);
     let entry: SessionEntry | undefined = sessionHeader ? this.sessions.get(sessionHeader) : undefined;
 
+    if (sessionHeader && !entry) {
+      return mcpError(request, 404, -32001, "E_NOSESSION", "MCP session not found; reinitialize");
+    }
+
     if (!entry) {
       if (request.method !== "POST") {
-        return jsonError(401, "E_NOSESSION", "mcp gateway requires Mcp-Session-Id (or POST + auth token to initialize)");
+        return mcpError(request, 401, -32001, "E_NOSESSION", "mcp gateway requires Mcp-Session-Id (or POST + auth token to initialize)");
       }
       const token = authTokenFromHeaders(headers);
       if (!token) {
-        return jsonError(401, "E_NOSESSION", "first MCP request must include Mcp-Token or Authorization: Bearer <token>");
+        return mcpError(request, 401, -32001, "E_NOSESSION", "first MCP request must include Mcp-Token or Authorization: Bearer <token>");
       }
       try {
         const woo = this.world.auth(token);
         entry = this.bind(woo);
       } catch (err) {
         const error = err as { code?: string; message?: string };
-        return jsonError(401, error.code ?? "E_NOSESSION", error.message ?? "auth failed");
+        return mcpError(request, 401, -32001, error.code ?? "E_NOSESSION", error.message ?? "auth failed");
       }
     }
 
-    const response = await entry.transport.handleRequest(withRequiredMcpAccept(request));
-    const transportId = entry.transport.sessionId;
-    if (transportId && !this.sessions.has(transportId)) {
-      this.sessions.set(transportId, entry);
-      this.host.bindSession(transportId, entry.woo.actor);
+    try {
+      const response = await entry.transport.handleRequest(withRequiredMcpAccept(request));
+      const transportId = entry.transport.sessionId;
+      if (transportId && !this.sessions.has(transportId)) {
+        this.sessions.set(transportId, entry);
+        this.host.bindSession(transportId, entry.woo.actor);
+      }
+      return response;
+    } catch (err) {
+      const error = err as { code?: string; message?: string };
+      return mcpError(request, 500, -32603, error.code ?? "E_INTERNAL", error.message ?? "internal MCP gateway error");
     }
-    return response;
   }
 
   // ----- broadcast routing — called by the host runtime so external
@@ -158,11 +167,43 @@ function withRequiredMcpAccept(request: Request): Request {
   return new Request(request, { headers });
 }
 
-function jsonError(status: number, code: string, message: string): Response {
-  return new Response(JSON.stringify({ error: { code, message } }), {
+async function mcpError(request: Request, status: number, rpcCode: number, code: string, message: string): Promise<Response> {
+  const id = await jsonRpcIdFromRequest(request);
+  return new Response(JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    error: {
+      code: rpcCode,
+      message,
+      data: { code }
+    }
+  }), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" }
   });
+}
+
+async function jsonRpcIdFromRequest(request: Request): Promise<string | number | null> {
+  if (request.method !== "POST") return null;
+  try {
+    const parsed = await request.clone().json() as unknown;
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        const id = jsonRpcIdFromValue(item);
+        if (id !== null) return id;
+      }
+      return null;
+    }
+    return jsonRpcIdFromValue(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function jsonRpcIdFromValue(value: unknown): string | number | null {
+  if (!value || typeof value !== "object") return null;
+  const id = (value as { id?: unknown }).id;
+  return typeof id === "string" || typeof id === "number" || id === null ? id : null;
 }
 
 function randomSessionId(): string {

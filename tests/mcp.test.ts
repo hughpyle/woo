@@ -344,10 +344,35 @@ describe("McpGateway", () => {
   it("rejects requests without a session and without an auth token", async () => {
     const world = bootstrapWorld();
     const gateway = new McpGateway(world);
-    const response = await gateway.handle(new Request("http://t/mcp", { method: "POST", body: "{}" }));
+    const response = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 9,
+      method: "initialize",
+      params: {}
+    }, {}));
     expect(response.status).toBe(401);
-    const body = await response.json() as { error: { code: string } };
-    expect(body.error.code).toBe("E_NOSESSION");
+    const body = await response.json() as { jsonrpc: string; id: number; error: { code: number; data?: { code?: string } } };
+    expect(body.jsonrpc).toBe("2.0");
+    expect(body.id).toBe(9);
+    expect(body.error.code).toBe(-32001);
+    expect(body.error.data?.code).toBe("E_NOSESSION");
+  });
+
+  it("returns a JSON-RPC session-not-found error for stale session ids", async () => {
+    const world = bootstrapWorld();
+    const gateway = new McpGateway(world);
+    const response = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 10,
+      method: "tools/list"
+    }, { "mcp-session-id": "stale-session" }));
+    expect(response.status).toBe(404);
+    const body = await response.json() as { jsonrpc: string; id: number; error: { code: number; message: string; data?: { code?: string } } };
+    expect(body.jsonrpc).toBe("2.0");
+    expect(body.id).toBe(10);
+    expect(body.error.code).toBe(-32001);
+    expect(body.error.message).toContain("session not found");
+    expect(body.error.data?.code).toBe("E_NOSESSION");
   });
 });
 
