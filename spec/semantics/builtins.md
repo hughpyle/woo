@@ -67,6 +67,9 @@ operations: wizard, or programmer editing an object it owns. `chparent` also
 requires that the new parent be owned by the programmer or `fertile`, and rejects
 cycles with `E_RECMOVE`.
 
+`location(obj)` returns the object's current container (`obj.location`) or
+`null`. It is a behavior-readable core field, not a property lookup.
+
 `has_flag(obj, name)` returns whether an object metadata flag is true. It is for
 ordinary behavior checks such as wizard bypasses; it is not a substitute for the
 permission system.

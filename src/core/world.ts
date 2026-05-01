@@ -76,12 +76,19 @@ export type CallContext = {
   message: Message;
   observations: Observation[];
   observe(event: Observation): void;
+  deferHostEffect?(effect: DeferredHostEffect): void;
 };
+
+export type DeferredHostEffect =
+  | { kind: "actor_presence"; actor: ObjRef; space: ObjRef; present: boolean }
+  | { kind: "space_subscriber"; space: ObjRef; actor: ObjRef; present: boolean }
+  | { kind: "move_object"; obj: ObjRef; target: ObjRef; suppress_mirror_host?: string | null };
 
 export type HostBridge = {
   localHost: string;
   hostForObject(id: ObjRef): string | null | Promise<string | null>;
   getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue>;
+  location(objRef: ObjRef): Promise<ObjRef | null>;
   dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue>;
   moveObject(objRef: ObjRef, targetRef: ObjRef, options?: { suppressMirrorHost?: string | null }): Promise<MoveObjectResult>;
   mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void>;
@@ -119,6 +126,7 @@ export type ParkedTaskRun = {
 export type DirectCallOptions = {
   forceDirect?: boolean;
   forceReason?: string;
+  deferHostEffect?: (effect: DeferredHostEffect) => void;
 };
 
 type WooRepository = WorldRepository & Partial<ObjectRepository>;
@@ -802,6 +810,7 @@ export class WooWorld {
       const observations: Observation[] = [];
       if (forceDirect) observations.push({ type: "wizard_action", action: "force_direct", actor, target, verb: verbName, source: target });
       const message: Message = { actor, target, verb: verbName, args };
+      const deferredHostEffects: DeferredHostEffect[] = [];
       let result: WooValue = null;
       let mutated = false;
       const dispatchCtx: CallContext = {
@@ -820,7 +829,8 @@ export class WooWorld {
         observations,
         observe: (event) => {
           observations.push({ ...event, source: event.source ?? target });
-        }
+        },
+        deferHostEffect: options.deferHostEffect ? (effect) => deferredHostEffects.push(effect) : undefined
       };
       await this.withPersistencePaused(async () => {
         const before = this.snapshotProps();
@@ -845,6 +855,9 @@ export class WooWorld {
         }
       });
       if (mutated || this.persistenceDirty) this.persist(true);
+      if (options.deferHostEffect) {
+        for (const effect of deferredHostEffects) options.deferHostEffect(effect);
+      }
       // Cross-host bridge stashes authoritative audience info on ctx; prefer
       // it over recomputing locally where the local subscriber/presence view
       // for self-hosted spaces is stale.
@@ -1169,8 +1182,15 @@ export class WooWorld {
     this.moveObject(objRef, targetRef);
   }
 
-  async moveAuthoredObjectChecked(actor: ObjRef, objRef: ObjRef, targetRef: ObjRef): Promise<void> {
+  async moveAuthoredObjectChecked(actor: ObjRef, objRef: ObjRef, targetRef: ObjRef, ctx?: CallContext): Promise<void> {
     this.assertCanAuthorObject(actor, objRef);
+    const objRemote = await this.remoteHostForObject(objRef);
+    if (ctx?.deferHostEffect && objRemote) {
+      if (!await this.remoteHostForObject(targetRef)) this.object(targetRef);
+      this.mirrorRemoteMoveLocally(objRef, targetRef);
+      ctx.deferHostEffect({ kind: "move_object", obj: objRef, target: targetRef, suppress_mirror_host: this.hostBridge?.localHost ?? null });
+      return;
+    }
     if (!await this.remoteHostForObject(targetRef)) this.object(targetRef);
     await this.moveObjectChecked(objRef, targetRef);
   }
@@ -1204,6 +1224,29 @@ export class WooWorld {
     this.persist();
   }
 
+  private mirrorRemoteMoveLocally(objRef: ObjRef, targetRef: ObjRef): void {
+    let changed = false;
+    // Deliberate O(object count) cache cleanup. This only runs on the deferred
+    // cross-host move path while object counts are small; if movement becomes
+    // hot, maintain a local contents reverse index instead.
+    for (const obj of this.objects.values()) {
+      if (!obj.contents.delete(objRef)) continue;
+      obj.modified = Date.now();
+      this.persistObject(obj.id);
+      changed = true;
+    }
+    if (this.objects.has(targetRef)) {
+      const target = this.object(targetRef);
+      if (!target.contents.has(objRef)) {
+        target.contents.add(objRef);
+        target.modified = Date.now();
+        this.persistObject(targetRef);
+        changed = true;
+      }
+    }
+    if (changed) this.persist();
+  }
+
   setActorPresence(actor: ObjRef, space: ObjRef, present: boolean): boolean {
     return this.updateActorPresenceLocal(actor, space, present);
   }
@@ -1212,8 +1255,27 @@ export class WooWorld {
     return this.updateSpaceSubscriberLocal(space, actor, present);
   }
 
-  async setPresenceForActor(actor: ObjRef, space: ObjRef, present: boolean): Promise<boolean> {
-    return await this.updatePresenceChecked(actor, space, present);
+  async setPresenceForActor(actor: ObjRef, space: ObjRef, present: boolean, ctx?: CallContext): Promise<boolean> {
+    return await this.updatePresenceChecked(actor, space, present, ctx);
+  }
+
+  async applyDeferredHostEffects(effects: DeferredHostEffect[]): Promise<void> {
+    for (const effect of effects) {
+      if (effect.kind === "actor_presence") {
+        await this.setActorPresenceChecked(effect.actor, effect.space, effect.present);
+      } else if (effect.kind === "space_subscriber") {
+        await this.setSpaceSubscriberChecked(effect.space, effect.actor, effect.present);
+      } else if (effect.kind === "move_object") {
+        await this.moveObjectChecked(effect.obj, effect.target, { suppressMirrorHost: effect.suppress_mirror_host ?? null });
+      }
+    }
+  }
+
+  async objectLocationChecked(objRef: ObjRef): Promise<ObjRef | null> {
+    const remote = await this.remoteHostForObject(objRef);
+    if (!remote) return this.object(objRef).location;
+    if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+    return await this.hostBridge.location(objRef);
   }
 
   async observeToSpace(ctx: CallContext, space: ObjRef, event: Observation): Promise<void> {
@@ -2220,25 +2282,49 @@ export class WooWorld {
     return this.updatePresence(actor, space, false);
   }
 
-  private async updatePresenceChecked(actor: ObjRef, space: ObjRef, present: boolean): Promise<boolean> {
+  private async updatePresenceChecked(actor: ObjRef, space: ObjRef, present: boolean, ctx?: CallContext): Promise<boolean> {
     const actorRemote = await this.remoteHostForObject(actor);
     const spaceRemote = await this.remoteHostForObject(space);
     if (!actorRemote && !spaceRemote) return this.updatePresence(actor, space, present);
     if (!this.hostBridge && (actorRemote || spaceRemote)) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+    if (ctx?.deferHostEffect) {
+      let changed = false;
+      if (actorRemote) {
+        ctx.deferHostEffect({ kind: "actor_presence", actor, space, present });
+        changed = true;
+      } else {
+        changed = this.updateActorPresenceLocal(actor, space, present) || changed;
+      }
+      if (spaceRemote) {
+        ctx.deferHostEffect({ kind: "space_subscriber", space, actor, present });
+        changed = true;
+      } else {
+        changed = this.updateSpaceSubscriberLocal(space, actor, present) || changed;
+      }
+      return changed;
+    }
     let changed = false;
-    if (actorRemote) {
-      await this.hostBridge!.setActorPresence(actor, space, present);
-      changed = true;
-    } else {
-      changed = this.updateActorPresenceLocal(actor, space, present) || changed;
-    }
-    if (spaceRemote) {
-      await this.hostBridge!.setSpaceSubscriber(space, actor, present);
-      changed = true;
-    } else {
-      changed = this.updateSpaceSubscriberLocal(space, actor, present) || changed;
-    }
+    if (actorRemote) changed = (await this.setActorPresenceChecked(actor, space, present)) || changed;
+    else changed = this.updateActorPresenceLocal(actor, space, present) || changed;
+    if (spaceRemote) changed = (await this.setSpaceSubscriberChecked(space, actor, present)) || changed;
+    else changed = this.updateSpaceSubscriberLocal(space, actor, present) || changed;
     return changed;
+  }
+
+  private async setActorPresenceChecked(actor: ObjRef, space: ObjRef, present: boolean): Promise<boolean> {
+    const actorRemote = await this.remoteHostForObject(actor);
+    if (!actorRemote) return this.updateActorPresenceLocal(actor, space, present);
+    if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+    await this.hostBridge.setActorPresence(actor, space, present);
+    return true;
+  }
+
+  private async setSpaceSubscriberChecked(space: ObjRef, actor: ObjRef, present: boolean): Promise<boolean> {
+    const spaceRemote = await this.remoteHostForObject(space);
+    if (!spaceRemote) return this.updateSpaceSubscriberLocal(space, actor, present);
+    if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+    await this.hostBridge.setSpaceSubscriber(space, actor, present);
+    return true;
   }
 
   private updatePresence(actor: ObjRef, space: ObjRef, present: boolean): boolean {
@@ -2803,10 +2889,6 @@ export class WooWorld {
     this.nativeHandlers.set("parse_command", (ctx, args) => this.parseCommandMap(assertString(args[0] ?? ""), ctx.actor, ctx.space) as unknown as WooValue);
     this.nativeHandlers.set("space_look_self", (ctx) => this.spaceLookSelf(ctx));
     this.nativeHandlers.set("room_who", (ctx) => this.roomWho(ctx));
-    this.nativeHandlers.set("room_enter", (ctx) => this.roomEnter(ctx));
-    this.nativeHandlers.set("room_leave", (ctx) => this.roomLeave(ctx));
-    this.nativeHandlers.set("room_exit", (ctx, args) => this.roomExit(ctx, args.length > 0 ? assertString(args[0] ?? "") : ctx.verbName));
-    this.nativeHandlers.set("room_go", (ctx, args) => this.roomExit(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("room_take", (ctx, args) => this.roomTake(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("room_drop", (ctx, args) => this.roomDrop(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("chat_command_plan", (ctx, args) => this.chatCommandPlan(ctx, assertString(args[0] ?? "")));
@@ -2840,10 +2922,6 @@ export class WooWorld {
     const look = await this.composeRoomLook(ctx, room);
     await this.observeRoomLook(ctx, room, look);
     return look as unknown as WooValue;
-  }
-
-  private async canComposeRoomLookInline(actor: ObjRef, room: ObjRef): Promise<boolean> {
-    return !(await this.remoteHostForObject(actor)) && !(await this.remoteHostForObject(room));
   }
 
   private async composeRoomLook(ctx: CallContext, room: ObjRef): Promise<Record<string, WooValue>> {
@@ -2958,134 +3036,6 @@ export class WooWorld {
     }
   }
 
-  private async roomEnter(ctx: CallContext): Promise<WooValue> {
-    const actor = ctx.actor;
-    const room = ctx.thisObj;
-    const oldLocation = this.objects.has(actor) ? this.object(actor).location : null;
-    const actorName = await this.objectDisplayNameAsync(ctx.progr, actor);
-    const ts = Date.now();
-    if (oldLocation && oldLocation !== room && this.objects.has(oldLocation) && this.inheritsFrom(oldLocation, "$space")) {
-      await this.updatePresenceChecked(actor, oldLocation, false);
-      ctx.observe({
-        type: "left",
-        source: oldLocation,
-        actor,
-        room: oldLocation,
-        destination: room,
-        text: `${actorName} left.`,
-        ts
-      });
-    }
-    await this.updatePresenceChecked(actor, room, true);
-    // Always forward — when actor is remote, this DO's local stub may carry a
-    // stale `location` from a prior enter while the actor's owning host has
-    // since moved them elsewhere. moveObjectChecked routes to the owning host,
-    // which is authoritative.
-    await this.moveObjectChecked(actor, room);
-    ctx.observe({ type: "entered", source: room, actor, room, text: `${actorName} entered.`, ts });
-    const present = this.chatPresent(room);
-    if (await this.canComposeRoomLookInline(actor, room)) {
-      const look = await this.composeRoomLook({ ...ctx, thisObj: room }, room);
-      await this.observeRoomLook(ctx, room, look);
-      return present;
-    }
-    return { room, present_actors: present, look_deferred: true } as unknown as WooValue;
-  }
-
-  private async roomLeave(ctx: CallContext): Promise<WooValue> {
-    const actor = ctx.actor;
-    const room = ctx.thisObj;
-    const actorName = await this.objectDisplayNameAsync(ctx.progr, actor);
-    await this.updatePresenceChecked(actor, room, false);
-    const homeValue = this.propOrNull(actor, "home");
-    const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
-    // Forward unconditionally; the local stub's `location` may be stale.
-    if (this.objects.has(home)) await this.moveObjectChecked(actor, home);
-    // Load-bearing when the actor is local to this host (moveObjectOwned
-    // mirrored to home but not back to room since room may be remote);
-    // redundant when the actor is remote (the bridge's post-RPC branch
-    // already mirrored). Idempotent either way — see hosts.md §3.4.
-    if (this.objects.has(room)) this.mirrorContents(room, actor, false);
-    ctx.observe({ type: "left", source: room, actor, room, text: `${actorName} left.`, ts: Date.now() });
-    return this.chatPresent(room);
-  }
-
-  private async roomExit(ctx: CallContext, rawExit: string): Promise<WooValue> {
-    const exitName = normalizeExitName(rawExit);
-    if (!exitName) throw wooError("E_INVARG", "exit requires a direction or destination");
-    const blocked = this.blockedRoomExit(ctx.thisObj, exitName);
-    if (blocked) {
-      ctx.observe({ type: "blocked_exit", actor: ctx.actor, exit: exitName, text: blocked, ts: Date.now() });
-      return blocked;
-    }
-    const target = this.resolveRoomExit(ctx.thisObj, exitName);
-    if (!this.inheritsFrom(target, "$space")) throw wooError("E_TYPE", `${target} is not a room or space`, target);
-    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor);
-    await this.updatePresenceChecked(ctx.actor, ctx.thisObj, false);
-    await this.updatePresenceChecked(ctx.actor, target, true);
-    await this.moveObjectChecked(ctx.actor, target);
-    // Load-bearing for actor-local moves; redundant for remote-actor moves
-    // (the bridge's post-RPC branch already mirrored). Idempotent. See the
-    // suppress-and-self-mirror convention in hosts.md §3.4.
-    if (this.objects.has(ctx.thisObj)) this.mirrorContents(ctx.thisObj, ctx.actor, false);
-    const title = await this.titleForLook(ctx, ctx.thisObj, target);
-    // When target is on a remote host, this DO can't read its subscribers
-    // locally, so audience for the "entered" observation would fall back to
-    // this room's subscribers (wrong: source-room watchers would see the
-    // arrival). Pre-fetch authoritative subscribers from the target host and
-    // stamp them as the audience override.
-    const enteredAudience = await this.remoteRoomSubscribers(ctx, target);
-    const ts = Date.now();
-    ctx.observe({
-      type: "left",
-      source: ctx.thisObj,
-      actor: ctx.actor,
-      room: ctx.thisObj,
-      destination: target,
-      exit: exitName,
-      text: `${actorName} ${this.exitAnnouncement(exitName)}`,
-      ts
-    });
-    const enteredObs: Observation = {
-      type: "entered",
-      source: target,
-      actor: ctx.actor,
-      room: target,
-      origin: ctx.thisObj,
-      exit: exitName,
-      text: `${actorName} has arrived.`,
-      ts
-    };
-    if (enteredAudience !== null) (enteredObs as Record<string, unknown>)._audience_override = enteredAudience;
-    ctx.observe(enteredObs);
-    const lookDeferred = !(await this.canComposeRoomLookInline(ctx.actor, target));
-    if (!lookDeferred) {
-      const look = await this.composeRoomLook({ ...ctx, thisObj: target }, target);
-      await this.observeRoomLook(ctx, target, look);
-    }
-    return { room: target, from: ctx.thisObj, exit: exitName, title, look_deferred: lookDeferred };
-  }
-
-  // Returns the subscriber list for `target` excluding the acting actor when
-  // target lives on a remote host. Returns null when target is local (caller
-  // falls back to default audience computation). Errors are swallowed and
-  // produce an empty audience so callers can still emit the observation.
-  private async remoteRoomSubscribers(ctx: CallContext, target: ObjRef): Promise<ObjRef[] | null> {
-    if (!(await this.remoteHostForObject(target))) return null;
-    try {
-      const subs = await this.getPropChecked(ctx.progr, target, "subscribers");
-      if (!Array.isArray(subs)) return [];
-      return subs.filter((item): item is ObjRef => typeof item === "string" && item !== ctx.actor);
-    } catch {
-      return [];
-    }
-  }
-
-  private objectDisplayName(objRef: ObjRef): string {
-    if (!this.objects.has(objRef)) return objRef;
-    return this.object(objRef).name || objRef;
-  }
-
   // Cross-host-aware display name. The local stub of a remote object
   // (created by ensureInternalActor on cross-host /__internal/remote-dispatch)
   // carries `name = id` rather than the authoritative display name, so we
@@ -3103,11 +3053,6 @@ export class WooWorld {
     }
     if (this.objects.has(objRef)) return this.object(objRef).name || objRef;
     return objRef;
-  }
-
-  private exitAnnouncement(exitName: string): string {
-    if (exitName === "leave" || exitName === "out" || exitName === "exit") return "leaves.";
-    return `goes ${exitName}.`;
   }
 
   private async roomTake(ctx: CallContext, rawName: string): Promise<WooValue> {
@@ -3142,29 +3087,6 @@ export class WooWorld {
     const title = await this.titleForLook(ctx, room, item);
     ctx.observe({ type: "dropped", actor: ctx.actor, item, room, text: `You drop ${title}.`, ts: Date.now() });
     return { item, title, room };
-  }
-
-  private resolveRoomExit(room: ObjRef, exitName: string): ObjRef {
-    const exitsValue = this.propOrNull(room, "exits");
-    if (!exitsValue || typeof exitsValue !== "object" || Array.isArray(exitsValue)) {
-      throw wooError("E_INVARG", `${room} has no exits`, room);
-    }
-    const exits = Object.entries(exitsValue).filter((entry): entry is [string, ObjRef] => typeof entry[1] === "string" && this.objects.has(entry[1]));
-    const exact = exits.find(([name]) => normalizeExitName(name) === exitName);
-    if (exact) return exact[1] as ObjRef;
-    const prefix = exits.filter(([name]) => normalizeExitName(name).startsWith(exitName));
-    if (prefix.length === 1) return prefix[0][1] as ObjRef;
-    if (prefix.length > 1) throw wooError("E_INVARG", `ambiguous exit: ${exitName}`, exitName);
-    throw wooError("E_INVARG", `unknown exit: ${exitName}`, exitName);
-  }
-
-  private blockedRoomExit(room: ObjRef, exitName: string): string | null {
-    const blockedValue = this.propOrNull(room, "blocked_exits");
-    if (!blockedValue || typeof blockedValue !== "object" || Array.isArray(blockedValue)) return null;
-    for (const [name, message] of Object.entries(blockedValue)) {
-      if (normalizeExitName(name) === exitName && typeof message === "string") return message;
-    }
-    return null;
   }
 
   private isPortable(objRef: ObjRef): boolean {
@@ -3485,14 +3407,6 @@ function tokenizeCommand(text: string): ParsedToken[] {
 
 function tokenPhrase(tokens: ParsedToken[]): string {
   return tokens.map((token) => token.value).join(" ").trim();
-}
-
-function normalizeExitName(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/^(to|through|into)\s+/, "")
-    .replace(/\s+/g, " ");
 }
 
 const PREPOSITIONS = [

@@ -50,7 +50,7 @@ import { signInternalRequest, verifyInternalRequest } from "./internal-auth";
 
 // Re-import WooWorld type. Note `import type` must reach the world module
 // without dragging Node-only deps into the Worker bundle.
-import type { CallContext, HostBridge, MoveObjectResult, WooWorld } from "../core/world";
+import type { CallContext, DeferredHostEffect, HostBridge, MoveObjectResult, WooWorld } from "../core/world";
 
 export interface Env {
   WOO: DurableObjectNamespace;
@@ -338,10 +338,22 @@ export class PersistentObjectDO {
         const response = await this.forwardInternalChecked<{ value: WooValue }>(host, "/__internal/remote-get-prop", { progr, obj: objRef, name });
         return response.value;
       },
+      location: async (objRef) => {
+        const host = await hostForObject(objRef);
+        if (!host || host === localHost) return world.object(objRef).location;
+        const response = await this.forwardInternalChecked<{ location: ObjRef | null }>(host, "/__internal/remote-location", { obj: objRef });
+        return response.location;
+      },
       dispatch: async (ctx, target, verbName, args, startAt) => {
         const host = await hostForObject(startAt ?? target);
         if (!host || host === localHost) return await world.hostDispatch(ctx, target, verbName, args, startAt);
-        const response = await this.forwardInternalChecked<{ result: WooValue; observations?: Observation[]; audience_actors?: ObjRef[]; observation_audiences?: ObjRef[][] }>(host, "/__internal/remote-dispatch", {
+        const response = await this.forwardInternalChecked<{
+          result: WooValue;
+          observations?: Observation[];
+          audience_actors?: ObjRef[];
+          observation_audiences?: ObjRef[][];
+          deferred_host_effects?: DeferredHostEffect[];
+        }>(host, "/__internal/remote-dispatch", {
           ctx: this.serializedCallContext(ctx),
           target,
           verb: verbName,
@@ -359,6 +371,13 @@ export class PersistentObjectDO {
             audienceActors: response.audience_actors,
             observationAudiences: response.observation_audiences
           };
+        }
+        if (Array.isArray(response.deferred_host_effects)) {
+          if (ctx.deferHostEffect) {
+            for (const effect of response.deferred_host_effects) ctx.deferHostEffect(effect);
+          } else {
+            await world.applyDeferredHostEffects(response.deferred_host_effects);
+          }
         }
         return response.result;
       },
@@ -648,14 +667,16 @@ export class PersistentObjectDO {
           Number(body.expires_at ?? 0),
           body.token_class
         );
+        const deferredHostEffects: DeferredHostEffect[] = [];
         const result = await world.directCall(
           typeof body.frame_id === "string" ? body.frame_id : undefined,
           session.actor,
           String(body.target ?? "") as ObjRef,
           String(body.verb ?? ""),
-          Array.isArray(body.args) ? body.args as WooValue[] : []
+          Array.isArray(body.args) ? body.args as WooValue[] : [],
+          { deferHostEffect: (effect) => deferredHostEffects.push(effect) }
         );
-        return jsonResponse(result);
+        return jsonResponse(result.op === "result" ? { ...result, deferred_host_effects: deferredHostEffects } : result);
       }
 
       if (request.method === "POST" && pathname === "/__internal/replay") {
@@ -680,6 +701,11 @@ export class PersistentObjectDO {
         return jsonResponse({ value: await world.getPropChecked(progr, obj, name) });
       }
 
+      if (request.method === "POST" && pathname === "/__internal/remote-location") {
+        const obj = String(body.obj ?? "") as ObjRef;
+        return jsonResponse({ location: world.object(obj).location });
+      }
+
       if (request.method === "POST" && pathname === "/__internal/remote-dispatch") {
         const rawCtx = body.ctx && typeof body.ctx === "object" && !Array.isArray(body.ctx)
           ? body.ctx as Record<string, unknown>
@@ -696,6 +722,7 @@ export class PersistentObjectDO {
         const message = rawCtx.message && typeof rawCtx.message === "object" && !Array.isArray(rawCtx.message)
           ? rawCtx.message as Message
           : { actor, target, verb, args };
+        const deferredHostEffects: DeferredHostEffect[] = [];
         const ctx: CallContext = {
           world,
           space: String(rawCtx.space ?? "#-1") as ObjRef,
@@ -712,7 +739,8 @@ export class PersistentObjectDO {
           observations,
           observe: (event) => {
             observations.push({ ...event, source: event.source ?? String(rawCtx.space ?? "#-1") });
-          }
+          },
+          deferHostEffect: (effect) => deferredHostEffects.push(effect)
         };
         const result = await world.hostDispatch(ctx, target, verb, args, startAt);
         // Compute audience here using this DO's authoritative subscribers; the
@@ -720,7 +748,13 @@ export class PersistentObjectDO {
         // mis-filter the WS/MCP fan-out. Returned to the caller so the
         // gateway's broadcastLiveEvents has accurate audience information.
         const audiences = world.computeDirectLiveAudiences(target, observations);
-        return jsonResponse({ result, observations, audience_actors: audiences.audienceActors, observation_audiences: audiences.observationAudiences });
+        return jsonResponse({
+          result,
+          observations,
+          audience_actors: audiences.audienceActors,
+          observation_audiences: audiences.observationAudiences,
+          deferred_host_effects: deferredHostEffects
+        });
       }
 
       if (request.method === "POST" && pathname === "/__internal/remote-move-object") {
@@ -1019,7 +1053,12 @@ export class PersistentObjectDO {
     args: WooValue[]
   ): Promise<DirectResultFrame | ErrorFrame> {
     const body = this.forwardBody(world, session, { frame_id: frameId, target, verb, args });
-    return this.forwardInternal<DirectResultFrame | ErrorFrame>(host, "/__internal/ws-direct", body);
+    const result = await this.forwardInternal<((DirectResultFrame & { deferred_host_effects?: DeferredHostEffect[] }) | ErrorFrame)>(host, "/__internal/ws-direct", body);
+    if (result.op === "result" && Array.isArray(result.deferred_host_effects)) {
+      await world.applyDeferredHostEffects(result.deferred_host_effects);
+      delete result.deferred_host_effects;
+    }
+    return result;
   }
 
   private async forwardWsReplay(

@@ -106,7 +106,7 @@ const DEFAULT_WALL_MS = 10_000;
 const MAX_VM_FRAMES = 128;
 const MAX_RUNTIME_LOCALS = 1_024;
 const MAX_RUNTIME_STACK = 4_096;
-const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "move", "chparent", "has_flag", "random", "contents", "task_perms", "caller_perms", "set_task_perms", "set_presence", "observe_to_space"];
+const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "move", "chparent", "has_flag", "random", "contents", "location", "task_perms", "caller_perms", "set_task_perms", "set_presence", "observe_to_space"];
 
 export async function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): Promise<WooValue> {
   return (await runVmFrames([makeFrame(ctx, bytecode, args)])).result;
@@ -788,7 +788,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       }
       case "move": {
         if (builtinArgs.length !== 2) throw wooError("E_INVARG", "move expects object and destination");
-        await frame.ctx.world.moveAuthoredObjectChecked(frame.ctx.progr, assertObj(builtinArgs[0]), assertObj(builtinArgs[1]));
+        await frame.ctx.world.moveAuthoredObjectChecked(frame.ctx.progr, assertObj(builtinArgs[0]), assertObj(builtinArgs[1]), frame.ctx);
         return true;
       }
       case "chparent": {
@@ -810,6 +810,10 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         const obj = frame.ctx.world.object(assertObj(builtinArgs[0]));
         return Array.from(obj.contents);
       }
+      case "location": {
+        if (builtinArgs.length !== 1) throw wooError("E_INVARG", "location expects one object");
+        return await frame.ctx.world.objectLocationChecked(assertObj(builtinArgs[0]));
+      }
       case "task_perms":
         if (builtinArgs.length !== 0) throw wooError("E_INVARG", "task_perms expects no arguments");
         return frame.ctx.progr;
@@ -830,7 +834,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         if (builtinArgs.length !== 2) throw wooError("E_INVARG", "set_presence expects space and present");
         const present = builtinArgs[1];
         if (typeof present !== "boolean") throw wooError("E_TYPE", "set_presence present argument must be boolean", present);
-        return await frame.ctx.world.setPresenceForActor(frame.ctx.actor, assertObj(builtinArgs[0]), present);
+        return await frame.ctx.world.setPresenceForActor(frame.ctx.actor, assertObj(builtinArgs[0]), present, frame.ctx);
       }
       case "observe_to_space": {
         if (builtinArgs.length !== 2) throw wooError("E_INVARG", "observe_to_space expects space and event");

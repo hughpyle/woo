@@ -6,7 +6,7 @@ import { compileVerb, installVerb } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
 import { InMemoryObjectRepository } from "../src/core/repository";
 import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
-import type { CallContext, HostBridge, MoveObjectResult, WooWorld } from "../src/core/world";
+import type { CallContext, DeferredHostEffect, HostBridge, MoveObjectResult, WooWorld } from "../src/core/world";
 import { LocalSQLiteRepository } from "../src/server/sqlite-repository";
 
 type Harness = {
@@ -99,6 +99,10 @@ class LocalHostBridge implements HostBridge {
 
   async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue> {
     return await this.worldFor(objRef).getPropChecked(progr, objRef, name);
+  }
+
+  async location(objRef: ObjRef): Promise<ObjRef | null> {
+    return this.worldFor(objRef).object(objRef).location;
   }
 
   async dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue> {
@@ -468,11 +472,16 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       roomA.setActorPresence(witness, "the_chatroom", true);
       roomA.setSpaceSubscriber("the_chatroom", witness, true);
 
-      const moved = await roomA.directCall("walk-se", actor, "the_chatroom", "southeast", []);
+      const moveEffects: DeferredHostEffect[] = [];
+      const moved = await roomA.directCall("walk-se", actor, "the_chatroom", "southeast", [], {
+        deferHostEffect: (effect) => moveEffects.push(effect)
+      });
       expect(moved.op).toBe("result");
       if (moved.op === "result") {
         expect(moved.result).toMatchObject({ room: "the_deck", look_deferred: true });
       }
+      expect(moveEffects.map((effect) => effect.kind)).toEqual(["actor_presence", "actor_presence", "space_subscriber", "move_object"]);
+      await home.applyDeferredHostEffects(moveEffects);
       expect(roomABridge.contentsCalls.get("the_deck") ?? 0).toBe(0);
       expect(home.object(actor).location).toBe("the_deck");
       expect(home.hasPresence(actor, "the_chatroom")).toBe(false);
@@ -494,11 +503,42 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
         expect(audiences[enteredIdx] ?? []).not.toContain(witness);
       }
 
-      const west = await roomB.directCall("walk-west", actor, "the_deck", "west", []);
+      const tubEffects: DeferredHostEffect[] = [];
+      const enterTub = await roomB.directCall("enter-tub", actor, "the_hot_tub", "enter", [], {
+        deferHostEffect: (effect) => tubEffects.push(effect)
+      });
+      expect(enterTub.op).toBe("result");
+      if (enterTub.op === "result") expect(enterTub.result).toMatchObject({ room: "the_hot_tub", look_deferred: true });
+      expect(tubEffects.map((effect) => effect.kind)).toEqual(["actor_presence", "actor_presence", "move_object"]);
+      await home.applyDeferredHostEffects(tubEffects);
+      expect(home.hasPresence(actor, "the_deck")).toBe(false);
+      expect(home.hasPresence(actor, "the_hot_tub")).toBe(true);
+      expect(roomB.getProp("the_deck", "subscribers")).not.toContain(actor);
+      expect(roomB.getProp("the_hot_tub", "subscribers")).toContain(actor);
+      expect(roomB.object("the_deck").contents.has(actor)).toBe(false);
+      expect(roomB.object("the_hot_tub").contents.has(actor)).toBe(true);
+
+      const tubOutEffects: DeferredHostEffect[] = [];
+      const tubOut = await roomB.directCall("tub-out", actor, "the_hot_tub", "out", [], {
+        deferHostEffect: (effect) => tubOutEffects.push(effect)
+      });
+      expect(tubOut.op).toBe("result");
+      await home.applyDeferredHostEffects(tubOutEffects);
+      expect(home.hasPresence(actor, "the_deck")).toBe(true);
+      expect(home.hasPresence(actor, "the_hot_tub")).toBe(false);
+      expect(roomB.getProp("the_deck", "subscribers")).toContain(actor);
+      expect(roomB.getProp("the_hot_tub", "subscribers")).not.toContain(actor);
+
+      const westEffects: DeferredHostEffect[] = [];
+      const west = await roomB.directCall("walk-west", actor, "the_deck", "west", [], {
+        deferHostEffect: (effect) => westEffects.push(effect)
+      });
       expect(west.op).toBe("result");
       if (west.op === "result") {
         expect(west.result).toMatchObject({ room: "the_chatroom", look_deferred: true });
       }
+      expect(westEffects.map((effect) => effect.kind)).toEqual(["actor_presence", "actor_presence", "space_subscriber", "move_object"]);
+      await home.applyDeferredHostEffects(westEffects);
       expect(roomBBridge.contentsCalls.get("the_chatroom") ?? 0).toBe(0);
       expect(home.object(actor).location).toBe("the_chatroom");
       expect(home.hasPresence(actor, "the_chatroom")).toBe(true);

@@ -207,14 +207,17 @@ Native handlers and host primitives are held to the same rule. They must not
 hide synchronous callbacks behind "convenience" helpers. If a helper would call
 back into the origin host, return a delta or schedule a later message instead.
 
-Room movement is the canonical UI-facing example. If a direct exit call moves
-an actor to a room on another host, the source host records presence/move
-deltas and emits departure/arrival observations, but it does not synchronously
-compose the destination room's full `look` output. The result carries
-`look_deferred: true`; the client or agent asks the destination room for
-`:look()` in a separate direct call. This keeps LambdaCore-style room-generated
-output while avoiding source-host fanout through destination contents during an
-open cross-host behavior turn.
+Room movement is the canonical UI-facing example, but the host protocol does
+not know about rooms. Chat woocode follows the LambdaCore pattern: the exit verb
+orchestrates movement, the source room emits the departure through
+`observe_to_space(source_room, ...)`, and the destination room emits arrival
+through `observe_to_space(destination_room, ...)`. If those calls require actor
+presence or object-location writes on another host, the runtime returns generic
+deferred effects (`actor_presence`, `space_subscriber`, `move_object`) to the
+origin host and applies them after the open cross-host behavior turn unwinds.
+The result carries `look_deferred: true`; the client or agent asks the
+destination room for `:look()` in a separate direct call so destination-room
+composition runs on the destination host.
 
 #### 3.5.6 Observability and conformance
 

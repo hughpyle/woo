@@ -508,9 +508,9 @@ describe("local catalogs", () => {
     const enterRoom = await world.directCall("enter-lr", session.actor, "the_chatroom", "enter", []);
     expect(enterRoom.op).toBe("result");
     if (enterRoom.op === "result") {
-      expect(enterRoom.observations.map((obs) => obs.type)).toEqual(["entered", "looked"]);
+      expect(enterRoom.result).toMatchObject({ room: "the_chatroom", look_deferred: true });
+      expect(enterRoom.observations.map((obs) => obs.type)).toEqual(["entered"]);
       expect(enterRoom.observationAudiences?.[0]).not.toContain(session.actor);
-      expect(enterRoom.observationAudiences?.[1]).toEqual([session.actor]);
     }
     await world.directCall("enter-lr-watcher", watcher.actor, "the_chatroom", "enter", []);
     expect(world.hasPresence(session.actor, "the_chatroom")).toBe(true);
@@ -554,15 +554,13 @@ describe("local catalogs", () => {
     const goDeck = await world.directCall("se-deck", session.actor, "the_chatroom", "southeast", []);
     expect(goDeck.op).toBe("result");
     if (goDeck.op === "result") {
-      expect(goDeck.result).toMatchObject({ room: "the_deck", from: "the_chatroom" });
+      expect(goDeck.result).toMatchObject({ room: "the_deck", from: "the_chatroom", look_deferred: true });
       expect(goDeck.observations).toMatchObject([
         { type: "left", source: "the_chatroom", actor: session.actor, destination: "the_deck", text: `${world.object(session.actor).name} goes southeast.` },
-        { type: "entered", source: "the_deck", actor: session.actor, origin: "the_chatroom", text: `${world.object(session.actor).name} has arrived.` },
-        { type: "looked", source: "the_deck", actor: session.actor, to: session.actor }
+        { type: "entered", source: "the_deck", actor: session.actor, origin: "the_chatroom", text: `${world.object(session.actor).name} has arrived.` }
       ]);
       expect(goDeck.observationAudiences?.[0]).toContain(watcher.actor);
       expect(goDeck.observationAudiences?.[0]).not.toContain(session.actor);
-      expect(goDeck.observationAudiences?.[2]).toEqual([session.actor]);
     }
     expect(world.hasPresence(session.actor, "the_chatroom")).toBe(false);
     expect(world.hasPresence(session.actor, "the_deck")).toBe(true);
@@ -769,8 +767,8 @@ describe("local catalogs", () => {
     installLocalCatalogs(world, ["chat", "taskspace"]);
 
     const migratedEnter = world.object("$conversational").verbs.get("enter");
-    expect(migratedEnter?.kind).toBe("native");
-    if (migratedEnter?.kind === "native") expect(migratedEnter.native).toBe("room_enter");
+    expect(migratedEnter?.kind).toBe("bytecode");
+    expect(migratedEnter?.source).toContain("set_presence");
     const migratedLook = world.object("$conversational").verbs.get("look");
     expect(migratedLook?.kind).toBe("bytecode");
     expect(migratedLook?.source).toContain("look_self");

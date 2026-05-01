@@ -62,6 +62,10 @@ class LocalHostBridge implements HostBridge {
     return await this.worldFor(objRef).getPropChecked(progr, objRef, name);
   }
 
+  async location(objRef: ObjRef): Promise<ObjRef | null> {
+    return this.worldFor(objRef).object(objRef).location;
+  }
+
   async dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue> {
     const remote = this.worldFor(startAt ?? target);
     return await remote.hostDispatch({ ...ctx, world: remote }, target, verbName, args, startAt);
@@ -612,7 +616,11 @@ describe("woo core", () => {
 
     expect(entered.op).toBe("result");
     if (entered.op !== "result") return;
-    const looked = entered.observations.find((obs) => obs.type === "looked") as Record<string, any> | undefined;
+    expect(entered.result).toMatchObject({ room: "the_chatroom", look_deferred: true });
+    const look = await cluster.directCall("host-chat-look", session.actor, "the_chatroom", "look", []);
+    expect(look.op).toBe("result");
+    if (look.op !== "result") return;
+    const looked = look.observations.find((obs) => obs.type === "looked") as Record<string, any> | undefined;
     expect(looked?.text).toContain("Dubspace");
     expect(looked?.look?.contents?.map((item: Record<string, string>) => item.id)).toEqual(expect.arrayContaining(["the_lamp", "the_mug", "the_dubspace"]));
   });

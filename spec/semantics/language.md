@@ -78,6 +78,7 @@ let input = read(player);
 observe(event);
 emit(target, event);
 observe_to_space(space, event);
+location(obj);
 ```
 
 `observe(event)` records an observation on the current invocation route. Inside a
@@ -86,6 +87,8 @@ only. `emit(target, event)` records the same event with an explicit delivery
 target. `observe_to_space(space, event)` is the same observation operation with
 delivery audience taken from `space`; catalog objects use it for room-visible
 activity when the emitting object is a mounted space on another host.
+`location(obj)` returns the object's current container without treating
+`location` as a user-defined property.
 
 ### 7.3 Expressions
 

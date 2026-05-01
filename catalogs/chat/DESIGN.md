@@ -59,7 +59,7 @@ A feature object (per [features.md](../../spec/semantics/features.md)) carrying 
 | `:tell(recipient, text)` | obj, str | Directed message; emits `told {from: actor, to: recipient, text}` to recipient only. |
 | `:look()` rxd | — | Thin wrapper over `this:look_self()`. Room composition is generic `$space` behavior: it returns `{description, present_actors, contents}`, emits a private `looked` observation to the looker, and lists contained objects as `{id, title, description}` using each item's `:title()` and actor-readable description. |
 | `:who()` rxd | — | Returns the present-actor list and emits a private `who` observation to the caller. |
-| direction verbs | — | Room exits in the LambdaCore style: `north`, `se`, `east`, `out`, etc. Each looks up the room's `exits` map and moves the actor. Local-host exits may emit the private destination `looked` output inline; cross-host exits return `look_deferred: true` and the actor/client should issue `:look()` as the next direct call so destination-room composition runs on the destination host in a separate turn. |
+| direction verbs | — | Room exits in the LambdaCore style: `north`, `se`, `east`, `out`, etc. Each delegates to `:go(exit)`, which looks up the room's `exits` map, moves the actor, asks the source room to emit `left`, asks the destination room to emit `entered`, and returns `look_deferred: true`. The actor/client then issues `:look()` as the next direct call so the destination room composes its own view in a separate turn. |
 | `:go(exit)` | str | Convenience wrapper around the same exit table for non-MOO clients. |
 | `:take(object)` / `:drop(object)` | str | Moves carryable objects between the room and the actor's inventory; fixed furnishings reject with `E_PERM`. |
 | `:enter(actor?)` | obj? | Adds actor (defaults `actor`) to subscribers and to its `presence_in`; when the room is itself contained in another room, `enter tub` resolves the contained room object and invokes this verb on it. Emits room-originated `entered` to the entered room and, when moving from another room, room-originated `left` to the old room. |
@@ -70,7 +70,12 @@ A feature object (per [features.md](../../spec/semantics/features.md)) carrying 
 
 Most `$conversational` verbs remain portable source. `$match` and the command planner use trusted local native implementation hints until the DSL grows enough string/pattern primitives to express the parser cleanly as catalog code. Public tap installs ignore those hints and still compile the source fallback.
 
-The same is temporarily true for the room mechanics (`:enter`, direction verbs, `:take`, `:drop`). They are catalog verbs invoked through ordinary dispatch, but their local catalog implementation uses trusted native hints because the current DSL cannot yet express the full match/exit/move behavior cleanly. This is a bootstrap shortcut, not the target shape: installable game mechanics should become authored source as the compiler grows.
+Room movement (`:enter`, `:leave`, direction verbs, and `:go`) is source
+woocode. The core only supplies generic primitives: `set_presence`,
+`move`, `observe_to_space`, and `location`. Carrying objects with `:take` and
+`:drop` still uses native hints for the object matcher and portable checks;
+that remains catalog behavior behind ordinary dispatch, not a room primitive in
+the host protocol.
 
 Inside each verb body: `this` = the consumer space (the room being talked in), `definer` = the `$conversational` feature, `progr` = the feature's owner. Observations are emitted to `this.subscribers`, not to the feature's own subscribers (which would be empty).
 
