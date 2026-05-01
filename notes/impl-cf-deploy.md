@@ -175,6 +175,8 @@ Verb-flag persistence fix (storage-layer bug, both backends) — landed:
 
 In dependency order:
 
+- **Object-locality containment RPCs**: chat now has three self-hosted rooms locally, but `take`/`drop` and player movement still rely on the in-process `moveObject` path. The CF target needs the §R1.7 move primitive: object-owner `location` write plus old/new container `contents` mirror RPCs, with `look` enriching foreign contents by remote `:title`.
+- **Room-count/cost tracking**: the chat catalog currently seeds three self-hosted room instances (`the_chatroom`, `the_deck`, `the_hot_tub`). DOs hibernate cheaply, but every new self-hosted room is another possible storage/alarm/socket locus. Keep this visible as demo catalogs grow beyond first-light.
 - **Alarms** for parked tasks. Replaces the 250ms `setInterval` only on the CF target; local dev keeps the poll. (WS hibernation landed in Phase 2.2; alarms are the remaining piece of original Phase 4.)
 - **SSE stream** (`/api/objects/{id}/stream`) on the Worker. Returns 501 placeholder; browser clients use the WebSocket path. SSE matters for HTTP-only agent integrations.
 - **Authoring REST endpoints** in the Worker: `/api/compile`, `/api/install`, `/api/property`, `/api/property/value`, and `/api/authoring/objects/{create,move,chparent}`. The IDE tab can read object descriptions but cannot author verbs or object lifecycle changes against the deployed world. dev-server has the Node implementations; needs Web-standard ports.

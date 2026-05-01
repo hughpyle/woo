@@ -381,6 +381,109 @@ describe("local catalogs", () => {
     }
   });
 
+  it("supports a small multi-room chat world with stable carryable placement", async () => {
+    const world = createWorld();
+    const session = world.auth("guest:room-walk");
+    const watcher = world.auth("guest:room-walk-watcher");
+
+    expect(world.objects.has("the_deck")).toBe(true);
+    expect(world.objects.has("the_hot_tub")).toBe(true);
+    expect(world.getProp("the_chatroom", "host_placement")).toBe("self");
+    expect(world.getProp("the_deck", "host_placement")).toBe("self");
+    expect(world.getProp("the_hot_tub", "host_placement")).toBe("self");
+    expect(world.objectRoutes()).toEqual(expect.arrayContaining([
+      { id: "the_chatroom", host: "the_chatroom", anchor: null },
+      { id: "the_deck", host: "the_deck", anchor: null },
+      { id: "the_hot_tub", host: "the_hot_tub", anchor: null }
+    ]));
+    expect(world.objectRoutes().find((route) => route.id === "the_lamp")).toBeUndefined();
+
+    const enterRoom = await world.directCall("enter-lr", session.actor, "the_chatroom", "enter", []);
+    expect(enterRoom.op).toBe("result");
+    if (enterRoom.op === "result") {
+      expect(enterRoom.observations.map((obs) => obs.type)).toEqual(["entered", "looked"]);
+      expect(enterRoom.observationAudiences?.[0]).not.toContain(session.actor);
+      expect(enterRoom.observationAudiences?.[1]).toEqual([session.actor]);
+    }
+    await world.directCall("enter-lr-watcher", watcher.actor, "the_chatroom", "enter", []);
+    expect(world.hasPresence(session.actor, "the_chatroom")).toBe(true);
+    expect(world.object(session.actor).location).toBe("the_chatroom");
+
+    const look = await world.directCall("look-lr", session.actor, "the_chatroom", "look", []);
+    expect(look.op).toBe("result");
+    if (look.op === "result") {
+      const room = look.result as { contents: Array<{ id: string; title: string }> };
+      expect(room.contents.map((item) => item.id)).toEqual(expect.arrayContaining(["the_couch", "the_lamp", "the_mug", "the_cockatoo"]));
+      expect(room.contents.map((item) => item.id)).not.toContain(session.actor);
+    }
+
+    const takePlan = await world.directCall("plan-take-lamp", session.actor, "the_chatroom", "command_plan", ["take lamp"]);
+    expect(takePlan.op).toBe("result");
+    if (takePlan.op === "result") {
+      expect(takePlan.result).toMatchObject({ ok: true, route: "direct", target: "the_chatroom", verb: "take", args: ["lamp"] });
+    }
+
+    const takeLamp = await world.directCall("take-lamp", session.actor, "the_chatroom", "take", ["lamp"]);
+    expect(takeLamp.op).toBe("result");
+    expect(world.object("the_lamp").location).toBe(session.actor);
+    expect(world.objectRoutes().find((route) => route.id === "the_lamp")).toBeUndefined();
+
+    const takeCouch = await world.directCall("take-couch", session.actor, "the_chatroom", "take", ["couch"]);
+    expect(takeCouch.op).toBe("error");
+    if (takeCouch.op === "error") expect(takeCouch.error.code).toBe("E_PERM");
+    expect(world.object("the_couch").location).toBe("the_chatroom");
+
+    const blockedSouth = await world.directCall("south-window", session.actor, "the_chatroom", "south", []);
+    expect(blockedSouth.op).toBe("result");
+    if (blockedSouth.op === "result") expect(String(blockedSouth.result)).toMatch(/plate-glass/);
+    expect(world.object(session.actor).location).toBe("the_chatroom");
+
+    const goPlan = await world.directCall("plan-se-deck", session.actor, "the_chatroom", "command_plan", ["se"]);
+    expect(goPlan.op).toBe("result");
+    if (goPlan.op === "result") {
+      expect(goPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_chatroom", verb: "southeast", args: [] });
+    }
+
+    const goDeck = await world.directCall("se-deck", session.actor, "the_chatroom", "southeast", []);
+    expect(goDeck.op).toBe("result");
+    if (goDeck.op === "result") {
+      expect(goDeck.result).toMatchObject({ room: "the_deck", from: "the_chatroom" });
+      expect(goDeck.observations).toMatchObject([
+        { type: "left", source: "the_chatroom", actor: session.actor, destination: "the_deck", text: `${world.object(session.actor).name} goes southeast.` },
+        { type: "entered", source: "the_deck", actor: session.actor, origin: "the_chatroom", text: `${world.object(session.actor).name} has arrived.` },
+        { type: "looked", source: "the_deck", actor: session.actor, to: session.actor }
+      ]);
+      expect(goDeck.observationAudiences?.[0]).toContain(watcher.actor);
+      expect(goDeck.observationAudiences?.[0]).not.toContain(session.actor);
+      expect(goDeck.observationAudiences?.[2]).toEqual([session.actor]);
+    }
+    expect(world.hasPresence(session.actor, "the_chatroom")).toBe(false);
+    expect(world.hasPresence(session.actor, "the_deck")).toBe(true);
+    expect(world.object(session.actor).location).toBe("the_deck");
+
+    const enterTubPlan = await world.directCall("plan-enter-tub", session.actor, "the_deck", "command_plan", ["enter tub"]);
+    expect(enterTubPlan.op).toBe("result");
+    if (enterTubPlan.op === "result") {
+      expect(enterTubPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_hot_tub", verb: "enter", args: [] });
+    }
+
+    const takeTowel = await world.directCall("take-towel", session.actor, "the_deck", "take", ["towel"]);
+    expect(takeTowel.op).toBe("result");
+    expect(world.object("the_towel").location).toBe(session.actor);
+    expect(world.objectRoutes().find((route) => route.id === "the_towel")).toBeUndefined();
+
+    const goTub = await world.directCall("enter-hot-tub", session.actor, "the_hot_tub", "enter", []);
+    expect(goTub.op).toBe("result");
+    expect(world.hasPresence(session.actor, "the_hot_tub")).toBe(true);
+    expect(world.hasPresence(session.actor, "the_deck")).toBe(false);
+    expect(world.object(session.actor).location).toBe("the_hot_tub");
+
+    const dropTowel = await world.directCall("drop-towel", session.actor, "the_hot_tub", "drop", ["towel"]);
+    expect(dropTowel.op).toBe("result");
+    expect(world.object("the_towel").location).toBe("the_hot_tub");
+    expect(world.objectRoutes().find((route) => route.id === "the_towel")).toBeUndefined();
+  });
+
   it("migrates the cockatoo into worlds installed before it landed", async () => {
     const world = createWorld();
     // Reset to before the cockatoo migration ran
@@ -403,7 +506,7 @@ describe("local catalogs", () => {
     expect(squawk.op).toBe("result");
   });
 
-  it("migrates stale local catalog native verbs to source bytecode", async () => {
+  it("migrates stale local catalog native verbs to current catalog implementations", async () => {
     const world = createWorld();
     world.setProp("$system", "applied_migrations", []);
     const look = world.object("$conversational").verbs.get("look")!;
@@ -457,7 +560,9 @@ describe("local catalogs", () => {
 
     installLocalCatalogs(world, ["chat", "taskspace"]);
 
-    expect(world.object("$conversational").verbs.get("enter")?.kind).toBe("bytecode");
+    const migratedEnter = world.object("$conversational").verbs.get("enter");
+    expect(migratedEnter?.kind).toBe("native");
+    if (migratedEnter?.kind === "native") expect(migratedEnter.native).toBe("room_enter");
     const migratedLook = world.object("$conversational").verbs.get("look");
     expect(migratedLook?.kind).toBe("bytecode");
     expect(migratedLook?.source).toContain("look_self");

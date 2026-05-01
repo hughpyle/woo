@@ -108,6 +108,16 @@ Reserved for transient hosts:
 
 One JSON object per WebSocket message. No binary frames in v1.
 
+### 17.3.1 Audience for live `event` frames
+
+Direct-call results carry a per-observation audience, computed by the runtime that emitted them. The mechanism is normative in [../semantics/events.md §12.7](../semantics/events.md#127-observation-audience-and-direct-message-routing); the wire-level shape is:
+
+- The REST/RPC `result` envelope for a direct call optionally includes `audience_actors: [actor, ...]` (the union audience for all observations) and `observation_audiences: [[actor, ...], ...]` (one entry per observation, parallel to `observations`).
+- The host that fans out to attached WebSockets uses `observation_audiences[i]` (when present) to filter the `op: "event"` push for observation `i`. If absent, it falls back to "push to anyone with presence in the audience space."
+- Directed observations (currently only `told`, per events.md §12.7.1) are routed by `to`/`from` even when `observation_audiences` is missing — this is the legacy fallback path.
+
+Browsers do not see `audience_actors` / `observation_audiences` directly; the host has already filtered. They appear in REST/RPC responses for clients that want to know who would have received each observation.
+
 ### 17.4 The `applied` push model
 
 When an actor is connected, the player host sends `applied` frames for every sequenced call applied to spaces the actor is observing — including calls the actor itself originated.
@@ -117,7 +127,7 @@ When an actor is connected, the player host sends `applied` frames for every seq
 
 There is no separate subscribe/unsubscribe frame in first-light. Membership in a space (which determines whether the host pushes its `applied` stream to a given client) is a server-side decision driven by the actor's relationship to the space — typically presence-based (the actor is in the space) or explicit ownership.
 
-If a client's connection is interrupted and reconnects, gap recovery follows the pattern in [../semantics/events.md §12.7](../semantics/events.md#127-sequenced-calls-with-gap-recovery): the client tracks the highest `seq` per space it has applied, calls `space:replay(from, limit)` to backfill, then resumes the live stream.
+If a client's connection is interrupted and reconnects, gap recovery follows the pattern in [../semantics/events.md §12.8](../semantics/events.md#128-sequenced-calls-with-gap-recovery): the client tracks the highest `seq` per space it has applied, calls `space:replay(from, limit)` to backfill, then resumes the live stream.
 
 **Idempotent retry.** The `id` field on `op: "call"` is a client-chosen correlation token. If a client retries a call with the same `id` (e.g., after a transient network failure or reconnect), the host returns the **same** `applied` frame — same `seq`, same `message`, same `observations`. No new sequence number is allocated; the call is not re-executed. This piggybacks on the host's correlation-id idempotency cache (see [hosts.md §3.4](hosts.md#34-host-rpc-invariants)), default TTL ~5 minutes. Beyond the TTL, the host has no memory of the original call and a retry would create a duplicate; clients should treat the cache as best-effort and rely on gap recovery (above) as the durable continuity mechanism.
 

@@ -155,7 +155,12 @@ async function broadcastRoutedCall(env: Env, response: Response, host: string): 
       await forwardToHost(env, WORLD_HOST, new Request(`${INTERNAL_ORIGIN}/__internal/broadcast-live-events`, {
         method: "POST",
         headers: { "content-type": "application/json; charset=utf-8" },
-        body: JSON.stringify({ audience: host, observations: body.observations })
+        body: JSON.stringify({
+          audience: host,
+          audience_actors: body.audience_actors,
+          observation_audiences: body.observation_audiences,
+          observations: body.observations
+        })
       }));
     }
   } catch {

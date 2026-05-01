@@ -143,7 +143,9 @@ test("chat controls follow room membership", async ({ page }) => {
   await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
   const actor = (await page.locator(".actor").textContent())?.trim() ?? "";
 
+  await expect(page.locator(".toolbar h1")).toHaveText("Living Room");
   await expect(page.getByRole("button", { name: "Enter" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Enter" })).toBeEnabled();
   await expect(page.locator(".chat-form")).toBeHidden();
 
   await page.getByRole("button", { name: "Enter" }).click();
@@ -169,10 +171,65 @@ test("chat controls follow room membership", async ({ page }) => {
   await expect(page.locator("[data-chat-input]")).toBeFocused();
   await expect(page.locator("[data-chat-input]")).toHaveValue("draft text");
 
+  await page.locator("[data-chat-input]").fill("se");
+  await page.locator("[data-chat-input]").press("Enter");
+  await expect(page.locator(".toolbar h1")).toHaveText("Deck", { timeout: 5_000 });
+  await expect(page.locator("[data-chat-input]")).toBeFocused();
+  await expect(page.locator(".chat-feed")).toContainText("wooden deck");
+  await expect(page.locator(".chat-feed")).not.toContainText("You go to");
+
   await page.getByRole("button", { name: "Leave" }).click();
   await expect(page.getByRole("button", { name: "Enter" })).toBeVisible();
   await expect(page.locator(".chat-form")).toBeHidden();
   await expect(page.getByRole("button", { name: "Who" })).toBeHidden();
+});
+
+test("chat room transitions broadcast through source and destination rooms", async ({ browser }) => {
+  const firstContext = await browser.newContext();
+  const secondContext = await browser.newContext();
+  try {
+    const first = await firstContext.newPage();
+    const second = await secondContext.newPage();
+
+    await Promise.all([first.goto("/"), second.goto("/")]);
+    await expect(first.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+    await expect(second.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+    const firstActor = (await first.locator(".actor").textContent())?.trim() ?? "";
+    const secondActor = (await second.locator(".actor").textContent())?.trim() ?? "";
+    const firstName = firstActor.replace(/^guest_(\d+)$/, "Guest $1");
+    const secondName = secondActor.replace(/^guest_(\d+)$/, "Guest $1");
+
+    await first.getByRole("button", { name: "Enter" }).click();
+    await expect(first.getByRole("button", { name: "Leave" })).toBeVisible();
+    await second.getByRole("button", { name: "Enter" }).click();
+    await expect(second.getByRole("button", { name: "Leave" })).toBeVisible();
+    await expect(second.locator(".presence-list")).toContainText(firstActor);
+    await expect(second.locator(".presence-list")).toContainText(secondActor);
+
+    await second.locator("[data-chat-input]").fill("se");
+    await second.locator("[data-chat-input]").press("Enter");
+    await expect(second.locator(".toolbar h1")).toHaveText("Deck", { timeout: 5_000 });
+    await expect(second.locator(".chat-feed")).toContainText("wooden deck");
+    await expect(second.locator(".chat-feed")).not.toContainText("You go to");
+    await expect(first.locator(".chat-feed")).toContainText(`${secondName} goes southeast.`);
+    await expect(first.locator(".presence-list")).not.toContainText(secondActor);
+
+    await second.locator("[data-chat-input]").fill("west");
+    await second.locator("[data-chat-input]").press("Enter");
+    await expect(second.locator(".toolbar h1")).toHaveText("Living Room", { timeout: 5_000 });
+    await expect(second.locator(".chat-feed")).toContainText("bright, open living room");
+    await expect(first.locator(".chat-feed")).toContainText(`${secondName} has arrived.`);
+    await expect(first.locator(".presence-list")).toContainText(secondActor);
+
+    await first.getByRole("button", { name: "Leave" }).click();
+    await expect(first.getByRole("button", { name: "Enter" })).toBeVisible();
+    await expect(second.locator(".chat-feed")).toContainText(`${firstName} left.`);
+    await expect(second.locator(".presence-list")).not.toContainText(firstActor);
+    await expect(second.locator(".presence-list")).toContainText(secondActor);
+  } finally {
+    await firstContext.close();
+    await secondContext.close();
+  }
 });
 
 test("taskspace supports hierarchical task workflow", async ({ page }) => {
@@ -237,6 +294,10 @@ test("REST runtime API supports auth, calls, properties, and logs", async ({ req
   expect(session.actor).toMatch(/^guest_/);
   expect(session.session).toMatch(/^session-/);
   const headers = { Authorization: `Session ${session.session}` };
+  const wizardAuth = await request.post("/api/auth", { data: { token: `wizard:${process.env.WOO_INITIAL_WIZARD_TOKEN ?? "e2e-wizard"}` } });
+  expect(wizardAuth.ok()).toBe(true);
+  const wizardSession = await wizardAuth.json();
+  const wizardHeaders = { Authorization: `Session ${wizardSession.session}` };
 
   const describe = await request.get("/api/objects/the_taskspace", { headers });
   expect(describe.ok()).toBe(true);
@@ -252,6 +313,7 @@ test("REST runtime API supports auth, calls, properties, and logs", async ({ req
 
   const privateName = `private_rest_${suffix}`;
   const definePrivate = await request.post("/api/property", {
+    headers: wizardHeaders,
     data: {
       object: "the_taskspace",
       name: privateName,

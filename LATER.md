@@ -10,9 +10,11 @@ The sections below distinguish three flavors of pending item:
 
 ## random stuff to do
 
-- multiple rooms, and furniture and exits
+- ~~multiple rooms, and furniture and exits~~ — first chat slice landed with Living Room, Deck, Hot Tub, exits, fixed furniture, and portables.
 - migrate `the_dubspace`, `the_taskspace`, and `the_chatroom` manifests to declare `instances_self_host: true` on `$dubspace` / `$taskspace` / `$chatroom` (or `$room`) at the class, instead of stamping `host_placement: "self"` on each instance. Wire `create()` to compute `host_placement` from the parent chain. Keep `host_placement` as the runtime projection. Manifest-migration story per `spec/semantics/objects.md §4.2`.
 - mid-RPC origin-host crash drops the awaiting task: the v1 `awaiting_call` removal trades a real durability story for simplicity (`spec/semantics/tasks.md §16.3`). If a verb does many cross-host RPCs and the origin host evicts mid-flight, the in-memory task is lost. Revisit if the workload makes this hurt.
+- native demo mechanics are accumulating in `WooWorld.registerNativeHandlers()` (`room_enter`, `room_exit`, `room_take`, `room_drop`, command parsing, match helpers). Bound this explicitly: native is acceptable for bootstrap/core host primitives and temporary compiler gaps; installable game behavior should migrate to authored DSL as soon as the language can express it. The IDE currently sees only source stubs for these verbs.
+- cross-host containment is not implemented yet. `room_take`/`room_drop` still call the local `moveObject`, which mutates whichever in-memory object sets are present on that host. The spec requires object-owner `location` writes plus old/new container `contents` mirror RPCs; add this before treating chat take/drop as a CF locality proof.
 
 ## structure
 
@@ -44,7 +46,8 @@ The sections below distinguish three flavors of pending item:
 - ~~minimal authoring on-ramp~~ — first draft in `spec/authoring/minimal-ide.md`
 - broader authoring system: schema editor, history/replay viewer, version/rollback UI, package import/export
 - woo-flavoured rewrite of [yduj's duck tutorial](https://www.hayseed.net/MOO/yduj-duck-tutorial.text) — the canonical "build your first verb on a duck" walkthrough, ported to woo's DSL, dispatch model, and authoring surface. Aimed at first-time programmers (the original audience), not engineers porting from MOO.
-- chat UI: surface room *contents* (objects with `location == this`) and per-object verb discovery so a browser user can find e.g. `the_cockatoo:squawk()` without prior knowledge. Currently only `present_actors` is rendered; the cockatoo is in the room but invisible.
+- chat UI: improve per-object discovery so a browser user can find e.g. `the_cockatoo:squawk()` without prior knowledge. `look` now exposes room contents, but there is still no object selection/verb affordance.
+- cockatoo mobility: it is deliberately anchored in the Living Room today, so it disappears from most of the three-room path. Later, make it roam/roost via a presence-gated scheduled verb once fork/scheduler authoring is comfortable.
 
 ## deferred specs (placeholder docs to write)
 

@@ -22,8 +22,42 @@
     {
       "local_name": "$chatroom",
       "parent": "$space",
-      "description": "Standalone chat room class whose behavior comes from $conversational.",
-      "properties": [],
+      "description": "Standalone chat room class. Conversational behavior comes from $conversational; room-local verbs provide simple exits and carryable object movement.",
+      "properties": [
+        { "name": "exits", "type": "map<str,obj>", "default": {}, "perms": "rw" },
+        { "name": "blocked_exits", "type": "map<str,str>", "default": {}, "perms": "rw" }
+      ],
+      "verbs": [
+        { "name": "north", "aliases": ["n"], "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :north() rxd { raise { code: \"E_UNSUPPORTED\", message: \"room exits require the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_exit" } },
+        { "name": "northeast", "aliases": ["ne"], "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :northeast() rxd { raise { code: \"E_UNSUPPORTED\", message: \"room exits require the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_exit" } },
+        { "name": "east", "aliases": ["e"], "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :east() rxd { raise { code: \"E_UNSUPPORTED\", message: \"room exits require the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_exit" } },
+        { "name": "southeast", "aliases": ["se"], "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :southeast() rxd { raise { code: \"E_UNSUPPORTED\", message: \"room exits require the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_exit" } },
+        { "name": "south", "aliases": ["s"], "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :south() rxd { raise { code: \"E_UNSUPPORTED\", message: \"room exits require the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_exit" } },
+        { "name": "southwest", "aliases": ["sw"], "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :southwest() rxd { raise { code: \"E_UNSUPPORTED\", message: \"room exits require the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_exit" } },
+        { "name": "west", "aliases": ["w"], "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :west() rxd { raise { code: \"E_UNSUPPORTED\", message: \"room exits require the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_exit" } },
+        { "name": "northwest", "aliases": ["nw"], "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :northwest() rxd { raise { code: \"E_UNSUPPORTED\", message: \"room exits require the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_exit" } },
+        { "name": "out", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": [] }, "source": "verb :out() rxd { raise { code: \"E_UNSUPPORTED\", message: \"room exits require the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_exit" } },
+        { "name": "go", "aliases": ["g@o"], "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["exit"] }, "source": "verb :go(exit) rxd { raise { code: \"E_UNSUPPORTED\", message: \"room movement requires the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_go" } },
+        { "name": "take", "aliases": ["t@ake", "get"], "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["object"] }, "source": "verb :take(object) rxd { raise { code: \"E_UNSUPPORTED\", message: \"room take requires the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_take" } },
+        { "name": "drop", "aliases": ["d@rop"], "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["object"] }, "source": "verb :drop(object) rxd { raise { code: \"E_UNSUPPORTED\", message: \"room drop requires the trusted local room handler\" }; }", "implementation": { "kind": "native", "handler": "room_drop" } }
+      ]
+    },
+    {
+      "local_name": "$portable",
+      "parent": "$thing",
+      "description": "Carryable room object. Instances can move between room contents and actor inventory without changing host placement.",
+      "properties": [
+        { "name": "portable", "type": "bool", "default": true, "perms": "r" }
+      ],
+      "verbs": []
+    },
+    {
+      "local_name": "$furniture",
+      "parent": "$thing",
+      "description": "Fixed room furnishing. It appears in room look output but is not carryable.",
+      "properties": [
+        { "name": "portable", "type": "bool", "default": false, "perms": "r" }
+      ],
       "verbs": []
     },
     {
@@ -80,9 +114,9 @@
         { "name": "self", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["text"] }, "source": "verb :self(text) rxd { if (!text) { raise { code: \"E_INVARG\", message: \"self requires text\" }; } observe({ type: \"self_pointed\", actor: actor, text: text, ts: now() }); return true; }" },
         { "name": "tell", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": ["recipient", "text"] }, "source": "verb :tell(recipient, text) rxd { if (!text) { raise { code: \"E_INVARG\", message: \"tell requires text\" }; } observe({ type: \"told\", from: actor, to: recipient, text: text, ts: now() }); return true; }" },
         { "name": "look", "aliases": ["l@ook"], "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :look() rxd { return this:look_self(); }" },
-        { "name": "who", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :who() rxd { return this.subscribers; }" },
-        { "name": "enter", "perms": "rxd", "direct_callable": true, "skip_presence_check": true, "arg_spec": { "args": ["actor?"] }, "source": "verb :enter(who) rxd { let entrant = actor; if (!(entrant in this.subscribers)) { this.subscribers = this.subscribers + [entrant]; } if (!(this in entrant.presence_in)) { entrant.presence_in = entrant.presence_in + [this]; } observe({ type: \"entered\", actor: entrant, ts: now() }); return this.subscribers; }" },
-        { "name": "leave", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["actor?"] }, "source": "verb :leave(who) rxd { let leaver = actor; let subscribers = []; for item in this.subscribers { if (item != leaver) { subscribers = subscribers + [item]; } } this.subscribers = subscribers; let spaces = []; for item in leaver.presence_in { if (item != this) { spaces = spaces + [item]; } } leaver.presence_in = spaces; observe({ type: \"left\", actor: leaver, ts: now() }); return this.subscribers; }" },
+        { "name": "who", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :who() rxd { observe({ type: \"who\", actor: actor, to: actor, room: this, present_actors: this.subscribers, text: \"Present.\", ts: now() }); return this.subscribers; }", "implementation": { "kind": "native", "handler": "room_who" } },
+        { "name": "enter", "perms": "rxd", "direct_callable": true, "skip_presence_check": true, "arg_spec": { "args": ["actor?"] }, "source": "verb :enter(who) rxd { let entrant = actor; if (!(entrant in this.subscribers)) { this.subscribers = this.subscribers + [entrant]; } if (!(this in entrant.presence_in)) { entrant.presence_in = entrant.presence_in + [this]; } observe({ type: \"entered\", actor: entrant, room: this, text: entrant.name + \" entered.\", ts: now() }); return this.subscribers; }", "implementation": { "kind": "native", "handler": "room_enter" } },
+        { "name": "leave", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["actor?"] }, "source": "verb :leave(who) rxd { let leaver = actor; let subscribers = []; for item in this.subscribers { if (item != leaver) { subscribers = subscribers + [item]; } } this.subscribers = subscribers; let spaces = []; for item in leaver.presence_in { if (item != this) { spaces = spaces + [item]; } } leaver.presence_in = spaces; observe({ type: \"left\", actor: leaver, room: this, text: leaver.name + \" left.\", ts: now() }); return this.subscribers; }", "implementation": { "kind": "native", "handler": "room_leave" } },
         { "name": "huh", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["text", "reason?"] }, "source": "verb :huh(text, reason) rxd { observe({ type: \"huh\", actor: actor, text: text, reason: reason, ts: now() }); return false; }" },
         { "name": "command_plan", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["text"] }, "source": "verb :command_plan(text) rxd { return { ok: true, route: \"direct\", target: this, verb: \"say\", args: [text] }; }", "implementation": { "kind": "native", "handler": "chat_command_plan" } },
         { "name": "command", "perms": "rxd", "direct_callable": true, "arg_spec": { "args": ["text"] }, "source": "verb :command(text) rxd { return this:say(text); }", "implementation": { "kind": "native", "handler": "chat_command" } }
@@ -98,9 +132,14 @@
     { "on": "$conversational", "type": "quoted", "shape": { "source": "obj", "actor": "obj", "text": "str" } },
     { "on": "$conversational", "type": "self_pointed", "shape": { "source": "obj", "actor": "obj", "text": "str" } },
     { "on": "$conversational", "type": "told", "shape": { "source": "obj", "from": "obj", "to": "obj", "text": "str" } },
-    { "on": "$conversational", "type": "entered", "shape": { "source": "obj", "actor": "obj" } },
-    { "on": "$conversational", "type": "left", "shape": { "source": "obj", "actor": "obj" } },
+    { "on": "$conversational", "type": "entered", "shape": { "source": "obj", "actor": "obj", "room": "obj", "origin": "obj?", "exit": "str?", "text": "str" } },
+    { "on": "$conversational", "type": "left", "shape": { "source": "obj", "actor": "obj", "room": "obj", "destination": "obj?", "exit": "str?", "text": "str" } },
+    { "on": "$conversational", "type": "looked", "shape": { "source": "obj", "actor": "obj", "to": "obj", "room": "obj", "text": "str", "look": "map" } },
+    { "on": "$conversational", "type": "who", "shape": { "source": "obj", "actor": "obj", "to": "obj", "room": "obj", "present_actors": "list<obj>", "text": "str" } },
     { "on": "$conversational", "type": "huh", "shape": { "source": "obj", "actor": "obj", "text": "str", "suggestion": "str?" } },
+    { "on": "$chatroom", "type": "blocked_exit", "shape": { "source": "obj", "actor": "obj", "exit": "str", "text": "str" } },
+    { "on": "$chatroom", "type": "taken", "shape": { "source": "obj", "actor": "obj", "item": "obj", "text": "str" } },
+    { "on": "$chatroom", "type": "dropped", "shape": { "source": "obj", "actor": "obj", "item": "obj", "room": "obj", "text": "str" } },
     { "on": "$cockatoo", "type": "cockatoo_seen", "shape": { "source": "obj", "actor": "obj", "mood": "str" } },
     { "on": "$cockatoo", "type": "cockatoo_squawk", "shape": { "source": "obj", "actor": "obj", "text": "str" } },
     { "on": "$cockatoo", "type": "cockatoo_muffled", "shape": { "source": "obj", "actor": "obj" } },
@@ -112,8 +151,16 @@
     { "on": "$cockatoo", "type": "cockatoo_ungagged", "shape": { "source": "obj", "actor": "obj" } }
   ],
   "seed_hooks": [
-    { "kind": "create_instance", "class": "$chatroom", "as": "the_chatroom", "name": "Room", "description": "The first runnable chat room. It is a live lobby where connected actors can speak, emote, tell, look, and see who is present through the $conversational feature.", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0 } },
+    { "kind": "create_instance", "class": "$chatroom", "as": "the_chatroom", "name": "Living Room", "description": "A bright, open living room with a rough fireplace, bookcases on two walls, and broad windows looking south. A sliding glass door leads southeast onto a wooden deck.", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0, "host_placement": "self", "aliases": ["living room", "lr"], "exits": { "southeast": "the_deck", "se": "the_deck", "deck": "the_deck", "outside": "the_deck", "out": "the_deck" }, "blocked_exits": { "south": "Surely you don't really want to try walking through the plate-glass windows, especially with a sliding glass door nearby." } } },
     { "kind": "attach_feature", "consumer": "the_chatroom", "feature": "$conversational" },
-    { "kind": "create_instance", "class": "$cockatoo", "as": "the_cockatoo", "name": "Cockatoo", "description": "A sulphur-crested cockatoo sitting in a cage on top of the mantelpiece. Inside the cage are a few bird-toys, a mirror, and a tray for its food and water. (Cheap imitation of LambdaMOO #1479; aliases there: cockatoo, cock, raven, bird, cuckatoo, duck.)", "anchor": "the_chatroom", "location": "the_chatroom", "properties": { "aliases": ["cockatoo", "cock", "raven", "bird", "cuckatoo", "duck"] } }
+    { "kind": "create_instance", "class": "$chatroom", "as": "the_deck", "name": "Deck", "description": "A wooden deck behind the house, facing south across the pool toward the gardens. The living room is west through the glass door, and a large hot tub waits at the east end.", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0, "host_placement": "self", "aliases": ["deck", "wooden deck"], "exits": { "west": "the_chatroom", "w": "the_chatroom", "living room": "the_chatroom", "lr": "the_chatroom", "inside": "the_chatroom", "in": "the_chatroom", "east": "the_hot_tub", "e": "the_hot_tub", "hot tub": "the_hot_tub", "tub": "the_hot_tub" } } },
+    { "kind": "attach_feature", "consumer": "the_deck", "feature": "$conversational" },
+    { "kind": "create_instance", "class": "$chatroom", "as": "the_hot_tub", "name": "Hot Tub", "description": "A molded hot tub with a bench around three sides and bubbling jets running.", "location": "the_deck", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0, "host_placement": "self", "aliases": ["hot tub", "tub"], "exits": { "west": "the_deck", "w": "the_deck", "deck": "the_deck", "out": "the_deck" } } },
+    { "kind": "attach_feature", "consumer": "the_hot_tub", "feature": "$conversational" },
+    { "kind": "create_instance", "class": "$furniture", "as": "the_couch", "name": "Couch", "description": "A low couch with worn cushions facing the mantelpiece. It is comfortable enough to sit on, but too large to carry.", "anchor": "the_chatroom", "location": "the_chatroom", "properties": { "aliases": ["couch", "sofa"] } },
+    { "kind": "create_instance", "class": "$portable", "as": "the_lamp", "name": "Brass Lamp", "description": "A small brass lamp with a warm shade. It is light enough to carry from room to room.", "location": "the_chatroom", "properties": { "aliases": ["lamp", "brass lamp"] } },
+    { "kind": "create_instance", "class": "$portable", "as": "the_towel", "name": "Deck Towel", "description": "A striped towel folded over the deck rail, dry for now and ready to be taken along.", "location": "the_deck", "properties": { "aliases": ["towel", "deck towel"] } },
+    { "kind": "create_instance", "class": "$portable", "as": "the_mug", "name": "Mug", "description": "A heavy ceramic mug with the last smell of coffee in it.", "location": "the_chatroom", "properties": { "aliases": ["mug", "coffee mug", "cup"] } },
+    { "kind": "create_instance", "class": "$cockatoo", "as": "the_cockatoo", "name": "Cockatoo", "description": "A sulphur-crested cockatoo sitting in a cage on top of the mantelpiece. Inside the cage are a few bird-toys, a mirror, and a tray for its food and water.", "anchor": "the_chatroom", "location": "the_chatroom", "properties": { "aliases": ["cockatoo", "cock", "raven", "bird", "cuckatoo", "duck"] } }
   ]
 }

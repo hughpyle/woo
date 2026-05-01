@@ -76,7 +76,44 @@ Same opcode, same emit shape, two delivery contracts — but the contract is an 
 - Handlers for live observations should be side-effect-free: no `SET_PROP` on persistent state, no `emit` of would-be-sequenced observations, no `FORK`/`SUSPEND`. Violating this leaks non-replayable mutations into persistent state — the same anti-pattern as a log-handler that mutates behind the log's back.
 - Receivers should not persist live observations. Doing so makes a non-replayable observation durable; reload won't reproduce it.
 
-### 12.7 Sequenced calls with gap recovery
+### 12.7 Observation audience and direct-message routing
+
+Live observations (from direct calls, §12.6) are not broadcast to *every* subscriber of the audience space; they're routed by an **audience set** computed per-observation by the runtime that emitted them. Wire transports (WS, REST/SSE, internal RPC fan-out) honor this set to filter their pushes; receivers don't see observations they're not in the audience for.
+
+A direct-call result carries two optional fields alongside `observations`:
+
+```
+{
+  result, observations,
+  audience_actors:        [actor, ...],     // union of all per-observation audiences
+  observation_audiences:  [[actor, ...], ...] // one entry per observation, parallel array
+}
+```
+
+Both are advisory hints to transports. If absent, a transport falls back to the original presence-based filter ("push to anyone with presence in the audience space"). If present, the transport restricts push to the listed actors.
+
+**How the audience is computed.** For each observation:
+
+1. **Self-addressed.** If the observation is `looked` or `who` and has a `to: obj` field, the audience is `[to]`. (The look's structured payload is for the looker; bystanders don't see another player's look output.)
+2. **Directed.** If the observation's `type` appears in the canonical *directed observation type set* (§12.7.1), the audience is `[to, from]` (whichever are present and are valid object refs). The `told`/`whisper`/`page` family is the v1 use.
+3. **Self-suppressing.** If the observation is `entered` or `left` and has an `actor: obj` field, the audience is everyone with presence in the source/audience space *except* that actor — the actor's own movement is already in their call result; the room broadcasts to bystanders.
+4. **Default.** Otherwise the audience is everyone with presence in the audience space (the source space if `observation.source` is a `$space` descendant, else the call's space argument).
+
+#### 12.7.1 Directed observation types (v1)
+
+The set of types treated as direct messages is **closed and explicit** in v1 — adding to it is a spec change, not a per-catalog choice:
+
+| Type | Meaning |
+|---|---|
+| `told` | Whisper / private message from one actor to another (the LambdaCore `:tell` shape). |
+
+Future additions (`whispered`, `paged`, `pm`) require a spec amendment so all transports update in lockstep. Catalogs that want directed semantics for a non-listed type today should set `to`/`from` and use the `told` type; otherwise the observation broadcasts to the audience space's full subscriber list.
+
+#### 12.7.2 Receiver behavior
+
+The `audience_actors` and `observation_audiences` fields are **filtering hints**, not authority claims. Transports use them to avoid pushing irrelevant observations; permission checks (verb-x at emit, read perms at observe) still run independently. A misbehaving runtime that omitted these fields would over-broadcast but not leak privileged data — emit-time perms already gate what gets observed in the first place.
+
+### 12.8 Sequenced calls with gap recovery
 
 The pattern an event-sourced object uses to give subscribers a totally-ordered stream they can replay over. See [space.md](space.md) for the full normative behavior of `$space:call`; this section is the *consumer-facing* sequencing pattern.
 

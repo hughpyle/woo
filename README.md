@@ -18,9 +18,9 @@ multiple DOs.
 
 Online demo: https://woo.hughpyle.workers.dev/
 
-Objects, properties and verbs, permissions, a VM runtime.  Some support
-for installing and sharing "catalogs", Git-hosted collections of objects that
-make up an application.  Websocket and REST APIs.
+Objects, properties and verbs, permissions, a self-contained VM runtime.
+Websockets, MCP tools, and REST APIs. Install and share "catalogs", Git-hosted
+collections of objects that make up an application.  
 
 Current example apps installed from the local build include: a small chat-room
 with many of the LambdaMOO chat behaviors (and a cockatoo); "Dubspace", a

@@ -13,7 +13,7 @@ This is the demo that retires the question "do feature objects pull their weight
 - Two or more actors connected to a shared room.
 - Free-text input bar; output is a chronological text feed.
 - Presence list visible.
-- MOO-like text input parsed by the room: speech forms (`"hi`, `:waves`, `/tell`, backtick directed speech), room commands (`look`, `who`), and object commands (`look cockatoo`, `teach bird "hello"`).
+- MOO-like text input parsed by the room: speech forms (`"hi`, `:waves`, `/tell`, backtick directed speech), room commands (`look`, `who`), direction verbs (`se`, `east`, `out`), and object commands (`look cockatoo`, `enter tub`, `teach bird "hello"`).
 - Enter/exit notifications when actors join or leave.
 - A "join taskspace as room" mode where the same chat client renders against `the_taskspace` instead of a standalone `$chatroom`. Same verbs, same observations.
 
@@ -26,6 +26,8 @@ The chat verbs use the **direct live interaction** pattern from [core.md §C13](
 | `:say` / `:emote` | direct | none |
 | `:tell` | direct | none — delivered only to recipient |
 | `:look` / `:who` | direct (read) | none |
+| direction verbs / `:go` | direct | actor presence/location |
+| `:take` / `:drop` | direct | object location |
 | `:enter` / `:leave` | direct | session/presence (persistent state on `$actor.presence_in` and `$space.subscribers`) |
 | `:command_plan` | direct parser | none; returns the concrete route/target/verb/args |
 | `:command` | direct dispatcher | compatibility wrapper for direct-only plans |
@@ -55,15 +57,20 @@ A feature object (per [features.md](../../spec/semantics/features.md)) carrying 
 | `:emote(text)` | str | Third-person action. Emits `emoted {actor, text}`. |
 | `:pose(text)` / `:quote(text)` / `:self(text)` | str | Small LambdaCore-flavored speech forms for `]`, `|`, and `<`. |
 | `:tell(recipient, text)` | obj, str | Directed message; emits `told {from: actor, to: recipient, text}` to recipient only. |
-| `:look()` rxd | — | Thin wrapper over `this:look_self()`. Room composition is generic `$space` behavior: it returns `{description, present_actors, contents}` and lists contained objects as `{id, title, description}` using each item's `:title()` and actor-readable description. |
-| `:who()` rxd | — | Returns the present-actor list. |
-| `:enter(actor?)` | obj? | Adds actor (defaults `actor`) to subscribers and to its `presence_in`. Emits `entered {actor}`. |
-| `:leave(actor?)` | obj? | Removes presence. Emits `left {actor}`. |
+| `:look()` rxd | — | Thin wrapper over `this:look_self()`. Room composition is generic `$space` behavior: it returns `{description, present_actors, contents}`, emits a private `looked` observation to the looker, and lists contained objects as `{id, title, description}` using each item's `:title()` and actor-readable description. |
+| `:who()` rxd | — | Returns the present-actor list and emits a private `who` observation to the caller. |
+| direction verbs | — | Room exits in the LambdaCore style: `north`, `se`, `east`, `out`, etc. Each looks up the room's `exits` map and moves the actor. |
+| `:go(exit)` | str | Convenience wrapper around the same exit table for non-MOO clients. |
+| `:take(object)` / `:drop(object)` | str | Moves carryable objects between the room and the actor's inventory; fixed furnishings reject with `E_PERM`. |
+| `:enter(actor?)` | obj? | Adds actor (defaults `actor`) to subscribers and to its `presence_in`; when the room is itself contained in another room, `enter tub` resolves the contained room object and invokes this verb on it. Emits room-originated `entered` to the entered room and, when moving from another room, room-originated `left` to the old room. |
+| `:leave(actor?)` | obj? | Removes presence and emits room-originated `left`. |
 | `:huh(text, reason?)` | str, str? | Emits a parse-failure observation. |
 | `:command_plan(text)` | str | Parses text into `{route, space?, target, verb, args, cmd}`. |
 | `:command(text)` | str | Compatibility wrapper for direct plans; richer clients should call `:command_plan` and then execute the plan. |
 
 Most `$conversational` verbs remain portable source. `$match` and the command planner use trusted local native implementation hints until the DSL grows enough string/pattern primitives to express the parser cleanly as catalog code. Public tap installs ignore those hints and still compile the source fallback.
+
+The same is temporarily true for the room mechanics (`:enter`, direction verbs, `:take`, `:drop`). They are catalog verbs invoked through ordinary dispatch, but their local catalog implementation uses trusted native hints because the current DSL cannot yet express the full match/exit/move behavior cleanly. This is a bootstrap shortcut, not the target shape: installable game mechanics should become authored source as the compiler grows.
 
 Inside each verb body: `this` = the consumer space (the room being talked in), `definer` = the `$conversational` feature, `progr` = the feature's owner. Observations are emitted to `this.subscribers`, not to the feature's own subscribers (which would be empty).
 
@@ -80,8 +87,10 @@ declare_event $conversational "posed"   { source: obj, actor: obj, text: str };
 declare_event $conversational "quoted"  { source: obj, actor: obj, text: str };
 declare_event $conversational "self_pointed" { source: obj, actor: obj, text: str };
 declare_event $conversational "told"    { source: obj, from:  obj, to:   obj, text: str };
-declare_event $conversational "entered" { source: obj, actor: obj };
-declare_event $conversational "left"    { source: obj, actor: obj };
+declare_event $conversational "entered" { source: obj, actor: obj, room: obj, origin?: obj, exit?: str, text: str };
+declare_event $conversational "left"    { source: obj, actor: obj, room: obj, destination?: obj, exit?: str, text: str };
+declare_event $conversational "looked"  { source: obj, actor: obj, to: obj, room: obj, text: str, look: map };
+declare_event $conversational "who"     { source: obj, actor: obj, to: obj, room: obj, present_actors: list<obj>, text: str };
 declare_event $conversational "huh"     { source: obj, actor: obj, text: str, reason?: str };
 ```
 
@@ -92,7 +101,8 @@ declare_event $conversational "huh"     { source: obj, actor: obj, text: str, re
 | `emoted` | `{source, actor, text}` | Third-person action. |
 | `posed` / `quoted` / `self_pointed` | `{source, actor, text}` | Alternate speech forms. |
 | `told` | `{source, from, to, text}` | Delivered only to `to`. |
-| `entered` / `left` | `{source, actor}` | Presence transitions. |
+| `entered` / `left` | room-originated presence payloads | Presence transitions. These follow the LambdaCore room pattern: the room tells its own occupants, and the moving actor is excluded from the room announcement. |
+| `looked` / `who` | private payloads with `to: actor` | Room-generated output for commands whose display text should not be client-derived. |
 | `huh` | `{source, actor, text, reason?}` | Unparseable input. |
 
 Live observations flow over the wire as `op: "event"` frames ([wire.md §17.2](../../spec/protocol/wire.md#172-server--client)) or as SSE `event: event` entries; clients render them in the same chronological feed as applied frames but they are not part of `:replay` history.
@@ -107,7 +117,14 @@ $chatroom < $space
   features: [$conversational]            // attached at boot
 ```
 
-That's it. No new properties, no new verbs. The room's chat behavior comes entirely from the feature.
+The standalone demo uses `$chatroom` as a small room class, close to LambdaCore's room model:
+
+- exits are room verbs (`se`, `east`, `out`) backed by an `exits` map;
+- blocked exits are still verbs, but return text instead of moving the actor;
+- rooms may be contained in other rooms, so `enter tub` is ordinary object-command dispatch;
+- room contents are real objects, including fixed furnishings and portable things.
+
+The room's chat behavior still comes from `$conversational`; exits and carrying are room mechanics, not feature mechanics.
 
 For embedded mode, `the_taskspace` (a `$taskspace`) gets the same feature attached at boot:
 
@@ -117,9 +134,19 @@ the_taskspace.features = [$conversational]
 
 Now `the_taskspace:say("starting standup")` works. The utterance is a direct call, so the `said` observation is live-only — pushed to taskspace subscribers, separate from the taskspace's own sequenced log of task mutations.
 
+## Seeded Rooms And Things
+
+The local chat catalog seeds a tiny LambdaHouse-shaped path: `Living Room -> Deck -> Hot Tub`. The living room contains a couch, lamp, mug, and cockatoo; the deck contains the visible hot tub room and a towel. The couch is fixed furniture. The lamp, mug, and towel are portable, and moving them changes `location` without changing host placement.
+
+This is intentionally not a full LambdaCore clone. It is the smallest room/object/exits slice that proves the same object model can support MOO-like navigation and carrying before builder tools exist.
+
+The current in-memory demo proves the object model and command surface, not the distributed containment invariant. On Cloudflare, `:take` and `:drop` still need the §R1.7 contents-mirror primitive: the object's owning host updates `location`, then old/new container hosts update their `contents` caches by RPC. Until that lands, cross-host carrying is a known implementation gap.
+
 ## The cockatoo (cheap imitation of LambdaMOO #1479)
 
 `$cockatoo` lives in `the_chatroom` as a small static-feeling resident. It has a `phrases` list and `:squawk()` picks one at random via the `random(n)` builtin; `:teach(phrase)` extends the list; `:gag()` / `:ungag()` toggle a muzzle that swaps squawks for `*muffled noises*` observations. `:pluck()`, `:shake()`, `:feed()` are flavor verbs.
+
+Because it is anchored to the living room, the cockatoo is intentionally absent from the deck and hot tub. A later roaming/roosting version can make it visible across the tiny house, but that should be scheduled behavior rather than location magic.
 
 What's intentionally not (yet) here: **self-driven timer chatter**. The canonical LambdaMOO cockatoo activated and squawked on a fork loop with a random delay. Woo's runtime supports parked/forked tasks, but the DSL does not yet expose `fork(seconds) { ... }` or a `schedule(seconds, target, verb, args)` builtin. Once it does, the cockatoo will become the first useful demo of woo's parked-task system: install a watchdog verb that schedules itself, with random interval and random phrase pick. Until then, squawking is actor-driven only.
 
@@ -127,7 +154,7 @@ What's intentionally not (yet) here: **self-driven timer chatter**. The canonica
 
 **Determinism if the wake path is sequenced.** If the scheduled wake fires through `the_chatroom`'s sequenced log so other clients see the same squawk on replay, calling `random()` *inside* the resumed handler breaks replay determinism (per [space.md](../../spec/semantics/space.md)). Capture randomness at *schedule time* — the scheduler picks the next phrase and the next interval and passes both as args/body to the scheduled message — rather than re-rolling on the wake. That mirrors the LambdaMOO `fork` pattern, where the next-scheduled call is itself the value chosen at this tick.
 
-**UI discovery still partial.** As of this build `$conversational:look()` delegates to the room's generic `:look_self()`, so any REST/WS caller doing `look` sees `the_cockatoo` in the composed contents list. The chat client doesn't yet *render* that contents list — verb-discovery via `:describe()` on a selected object is still tracked at [LATER.md](../../LATER.md). Wiring the data path was the precondition; the UI change is a follow-up.
+**UI discovery still partial.** `$conversational:look()` delegates to the room's generic `:look_self()`, so REST/WS callers and the chat client see composed room contents. Verb-discovery via `:describe()` on a selected object is still tracked at [LATER.md](../../LATER.md); for now players discover object verbs by trying MOO-like text commands.
 
 ## Renderer
 
@@ -140,7 +167,8 @@ A transient browser host that:
    - `said {actor, text}` → `actor.name says, "text"`
    - `emoted {actor, text}` → `actor.name text`
    - `told {from, text}` → `from.name tells you, "text"` (only delivered to recipient)
-   - `entered/left` → `actor.name has entered/left.`
+   - `entered/left` → render the room-supplied `text`.
+   - `looked/who` → render the room-supplied `text`.
    - `huh {text}` → `I don't understand "text".`
 5. Sends free-text input as `target_room:command_plan(text)`, then executes the returned route. Direct plans use `op:"direct"`; sequenced plans use `$space:call`.
 

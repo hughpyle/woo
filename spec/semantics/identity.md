@@ -80,7 +80,7 @@ A client that loses its websocket reconnects with the same `session:<session_id>
 - Actor binding is restored.
 - Client receives a fresh `op: "session"`.
 - Server resumes pushing `applied` frames for the spaces the actor is observing.
-- Client uses gap recovery ([events.md §12.7](events.md#127-sequenced-calls-with-gap-recovery)) to backfill missed seqs per space.
+- Client uses gap recovery ([events.md §12.8](events.md#128-sequenced-calls-with-gap-recovery)) to backfill missed seqs per space.
 
 If the session has expired or its guest actor has been recycled, reconnect produces a different actor identity. The client treats this as a fresh login.
 

@@ -8,6 +8,7 @@ import { parseAutoInstallCatalogs } from "../core/local-catalogs";
 import { appliedFromLogEntry, handleRestProtocolRequest, handleWsProtocolFrame, isSpaceLike, parseWsProtocolFrame, type RestProtocolRequest } from "../core/protocol";
 import { normalizeError, type ParkedTaskRun } from "../core/world";
 import {
+  directedRecipients,
   wooError,
   type AppliedFrame,
   type DirectResultFrame,
@@ -242,23 +243,27 @@ function broadcastTaskResult(result: ParkedTaskRun): void {
 
 function broadcastLiveEvents(result: DirectResultFrame): void {
   if (!result.audience) return;
-  for (const observation of result.observations) broadcastLiveEvent({ op: "event", observation }, result.audience);
+  result.observations.forEach((observation, index) => {
+    broadcastLiveEvent({ op: "event", observation }, result.audience!, result.observationAudiences?.[index] ?? result.audienceActors);
+  });
 }
 
-function broadcastLiveEvent(frame: LiveEventFrame, audience: ObjRef): void {
+function broadcastLiveEvent(frame: LiveEventFrame, audience: ObjRef, audienceActors?: ObjRef[]): void {
   const data = JSON.stringify(frame);
-  const directedTo = typeof frame.observation.to === "string" ? frame.observation.to : null;
-  const directedFrom = typeof frame.observation.from === "string" ? frame.observation.from : null;
+  const { to: directedTo, from: directedFrom } = directedRecipients(frame.observation);
+  const audienceSet = audienceActors ? new Set(audienceActors) : null;
   for (const [ws, session] of sockets) {
     if (ws.readyState !== ws.OPEN) continue;
     if (directedTo || directedFrom) {
       if (session.actor !== directedTo && session.actor !== directedFrom) continue;
+    } else if (audienceSet) {
+      if (!audienceSet.has(session.actor)) continue;
     } else if (!world.hasPresence(session.actor, audience)) {
       continue;
     }
     ws.send(data);
   }
-  broadcastLiveEventSse(frame, audience);
+  broadcastLiveEventSse(frame, audience, audienceActors);
 }
 
 function broadcastAppliedSse(frame: AppliedFrame): void {
@@ -272,14 +277,17 @@ function broadcastAppliedSse(frame: AppliedFrame): void {
   }
 }
 
-function broadcastLiveEventSse(frame: LiveEventFrame, audience: ObjRef): void {
-  const directedTo = typeof frame.observation.to === "string" ? frame.observation.to : null;
-  const directedFrom = typeof frame.observation.from === "string" ? frame.observation.from : null;
+function broadcastLiveEventSse(frame: LiveEventFrame, audience: ObjRef, audienceActors?: ObjRef[]): void {
+  const { to: directedTo, from: directedFrom } = directedRecipients(frame.observation);
+  const audienceSet = audienceActors ? new Set(audienceActors) : null;
   for (const stream of Array.from(restStreams)) {
     if (directedTo || directedFrom) {
       if (stream.actor !== directedTo && stream.actor !== directedFrom) continue;
     } else if (stream.scope === "space") {
-      if (stream.target !== audience || !world.hasPresence(stream.actor, audience)) continue;
+      if (stream.target !== audience) continue;
+      if (audienceSet ? !audienceSet.has(stream.actor) : !world.hasPresence(stream.actor, audience)) continue;
+    } else if (audienceSet) {
+      if (!audienceSet.has(stream.actor)) continue;
     } else if (!world.hasPresence(stream.actor, audience)) {
       continue;
     }

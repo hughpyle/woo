@@ -76,7 +76,7 @@ The runtime does not enforce determinism; violations show up as replay divergenc
 
 The log is inherited from `$sequenced_log`; semantics live in [sequenced-log.md §SL2](sequenced-log.md#sl2-the-native-host-operations). Storage shape is in [reference/persistence.md](../reference/persistence.md) (`space_message` table); semantically a list indexed by seq.
 
-- **Reads:** `space:replay(from_seq, limit)` is the object-visible wrapper over the host log read operation. See [events.md §12.7](events.md#127-sequenced-calls-with-gap-recovery) for the paging pattern subscribers use.
+- **Reads:** `space:replay(from_seq, limit)` is the object-visible wrapper over the host log read operation. See [events.md §12.8](events.md#128-sequenced-calls-with-gap-recovery) for the paging pattern subscribers use.
 - **Writes:** only step 3 of `$space:call` appends — and it does so via the host append primitive, not by direct mutation of `next_seq`.
 - **Truncation:** older entries may be truncated when superseded by a snapshot (§S7). Truncation is a host-local optimization; semantically a truncated entry is "covered by snapshot S, which represents the materialized state at seq ≤ K."
 

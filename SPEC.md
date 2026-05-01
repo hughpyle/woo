@@ -83,6 +83,7 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 - [hosts.md](spec/protocol/hosts.md) — three host classes, task migration, trust boundaries (§3)
 - [wire.md](spec/protocol/wire.md) — JSON WebSocket message format (§17)
 - [rest.md](spec/protocol/rest.md) — HTTP+SSE REST API; six endpoints; `$me` (R1–R11)
+- [mcp.md](spec/protocol/mcp.md) — Model Context Protocol surface for LLM agents; dynamic per-location tools (M1–M8)
 - [browser-host.md](spec/protocol/browser-host.md) — transient host bootstrap (§18)
 
 ### Reference (Cloudflare)

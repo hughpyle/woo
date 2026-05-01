@@ -24,7 +24,7 @@ type AppState = {
 };
 
 type ChatLine = {
-  kind: "said" | "said_to" | "said_as" | "emoted" | "posed" | "quoted" | "self_pointed" | "told" | "entered" | "left" | "huh" | "system" | "error";
+  kind: "said" | "said_to" | "said_as" | "emoted" | "posed" | "quoted" | "self_pointed" | "told" | "entered" | "left" | "looked" | "who" | "blocked_exit" | "taken" | "dropped" | "huh" | "system" | "error";
   actor?: string;
   from?: string;
   to?: string;
@@ -346,13 +346,19 @@ function projectTaskspace(world: any, meta: any) {
 
 function buildChatMeta(world: any) {
   const catalog = installedCatalog(world, "chat");
-  return { room: firstObjectByParent(world, catalogClass(catalog, "$chatroom")) };
+  const rooms = objectsByParent(world, catalogClass(catalog, "$chatroom"));
+  const occupied = rooms.find((id) => Array.isArray(world.objects?.[id]?.props?.subscribers) && world.objects[id].props.subscribers.includes(state.actor));
+  const seededEntry = Object.values(catalog?.seeds ?? {}).find((id) => typeof id === "string" && rooms.includes(id));
+  const current = occupied ?? seededEntry ?? rooms[0];
+  return { room: current, rooms };
 }
 
 function projectChat(world: any, meta: any) {
   const room = objectView(world, meta.room);
+  const rooms = Array.isArray(meta.rooms) ? meta.rooms.map((id: string) => objectView(world, id)).filter(Boolean) : [];
   return {
     room: room ? { id: room.id, name: room.name, description: room.props.description ?? "" } : null,
+    rooms,
     present: Array.isArray(room?.props?.subscribers) ? room.props.subscribers : []
   };
 }
@@ -383,6 +389,10 @@ function direct(target: string, verb: string, args: any[] = [], onResult?: (resu
   if (onResult) pendingDirect.set(id, onResult);
   if (!sendFrame({ op: "direct", id, target, verb, args })) pendingDirect.delete(id);
   return id;
+}
+
+function canSendDirect() {
+  return Boolean(state.actor && state.session && state.socket?.readyState === WebSocket.OPEN);
 }
 
 function liveKey(target: string, name: string) {
@@ -544,7 +554,7 @@ function render() {
       <aside class="nav">
         <div class="brand">Woo</div>
         <div class="actor">${escapeHtml(state.actor ?? "connecting...")}</div>
-        ${navButton("chat", "Room")}
+        ${navButton("chat", "Chat")}
         ${navButton("dubspace", "Dubspace")}
         ${navButton("taskspace", "Taskspace")}
         ${navButton("ide", "IDE")}
@@ -786,8 +796,9 @@ function renderStepRow(voice: string, label: string, row: boolean[]) {
 
 function enterChat() {
   const room = chatRoom();
-  if (!room) return;
+  if (!room || !canSendDirect()) return;
   direct(room, "enter", [], (result) => {
+    setCurrentChatRoom(room);
     setChatPresent(result);
     if (state.tab === "chat") render();
   });
@@ -805,6 +816,11 @@ function isChatObservation(observation: any) {
     "told",
     "entered",
     "left",
+    "looked",
+    "who",
+    "blocked_exit",
+    "taken",
+    "dropped",
     "huh",
     "cockatoo_squawk",
     "cockatoo_muffled",
@@ -819,6 +835,8 @@ function isChatObservation(observation: any) {
 
 function receiveChatEvent(observation: any, shouldRender = true) {
   const kind = chatLineKind(observation);
+  const presentActors = Array.isArray(observation.present_actors) ? observation.present_actors.map(String) : [];
+  if ((kind === "looked" || kind === "who") && presentActors.length > 0) state.chatPresent = presentActors;
   if (kind === "entered" && typeof observation.actor === "string" && !state.chatPresent.includes(observation.actor)) {
     state.chatPresent = [...state.chatPresent, observation.actor];
   }
@@ -851,6 +869,9 @@ function chatSystemText(observation: any): string | undefined {
   if (type === "cockatoo_fed") return `The cockatoo eats ${String(observation.food ?? "something")}.`;
   if (type === "cockatoo_pluck") return "*EEEEEEK!*";
   if (type === "cockatoo_shake") return `The cockatoo ${String(observation.reaction ?? "reacts")}.`;
+  if (type === "blocked_exit") return String(observation.text ?? "You can't go that way.");
+  if (type === "taken") return String(observation.text ?? `${actorLabel(String(observation.actor ?? ""))} takes something.`);
+  if (type === "dropped") return String(observation.text ?? `${actorLabel(String(observation.actor ?? ""))} drops something.`);
   return undefined;
 }
 
@@ -863,19 +884,28 @@ function setChatPresent(result: any) {
   if (Array.isArray(result)) state.chatPresent = result.map(String);
 }
 
+function setCurrentChatRoom(room: string) {
+  if (state.world?.chatMeta) {
+    state.world.chatMeta.room = room;
+    state.world.chat = projectChat(state.world, state.world.chatMeta);
+  }
+  if (state.actor && !state.chatPresent.includes(state.actor)) state.chatPresent = [...state.chatPresent, state.actor];
+}
+
 function renderChat() {
   const room = state.world?.chat?.room;
   const present = state.chatPresent;
   const inRoom = Boolean(state.actor && present.includes(state.actor));
   if (!inRoom) {
+    const canEnter = canSendDirect();
     return `
       <section class="toolbar">
         <h1>${escapeHtml(room?.name ?? "Room")}</h1>
-        <button data-chat-enter>Enter</button>
+        <button data-chat-enter ${canEnter ? "" : "disabled"}>Enter</button>
       </section>
       <section class="chat-layout solo">
         <div class="panel chat-empty-panel">
-          <p>${escapeHtml(room?.description ?? "Enter the room to chat.")}</p>
+          <p>${escapeHtml(canEnter ? room?.description ?? "Enter the room to chat." : "Connecting...")}</p>
         </div>
       </section>
     `;
@@ -937,7 +967,8 @@ function renderChatLine(line: ChatLine) {
     return `<div class="chat-line system"><span class="chat-time">${escapeHtml(time)}</span><span>I don't understand "${escapeHtml(line.text ?? "")}".</span></div>`;
   }
   if (line.kind === "entered" || line.kind === "left") {
-    return `<div class="chat-line system"><span class="chat-time">${escapeHtml(time)}</span><span>${escapeHtml(actorLabel(line.actor))} ${line.kind === "entered" ? "entered" : "left"}.</span></div>`;
+    const text = line.text ?? `${actorLabel(line.actor)} ${line.kind === "entered" ? "entered" : "left"}.`;
+    return `<div class="chat-line system"><span class="chat-time">${escapeHtml(time)}</span><span>${escapeHtml(text)}</span></div>`;
   }
   return `<div class="chat-line system"><span class="chat-time">${escapeHtml(time)}</span><span>${escapeHtml(line.text ?? "")}</span></div>`;
 }
@@ -1015,20 +1046,29 @@ function renderChatCommandResult(plan: any, result: any, originalText: string) {
   const verb = String(plan?.verb ?? "");
   if (verb === "who") {
     setChatPresent(result);
-    const names = state.chatPresent.map(actorLabel).join(", ") || "nobody";
-    pushChatLine({ kind: "system", text: `Present: ${names}` });
     return;
   }
   if (verb === "look") {
-    renderLookResult(result);
+    applyLookResult(result);
     return;
   }
-  if (result === true || result === null || result === undefined) return;
-  if (typeof result === "string" || typeof result === "number" || typeof result === "boolean") {
-    pushChatLine({ kind: "system", text: String(result) });
+  if (result && typeof result === "object" && typeof result.room === "string") {
+    setCurrentChatRoom(result.room);
+    void refresh();
     return;
   }
-  pushChatLine({ kind: "system", text: `${originalText}: ${JSON.stringify(result)}` });
+  if (verb === "enter") {
+    if (typeof plan?.target === "string") setCurrentChatRoom(plan.target);
+    setChatPresent(result);
+    void refresh();
+    return;
+  }
+  if (verb === "take" || verb === "drop") {
+    void refresh();
+    return;
+  }
+  void originalText;
+  void result;
 }
 
 function refreshChatWho() {
@@ -1036,30 +1076,18 @@ function refreshChatWho() {
   if (!room) return;
   direct(room, "who", [], (result) => {
     setChatPresent(result);
-    const names = state.chatPresent.map(actorLabel).join(", ") || "nobody";
-    pushChatLine({ kind: "system", text: `Present: ${names}` });
   });
 }
 
 function refreshChatLook() {
   const room = chatRoom();
   if (!room) return;
-  direct(room, "look", [], renderLookResult);
+  direct(room, "look", [], applyLookResult);
 }
 
-function renderLookResult(result: any) {
+function applyLookResult(result: any) {
   const present = Array.isArray(result?.present_actors) ? result.present_actors.map(String) : [];
   if (present.length > 0) state.chatPresent = present;
-  const names = present.map(actorLabel).join(", ") || "nobody";
-  const contents = Array.isArray(result?.contents) ? result.contents : [];
-  const things = contents
-    .map((item: any) => String(item?.title ?? item?.name ?? item?.id ?? ""))
-    .filter(Boolean);
-  const lines = [String(result?.description ?? "")];
-  if (Array.isArray(result?.present_actors)) lines.push(`Present: ${names}.`);
-  if (things.length > 0) lines.push(`You see ${things.join(", ")}.`);
-  if (typeof result?.mood === "string") lines.push(`Mood: ${result.mood}.`);
-  pushChatLine({ kind: "system", text: lines.filter(Boolean).join(" ") || JSON.stringify(result) });
 }
 
 function actorLabel(id: string | undefined) {

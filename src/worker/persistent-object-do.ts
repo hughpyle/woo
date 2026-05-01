@@ -40,7 +40,7 @@ import {
   type RestProtocolRequest
 } from "../core/protocol";
 import type { ObjRef, Observation, Session, WooValue } from "../core/types";
-import { wooError } from "../core/types";
+import { directedRecipients, wooError } from "../core/types";
 import type { AppliedFrame, DirectResultFrame, ErrorFrame, LiveEventFrame, Message } from "../core/types";
 import type { SerializedWorld } from "../core/repository";
 import { normalizeError, type ParkedTaskRun } from "../core/world";
@@ -399,6 +399,14 @@ export class PersistentObjectDO {
 
       if (request.method === "POST" && pathname === "/__internal/broadcast-live-events") {
         const audience = String(body.audience ?? "") as ObjRef;
+        const audienceActors = Array.isArray(body.audience_actors)
+          ? body.audience_actors.filter((item): item is ObjRef => typeof item === "string")
+          : undefined;
+        const observationAudiences = Array.isArray(body.observation_audiences)
+          ? body.observation_audiences.map((audience) => (
+              Array.isArray(audience) ? audience.filter((item): item is ObjRef => typeof item === "string") : []
+            ))
+          : undefined;
         const observations = Array.isArray(body.observations)
           ? body.observations.filter((item): item is Record<string, WooValue> & { type: string } => (
               item !== null &&
@@ -408,7 +416,7 @@ export class PersistentObjectDO {
             ))
           : [];
         if (!audience) throw wooError("E_INVARG", "broadcast-live-events requires audience");
-        this.broadcastLiveEvents(world, { op: "result", result: null, observations, audience });
+        this.broadcastLiveEvents(world, { op: "result", result: null, observations, audience, audienceActors, observationAudiences });
         return jsonResponse({ ok: true });
       }
 
@@ -839,21 +847,23 @@ export class PersistentObjectDO {
 
   private broadcastLiveEvents(world: WooWorld, result: DirectResultFrame): void {
     if (!result.audience) return;
-    for (const observation of result.observations) {
+    result.observations.forEach((observation, index) => {
       const frame: LiveEventFrame = { op: "event", observation };
-      this.broadcastLiveEvent(world, frame, result.audience);
-    }
+      this.broadcastLiveEvent(world, frame, result.audience!, result.observationAudiences?.[index] ?? result.audienceActors);
+    });
   }
 
-  private broadcastLiveEvent(world: WooWorld, frame: LiveEventFrame, audience: ObjRef): void {
+  private broadcastLiveEvent(world: WooWorld, frame: LiveEventFrame, audience: ObjRef, audienceActors?: ObjRef[]): void {
     const data = JSON.stringify(frame);
-    const directedTo = typeof frame.observation.to === "string" ? frame.observation.to : null;
-    const directedFrom = typeof frame.observation.from === "string" ? frame.observation.from : null;
+    const { to: directedTo, from: directedFrom } = directedRecipients(frame.observation);
+    const audienceSet = audienceActors ? new Set(audienceActors) : null;
     for (const ws of this.state.getWebSockets()) {
       const att = this.attachment(ws);
       if (!att) continue;
       if (directedTo || directedFrom) {
         if (att.actor !== directedTo && att.actor !== directedFrom) continue;
+      } else if (audienceSet) {
+        if (!audienceSet.has(att.actor)) continue;
       } else if (!world.hasPresence(att.actor, audience)) {
         continue;
       }

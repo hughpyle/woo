@@ -3,6 +3,7 @@ import {
   assertObj,
   assertString,
   cloneValue,
+  directedRecipients,
   isErrorValue,
   valuesEqual,
   type AppliedFrame,
@@ -807,7 +808,16 @@ export class WooWorld {
         }
       });
       if (mutated) this.persist(true);
-      return { op: "result", id: frameId, result, observations, audience };
+      const liveAudiences = this.directLiveAudiences(audience, observations);
+      return {
+        op: "result",
+        id: frameId,
+        result,
+        observations,
+        audience,
+        audienceActors: liveAudiences.audienceActors,
+        observationAudiences: liveAudiences.observationAudiences
+      };
     } catch (err) {
       return { op: "error", id: frameId, error: normalizeError(err) };
     }
@@ -1002,6 +1012,9 @@ export class WooWorld {
         caller: ctx.caller ?? "#-1"
       };
       if (verb.kind === "native") {
+        // Native handlers are an implementation detail behind ordinary verb
+        // dispatch. The dispatch path above has already enforced verb execute
+        // permissions and set progr/definer/caller frame fields.
         const handler = this.nativeHandlers.get(verb.native);
         if (!handler) throw wooError("E_VERBNF", `native handler not found: ${verb.native}`);
         return await handler(runCtx, args);
@@ -1935,6 +1948,49 @@ export class WooWorld {
     return null;
   }
 
+  private liveAudienceActors(space: ObjRef): ObjRef[] | undefined {
+    const raw = this.propOrNull(space, "subscribers");
+    if (!Array.isArray(raw)) return undefined;
+    return raw.filter((item): item is ObjRef => typeof item === "string");
+  }
+
+  private directLiveAudiences(audience: ObjRef | null, observations: Observation[]): { audienceActors?: ObjRef[]; observationAudiences?: ObjRef[][] } {
+    const actors = new Set<ObjRef>();
+    const observationAudiences: ObjRef[][] = [];
+    for (const observation of observations) {
+      const present = this.observationAudienceActors(audience, observation) ?? [];
+      observationAudiences.push(present);
+      for (const actor of present) actors.add(actor);
+    }
+    return {
+      audienceActors: actors.size > 0 ? Array.from(actors) : undefined,
+      observationAudiences: observations.length > 0 ? observationAudiences : undefined
+    };
+  }
+
+  private observationAudienceActors(fallbackAudience: ObjRef | null, observation: Observation): ObjRef[] | undefined {
+    if ((observation.type === "looked" || observation.type === "who") && typeof observation.to === "string") {
+      return [observation.to];
+    }
+    const directed = directedRecipients(observation);
+    if (directed.to) {
+      const actors = [directed.to];
+      if (directed.from) actors.push(directed.from);
+      return actors;
+    }
+    const source = typeof observation.source === "string" && this.objects.has(observation.source) && this.inheritsFrom(observation.source, "$space")
+      ? observation.source
+      : null;
+    const audience = source ?? fallbackAudience;
+    if (!audience) return undefined;
+    const present = this.liveAudienceActors(audience);
+    if (!present) return undefined;
+    if ((observation.type === "entered" || observation.type === "left") && typeof observation.actor === "string") {
+      return present.filter((actor) => actor !== observation.actor);
+    }
+    return present;
+  }
+
   private isSpaceLike(objRef: ObjRef): boolean {
     try {
       this.getProp(objRef, "next_seq");
@@ -2407,7 +2463,10 @@ export class WooWorld {
 
   private registerNativeHandlers(): void {
     this.nativeHandlers.set("describe", (ctx) => this.describeForActor(ctx.thisObj, ctx.actor));
-    this.nativeHandlers.set("default_title", (ctx) => this.object(ctx.thisObj).name);
+    this.nativeHandlers.set("default_title", (ctx) => {
+      const title = this.propOrNull(ctx.thisObj, "name");
+      return typeof title === "string" && title.length > 0 ? title : this.object(ctx.thisObj).name;
+    });
     this.nativeHandlers.set("default_look_self", (ctx) => this.defaultLookSelf(ctx));
     this.nativeHandlers.set("player_on_disfunc", () => true);
     this.nativeHandlers.set("player_moveto", (ctx, args) => {
@@ -2480,6 +2539,13 @@ export class WooWorld {
     });
     this.nativeHandlers.set("parse_command", (ctx, args) => this.parseCommandMap(assertString(args[0] ?? ""), ctx.actor, ctx.space) as unknown as WooValue);
     this.nativeHandlers.set("space_look_self", (ctx) => this.spaceLookSelf(ctx));
+    this.nativeHandlers.set("room_who", (ctx) => this.roomWho(ctx));
+    this.nativeHandlers.set("room_enter", (ctx) => this.roomEnter(ctx));
+    this.nativeHandlers.set("room_leave", (ctx) => this.roomLeave(ctx));
+    this.nativeHandlers.set("room_exit", (ctx, args) => this.roomExit(ctx, args.length > 0 ? assertString(args[0] ?? "") : ctx.verbName));
+    this.nativeHandlers.set("room_go", (ctx, args) => this.roomExit(ctx, assertString(args[0] ?? "")));
+    this.nativeHandlers.set("room_take", (ctx, args) => this.roomTake(ctx, assertString(args[0] ?? "")));
+    this.nativeHandlers.set("room_drop", (ctx, args) => this.roomDrop(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("chat_command_plan", (ctx, args) => this.chatCommandPlan(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("chat_command", async (ctx, args) => {
       const plan = await this.chatCommandPlan(ctx, assertString(args[0] ?? ""));
@@ -2488,9 +2554,9 @@ export class WooWorld {
     });
   }
 
-  private chatPresent(room: ObjRef): WooValue[] {
+  private chatPresent(room: ObjRef): ObjRef[] {
     const present = this.getProp(room, "subscribers");
-    return Array.isArray(present) ? [...present] : [];
+    return Array.isArray(present) ? present.filter((item): item is ObjRef => typeof item === "string") : [];
   }
 
   private async defaultLookSelf(ctx: CallContext): Promise<WooValue> {
@@ -2503,7 +2569,13 @@ export class WooWorld {
 
   private async spaceLookSelf(ctx: CallContext): Promise<WooValue> {
     const room = ctx.thisObj;
-    const contents = await Promise.all(Array.from(this.object(room).contents).map(async (item) => ({
+    const look = await this.composeRoomLook(ctx, room);
+    this.observeRoomLook(ctx, room, look);
+    return look as unknown as WooValue;
+  }
+
+  private async composeRoomLook(ctx: CallContext, room: ObjRef): Promise<Record<string, WooValue>> {
+    const contents = await Promise.all(Array.from(this.object(room).contents).filter((item) => this.objects.has(item) && !this.inheritsFrom(item, "$actor")).map(async (item) => ({
       id: item,
       title: await this.titleForLook(ctx, room, item),
       description: this.propOrNullForActor(ctx.actor, item, "description")
@@ -2514,7 +2586,52 @@ export class WooWorld {
       description: this.propOrNullForActor(ctx.actor, room, "description"),
       present_actors: this.chatPresent(room),
       contents
-    } as unknown as WooValue;
+    } as unknown as Record<string, WooValue>;
+  }
+
+  private observeRoomLook(ctx: CallContext, room: ObjRef, look: Record<string, WooValue>): void {
+    ctx.observe({
+      type: "looked",
+      source: room,
+      actor: ctx.actor,
+      to: ctx.actor,
+      room,
+      text: this.roomLookText(look),
+      look,
+      ts: Date.now()
+    });
+  }
+
+  private roomLookText(look: Record<string, WooValue>): string {
+    const lines = [String(look.description ?? "")];
+    const present = Array.isArray(look.present_actors) ? look.present_actors.filter((item): item is ObjRef => typeof item === "string") : [];
+    lines.push(`Present: ${present.map((actor) => this.objectDisplayName(actor)).join(", ") || "nobody"}.`);
+    const contents = Array.isArray(look.contents) ? look.contents : [];
+    const things = contents
+      .map((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return "";
+        const record = item as Record<string, WooValue>;
+        return String(record.title ?? record.name ?? record.id ?? "");
+      })
+      .filter(Boolean);
+    if (things.length > 0) lines.push(`You see ${things.join(", ")}.`);
+    if (typeof look.mood === "string") lines.push(`Mood: ${look.mood}.`);
+    return lines.filter(Boolean).join(" ");
+  }
+
+  private roomWho(ctx: CallContext): WooValue {
+    const present = this.chatPresent(ctx.thisObj);
+    ctx.observe({
+      type: "who",
+      source: ctx.thisObj,
+      actor: ctx.actor,
+      to: ctx.actor,
+      room: ctx.thisObj,
+      present_actors: present,
+      text: `Present: ${present.map((actor) => this.objectDisplayName(actor)).join(", ") || "nobody"}.`,
+      ts: Date.now()
+    });
+    return present;
   }
 
   private async titleForLook(ctx: CallContext, room: ObjRef, item: ObjRef): Promise<string> {
@@ -2529,6 +2646,155 @@ export class WooWorld {
     }
   }
 
+  private async roomEnter(ctx: CallContext): Promise<WooValue> {
+    const actor = ctx.actor;
+    const room = ctx.thisObj;
+    const oldLocation = this.objects.has(actor) ? this.object(actor).location : null;
+    const actorName = this.objectDisplayName(actor);
+    const ts = Date.now();
+    if (oldLocation && oldLocation !== room && this.objects.has(oldLocation) && this.inheritsFrom(oldLocation, "$space")) {
+      this.updatePresence(actor, oldLocation, false);
+      ctx.observe({
+        type: "left",
+        source: oldLocation,
+        actor,
+        room: oldLocation,
+        destination: room,
+        text: `${actorName} left.`,
+        ts
+      });
+    }
+    this.updatePresence(actor, room, true);
+    if (this.object(actor).location !== room) this.moveObject(actor, room);
+    ctx.observe({ type: "entered", source: room, actor, room, text: `${actorName} entered.`, ts });
+    const look = await this.composeRoomLook({ ...ctx, thisObj: room }, room);
+    this.observeRoomLook(ctx, room, look);
+    return this.chatPresent(room);
+  }
+
+  private roomLeave(ctx: CallContext): WooValue {
+    const actor = ctx.actor;
+    const room = ctx.thisObj;
+    const actorName = this.objectDisplayName(actor);
+    this.updatePresence(actor, room, false);
+    const homeValue = this.propOrNull(actor, "home");
+    const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
+    if (this.object(actor).location === room && this.objects.has(home)) this.moveObject(actor, home);
+    ctx.observe({ type: "left", source: room, actor, room, text: `${actorName} left.`, ts: Date.now() });
+    return this.chatPresent(room);
+  }
+
+  private async roomExit(ctx: CallContext, rawExit: string): Promise<WooValue> {
+    const exitName = normalizeExitName(rawExit);
+    if (!exitName) throw wooError("E_INVARG", "exit requires a direction or destination");
+    const blocked = this.blockedRoomExit(ctx.thisObj, exitName);
+    if (blocked) {
+      ctx.observe({ type: "blocked_exit", actor: ctx.actor, exit: exitName, text: blocked, ts: Date.now() });
+      return blocked;
+    }
+    const target = this.resolveRoomExit(ctx.thisObj, exitName);
+    if (!this.inheritsFrom(target, "$space")) throw wooError("E_TYPE", `${target} is not a room or space`, target);
+    const actorName = this.objectDisplayName(ctx.actor);
+    this.updatePresence(ctx.actor, ctx.thisObj, false);
+    this.updatePresence(ctx.actor, target, true);
+    this.moveObject(ctx.actor, target);
+    const title = await this.titleForLook(ctx, ctx.thisObj, target);
+    const ts = Date.now();
+    ctx.observe({
+      type: "left",
+      source: ctx.thisObj,
+      actor: ctx.actor,
+      room: ctx.thisObj,
+      destination: target,
+      exit: exitName,
+      text: `${actorName} ${this.exitAnnouncement(exitName)}`,
+      ts
+    });
+    ctx.observe({
+      type: "entered",
+      source: target,
+      actor: ctx.actor,
+      room: target,
+      origin: ctx.thisObj,
+      exit: exitName,
+      text: `${actorName} has arrived.`,
+      ts
+    });
+    const look = await this.composeRoomLook({ ...ctx, thisObj: target }, target);
+    this.observeRoomLook(ctx, target, look);
+    return { room: target, from: ctx.thisObj, exit: exitName, title };
+  }
+
+  private objectDisplayName(objRef: ObjRef): string {
+    if (!this.objects.has(objRef)) return objRef;
+    return this.object(objRef).name || objRef;
+  }
+
+  private exitAnnouncement(exitName: string): string {
+    if (exitName === "leave" || exitName === "out" || exitName === "exit") return "leaves.";
+    return `goes ${exitName}.`;
+  }
+
+  private async roomTake(ctx: CallContext, rawName: string): Promise<WooValue> {
+    const room = ctx.thisObj;
+    const name = rawName.trim();
+    if (!name) throw wooError("E_INVARG", "take requires an object name");
+    const match = this.matchObjectInCandidates(name, Array.from(this.object(room).contents));
+    if (match.status !== "ok") throw wooError("E_INVARG", `I don't see "${name}" here.`, name);
+    const item = match.value;
+    if (item === ctx.actor || this.inheritsFrom(item, "$actor")) throw wooError("E_PERM", "actors are not carryable", item);
+    if (!this.isPortable(item)) throw wooError("E_PERM", `${this.object(item).name} is not carryable`, item);
+    this.moveObject(item, ctx.actor);
+    const title = await this.titleForLook(ctx, room, item);
+    ctx.observe({ type: "taken", actor: ctx.actor, item, text: `You take ${title}.`, ts: Date.now() });
+    return { item, title };
+  }
+
+  private async roomDrop(ctx: CallContext, rawName: string): Promise<WooValue> {
+    const room = ctx.thisObj;
+    const name = rawName.trim();
+    if (!name) throw wooError("E_INVARG", "drop requires an object name");
+    const match = this.matchObjectInCandidates(name, Array.from(this.object(ctx.actor).contents));
+    if (match.status !== "ok") throw wooError("E_INVARG", `You are not carrying "${name}".`, name);
+    const item = match.value;
+    this.moveObject(item, room);
+    const title = await this.titleForLook(ctx, room, item);
+    ctx.observe({ type: "dropped", actor: ctx.actor, item, room, text: `You drop ${title}.`, ts: Date.now() });
+    return { item, title, room };
+  }
+
+  private resolveRoomExit(room: ObjRef, exitName: string): ObjRef {
+    const exitsValue = this.propOrNull(room, "exits");
+    if (!exitsValue || typeof exitsValue !== "object" || Array.isArray(exitsValue)) {
+      throw wooError("E_INVARG", `${room} has no exits`, room);
+    }
+    const exits = Object.entries(exitsValue).filter((entry): entry is [string, ObjRef] => typeof entry[1] === "string" && this.objects.has(entry[1]));
+    const exact = exits.find(([name]) => normalizeExitName(name) === exitName);
+    if (exact) return exact[1] as ObjRef;
+    const prefix = exits.filter(([name]) => normalizeExitName(name).startsWith(exitName));
+    if (prefix.length === 1) return prefix[0][1] as ObjRef;
+    if (prefix.length > 1) throw wooError("E_INVARG", `ambiguous exit: ${exitName}`, exitName);
+    throw wooError("E_INVARG", `unknown exit: ${exitName}`, exitName);
+  }
+
+  private blockedRoomExit(room: ObjRef, exitName: string): string | null {
+    const blockedValue = this.propOrNull(room, "blocked_exits");
+    if (!blockedValue || typeof blockedValue !== "object" || Array.isArray(blockedValue)) return null;
+    for (const [name, message] of Object.entries(blockedValue)) {
+      if (normalizeExitName(name) === exitName && typeof message === "string") return message;
+    }
+    return null;
+  }
+
+  private isPortable(objRef: ObjRef): boolean {
+    try {
+      return this.getProp(objRef, "portable") === true;
+    } catch (err) {
+      if (normalizeError(err).code !== "E_PROPNF") throw err;
+      return false;
+    }
+  }
+
   private async chatCommandPlan(ctx: CallContext, rawText: string): Promise<WooValue> {
     const text = rawText.trim();
     if (!text) return await this.huhPlan(ctx, rawText, "empty command");
@@ -2540,6 +2806,9 @@ export class WooWorld {
     const roomMatch = this.tryResolveVerb(ctx.thisObj, parsed.verb);
     if (!parsed.argstr && roomMatch?.verb.direct_callable === true) {
       return this.routePlan("direct", ctx.thisObj, roomMatch.verb.name, [], parsed);
+    }
+    if (parsed.argstr && roomMatch?.verb.direct_callable === true && this.inheritsFrom(ctx.thisObj, roomMatch.definer)) {
+      return this.routePlan("direct", ctx.thisObj, roomMatch.verb.name, [parsed.argstr], parsed);
     }
 
     const tokens = tokenizeCommand(parsed.argstr);
@@ -2687,11 +2956,18 @@ export class WooWorld {
       if (Array.isArray(present)) for (const id of present) add(id);
     }
     if (this.objects.has(actor)) for (const id of this.object(actor).contents) add(id);
+    return this.matchObjectInCandidates(wanted, candidates);
+  }
 
+  private matchObjectInCandidates(name: string, candidates: ObjRef[]): ObjectMatch {
+    const wanted = name.trim();
+    if (!wanted) return this.matchSentinel("failed");
+    const lower = wanted.toLowerCase();
     const exact: ObjRef[] = [];
     const alias: ObjRef[] = [];
     const prefix: ObjRef[] = [];
     for (const id of candidates) {
+      if (!this.objects.has(id)) continue;
       const obj = this.object(id);
       const names = [id, obj.name].filter(Boolean).map((item) => String(item).toLowerCase());
       const aliases = this.propOrNull(id, "aliases");
@@ -2781,6 +3057,14 @@ function tokenizeCommand(text: string): ParsedToken[] {
 
 function tokenPhrase(tokens: ParsedToken[]): string {
   return tokens.map((token) => token.value).join(" ").trim();
+}
+
+function normalizeExitName(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^(to|through|into)\s+/, "")
+    .replace(/\s+/g, " ");
 }
 
 const PREPOSITIONS = [

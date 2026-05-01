@@ -146,7 +146,12 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
       const result = await world.directCall(id, actor, target, verb, args, { forceDirect, forceReason: "REST X-Woo-Force-Direct" });
       if (result.op === "error") return errorProtocol(result.error);
       await host.broadcastLiveEvents(result);
-      return jsonProtocol({ result: result.result, observations: result.observations });
+      return jsonProtocol({
+        result: result.result,
+        observations: result.observations,
+        audience_actors: result.audienceActors,
+        observation_audiences: result.observationAudiences
+      });
     }
 
     if (request.method === "GET" && route.rest.length === 1 && route.rest[0] === "log") {

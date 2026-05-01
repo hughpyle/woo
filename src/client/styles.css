@@ -813,7 +813,8 @@ textarea {
   }
 
   .brand,
-  .actor {
+  .actor,
+  .github-link {
     display: none;
   }
 

@@ -27,6 +27,7 @@ export default defineConfig({
     env: {
       PORT: String(PORT),
       WOO_DB: process.env.WOO_DB ?? ".woo/e2e.sqlite",
+      WOO_INITIAL_WIZARD_TOKEN: process.env.WOO_INITIAL_WIZARD_TOKEN ?? "e2e-wizard",
       VITE_HMR_PORT: process.env.VITE_HMR_PORT ?? String(PORT + 10_000)
     }
   }

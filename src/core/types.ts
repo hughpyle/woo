@@ -28,6 +28,21 @@ export type Observation = Record<string, WooValue> & {
   type: string;
 };
 
+// Per spec/semantics/events.md §12.7.1, directed observations route by their
+// `to`/`from` fields rather than by audience-space presence. The set is closed
+// in v1; additions here require a spec update so transports stay in sync.
+export const DIRECTED_OBSERVATION_TYPES: ReadonlySet<string> = new Set(["told"]);
+
+export type DirectedRecipients = { to: ObjRef | null; from: ObjRef | null };
+
+export function directedRecipients(observation: Observation): DirectedRecipients {
+  if (!DIRECTED_OBSERVATION_TYPES.has(observation.type)) return { to: null, from: null };
+  return {
+    to: typeof observation.to === "string" ? observation.to : null,
+    from: typeof observation.from === "string" ? observation.from : null
+  };
+}
+
 export type AppliedFrame = {
   op: "applied";
   id?: string;
@@ -44,6 +59,8 @@ export type DirectResultFrame = {
   result: WooValue;
   observations: Observation[];
   audience: ObjRef | null;
+  audienceActors?: ObjRef[];
+  observationAudiences?: ObjRef[][];
 };
 
 export type LiveEventFrame = {
