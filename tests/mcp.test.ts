@@ -287,6 +287,34 @@ describe("McpGateway", () => {
     expect((init.headers.get("mcp-session-id") ?? "").length).toBeGreaterThan(0);
   });
 
+  it("normalizes missing Accept headers for Codex-style initialize requests", async () => {
+    const world = bootstrapWorld();
+    const gateway = new McpGateway(world);
+
+    const init = await gateway.handle(new Request("http://t/mcp", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer guest:mcp-codex-accept"
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "codex", version: "0.0.0" }
+        }
+      })
+    }));
+
+    expect(init.ok).toBe(true);
+    const body = await init.json() as { jsonrpc?: string; result?: { serverInfo?: { name?: string } } };
+    expect(body.jsonrpc).toBe("2.0");
+    expect(body.result?.serverInfo?.name).toBe("woo");
+  });
+
   it("rejects requests without a session and without an auth token", async () => {
     const world = bootstrapWorld();
     const gateway = new McpGateway(world);

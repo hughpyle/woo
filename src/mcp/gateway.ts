@@ -69,7 +69,7 @@ export class McpGateway {
       }
     }
 
-    const response = await entry.transport.handleRequest(request);
+    const response = await entry.transport.handleRequest(withRequiredMcpAccept(request));
     const transportId = entry.transport.sessionId;
     if (transportId && !this.sessions.has(transportId)) {
       this.sessions.set(transportId, entry);
@@ -139,6 +139,15 @@ function authTokenFromHeaders(headers: Headers): string | null {
   const match = /^bearer\s+(.+)$/i.exec(authorization);
   const token = match?.[1]?.trim();
   return token && token.length > 0 ? token : null;
+}
+
+function withRequiredMcpAccept(request: Request): Request {
+  const headers = new Headers(request.headers);
+  const accept = headers.get("accept") ?? "";
+  const needed = ["application/json", "text/event-stream"].filter((type) => !accept.toLowerCase().includes(type));
+  if (needed.length === 0) return request;
+  headers.set("accept", [accept.trim(), ...needed].filter(Boolean).join(", "));
+  return new Request(request, { headers });
 }
 
 function jsonError(status: number, code: string, message: string): Response {
