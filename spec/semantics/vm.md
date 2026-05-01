@@ -30,7 +30,7 @@ type Task = {
   frames: Frame[];             // bottom = entry, top = current
   ticks_remaining: number;
   memory_used: number;
-  state: 'running' | 'suspended' | 'awaiting_read' | 'awaiting_call' | 'done';
+  state: 'running' | 'suspended' | 'awaiting_read' | 'done';
   resume_at?: number;          // ms timestamp, when state='suspended'
   awaiting?: AwaitingInfo;
   origin: ObjRef;              // host where task was created (for return routing)
@@ -141,12 +141,12 @@ Logical `&&` and `||` are compiled to short-circuit jumps; no dedicated opcode.
 | Op | Operands | Stack effect | Yield | Description |
 |---|---|---|---|---|
 | `GET_PROP` | — | obj name → val | **Y** | Walk prop-def chain; read value from owning object's storage. RPC if obj is remote. |
-| `SET_PROP` | — | obj name val → | **Y** | Write value on `obj`'s own storage; check perms. RPC if remote. |
+| `SET_PROP` | — | obj name val → | N | Write value on `obj`'s own storage; check perms. If `obj` is remote, raise `E_CROSS_HOST_WRITE`; use `CALL_VERB` for cross-host mutation. |
 | `HAS_PROP` | — | obj name → bool | **Y** | Check if prop exists (defined anywhere in chain). |
-| `DEFINE_PROP` | — | obj name default perms → | **Y** | Introduce a new prop slot on `obj`. Visible to descendants. |
-| `UNDEFINE_PROP` | — | obj name → | **Y** | Remove a prop definition from `obj`. |
+| `DEFINE_PROP` | — | obj name default perms → | N | Introduce a new prop slot on `obj`. Visible to descendants. If `obj` is remote, raise `E_CROSS_HOST_WRITE`. |
+| `UNDEFINE_PROP` | — | obj name → | N | Remove a prop definition from `obj`. If `obj` is remote, raise `E_CROSS_HOST_WRITE`. |
 | `PROP_INFO` | — | obj name → map | **Y** | Returns `{owner, perms, defined_on, type_hint}`. |
-| `SET_PROP_INFO` | — | obj name infomap → | **Y** | Set perms/owner. |
+| `SET_PROP_INFO` | — | obj name infomap → | N | Set perms/owner. If `obj` is remote, raise `E_CROSS_HOST_WRITE`. |
 
 `GET_PROP` semantics:
 1. If `obj` is local to this host, look up the value in this host's persistent storage.
@@ -228,9 +228,10 @@ Op weights (defaults; tunable per-world):
 | Most ops | 1 |
 | `STR_INTERP`, `MAP_KEYS`, `LIST_SLICE` | 5 |
 | `GET_PROP` / `SET_PROP` local | 5 |
-| `GET_PROP` / `SET_PROP` remote (RPC) | 100 |
+| `GET_PROP` remote (RPC) | 100 |
+| `SET_PROP` remote rejection | 100 |
 | `CALL_VERB` local | 10 |
-| `CALL_VERB` remote (task migration) | 500 |
+| `CALL_VERB` remote (host RPC) | 500 |
 | `EMIT` to local target | 10 per recipient |
 | `EMIT` to remote target | 100 per recipient |
 | `BUILTIN create()` | 50 |
@@ -245,7 +246,7 @@ Like the tick budget, `memory_used` is monotone within a task: catching `E_MEM` 
 
 ### 8.6 Scheduler
 
-Each host has a single-threaded scheduler. At any moment, zero or one task is running on the host. Other tasks queue at the input gate. Cross-host RPC for verb dispatch and prop access are awaited on; the receiving host schedules the migrated task in its own queue.
+Each host has a single-threaded scheduler. At any moment, zero or one task is running on the host. Other tasks queue at the input gate. Cross-host RPC for verb dispatch and prop access are awaited on; the receiving host schedules the callee frame in its own queue and returns result plus observations.
 
 Cooperative `YIELD` opcodes are inserted at compile time at:
 - Loop back-edges

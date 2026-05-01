@@ -42,11 +42,11 @@ In v1, every ref's implicit origin is the local world. The qualifier syntax is p
 
 ### 24.4 Cross-world calls are RPC, not task migration
 
-Within a world, verb dispatch migrates the task to the receiver's host (see [../semantics/vm.md §8.3.6](../semantics/vm.md#836-verb-dispatch)). Across worlds, **the task does not migrate.** Cross-world dispatch is pure RPC:
+Within a world, verb dispatch is awaited host RPC when it crosses host boundaries (see [../semantics/vm.md §8.3.6](../semantics/vm.md#836-verb-dispatch)). Across worlds, it stays pure RPC:
 
 1. Originating world's task hits `CALL_VERB` with a remote-origin target.
 2. Originating world serializes the *call* (target, verb, args) — not the frame stack.
-3. Originating world's task enters `awaiting_call` on its home DO.
+3. Originating world's task awaits the peer reply on its home DO.
 4. Receiving world creates a new task in *its* world, runs the verb to completion (or fault), serializes the *result*, returns it.
 5. Originating world's task resumes with result on stack.
 

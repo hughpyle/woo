@@ -35,13 +35,13 @@ Two operations are provided by the runtime. Subclasses may expose object-visible
 
 Atomically within the enclosing transaction: allocates `seq = next_seq`, increments `next_seq`, and inserts `(seq, message)` into the log. Returns the assigned seq.
 
-**Atomicity contract.** If the enclosing transaction commits after `append` returns, `(seq, message)` is durably committed and `next_seq` has advanced. If the storage layer fails before commit, the transaction raises `E_STORAGE` and `next_seq` does *not* advance — see [failures.md §F6](failures.md#f6-storage-and-persistence-failures). The runtime never reaches "seq advanced but message not in the log."
+**Atomicity contract.** `$space:call` may reserve a seq in memory before it opens the storage transaction, but that reservation is not visible to replay or subscribers. If the enclosing transaction commits after `append` returns, `(seq, message)` is durably committed and `next_seq` has advanced. If the storage layer fails before commit, the transaction raises `E_STORAGE` and `next_seq` does *not* advance — see [failures.md §F6](failures.md#f6-storage-and-persistence-failures). The runtime never reaches "seq durably advanced but message not in the log."
 
 `append` is the **only** runtime-blessed mechanism for incrementing `next_seq`. User code that writes `next_seq` directly violates the contract; replay will diverge.
 
 `message` is a value (V2-encoded) of any shape. The log does not interpret it. A space subclass passes its standard `{actor, target, verb, args}` shape; an event-sourced document passes operation deltas; a turn log passes move records.
 
-**Outcome is recorded separately.** `append` creates the message row but does not yet know whether the behavior dispatched against it will succeed. Subclasses that care about success/failure (e.g., `$space`) record the outcome through a second storage operation after the behavior runs; see [reference/cloudflare.md §R3.2](../reference/cloudflare.md#r32-two-phase-log-writes) for the savepoint-scoped storage pattern. The pending marker exists only inside the open transaction; committed rows always carry a final outcome.
+**Outcome is recorded separately.** `append` creates the message row; subclasses that care about success/failure (e.g., `$space`) record the already-computed outcome through a second storage operation in the same commit transaction. See [reference/cloudflare.md §R3.2](../reference/cloudflare.md#r32-sequenced-log-commit). The pending marker exists only inside the open transaction; committed rows always carry a final outcome.
 
 ### `read(from, limit) -> {messages, next_seq, has_more}`
 

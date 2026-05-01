@@ -40,13 +40,13 @@ function readFrontmatter(name: string): Record<string, string> {
 }
 
 describe("local catalogs", () => {
-  it("discovers bundled catalogs from manifest locations", () => {
+  it("discovers bundled catalogs from manifest locations", async () => {
     const catalogDirs = readdirSync(root).filter((name) => existsSync(join(root, name, "manifest.json"))).sort();
     const manifestNames = catalogDirs.map((name) => readManifest(name).name).sort();
     expect([...bundledCatalogAliases()].sort()).toEqual(manifestNames);
   });
 
-  it("keeps README frontmatter aligned with manifests", () => {
+  it("keeps README frontmatter aligned with manifests", async () => {
     for (const name of readdirSync(root).filter((entry) => existsSync(join(root, entry, "manifest.json")))) {
       const manifest = readManifest(name);
       const frontmatter = readFrontmatter(name);
@@ -58,7 +58,7 @@ describe("local catalogs", () => {
     }
   });
 
-  it("keeps each catalog's app design with the catalog", () => {
+  it("keeps each catalog's app design with the catalog", async () => {
     for (const name of readdirSync(root).filter((entry) => existsSync(join(root, entry, "manifest.json")))) {
       const design = readFileSync(join(root, name, "DESIGN.md"), "utf8");
       expect(design).toMatch(/^# .+ Demo/m);
@@ -66,13 +66,13 @@ describe("local catalogs", () => {
     }
   });
 
-  it("uses explicit dependency order for embedded chat", () => {
+  it("uses explicit dependency order for embedded chat", async () => {
     const taskspace = readManifest("taskspace");
     expect(taskspace.depends).toEqual(["@local:chat"]);
     expect(taskspace.seed_hooks).toContainEqual({ kind: "attach_feature", consumer: "the_taskspace", feature: "chat:$conversational" });
   });
 
-  it("rejects missing catalog dependencies with the installed set in the error", () => {
+  it("rejects missing catalog dependencies with the installed set in the error", async () => {
     const world = createWorld({ catalogs: false });
     const manifest: RuntimeCatalogManifest = {
       name: "needs-chat",
@@ -84,7 +84,7 @@ describe("local catalogs", () => {
     expect(() => installCatalogManifest(world, manifest, { tap: "@local", alias: "needs-chat" })).toThrow(/@local:chat.*\(none\)/);
   });
 
-  it("installs chat from source without trusted implementation hints", () => {
+  it("installs chat from source without trusted implementation hints", async () => {
     const world = createWorld({ catalogs: false });
     const manifest = readManifest("chat") as unknown as RuntimeCatalogManifest;
     installCatalogManifest(world, manifest, {
@@ -101,26 +101,26 @@ describe("local catalogs", () => {
 
     const first = world.auth("guest:catalog-chat-1");
     const second = world.auth("guest:catalog-chat-2");
-    const enterFirst = world.directCall("enter-first", first.actor, "the_chatroom", "enter", []);
-    const enterSecond = world.directCall("enter-second", second.actor, "the_chatroom", "enter", []);
+    const enterFirst = await world.directCall("enter-first", first.actor, "the_chatroom", "enter", []);
+    const enterSecond = await world.directCall("enter-second", second.actor, "the_chatroom", "enter", []);
     expect(enterFirst.op).toBe("result");
     expect(enterSecond.op).toBe("result");
     expect(world.hasPresence(first.actor, "the_chatroom")).toBe(true);
     expect(world.hasPresence(second.actor, "the_chatroom")).toBe(true);
 
-    const say = world.directCall("say", first.actor, "the_chatroom", "say", ["hello from source"]);
+    const say = await world.directCall("say", first.actor, "the_chatroom", "say", ["hello from source"]);
     expect(say.op).toBe("result");
     if (say.op === "result") {
       expect(say.observations).toMatchObject([{ type: "said", source: "the_chatroom", actor: first.actor, text: "hello from source" }]);
       expect(typeof say.observations[0].ts).toBe("number");
     }
 
-    const leave = world.directCall("leave", second.actor, "the_chatroom", "leave", []);
+    const leave = await world.directCall("leave", second.actor, "the_chatroom", "leave", []);
     expect(leave.op).toBe("result");
     expect(world.hasPresence(second.actor, "the_chatroom")).toBe(false);
   });
 
-  it("treats rxd catalog source perms as direct-callable shorthand", () => {
+  it("treats rxd catalog source perms as direct-callable shorthand", async () => {
     const world = createWorld({ catalogs: false });
     const manifest: RuntimeCatalogManifest = {
       name: "shorthand",
@@ -149,10 +149,10 @@ describe("local catalogs", () => {
     const verb = world.object("$shorthand_probe").verbs.get("ping");
     expect(verb?.perms).toBe("rx");
     expect(verb?.direct_callable).toBe(true);
-    expect(world.directCall("catalog-shorthand-ping", "$wiz", "$shorthand_probe", "ping", []).op).toBe("result");
+    expect((await world.directCall("catalog-shorthand-ping", "$wiz", "$shorthand_probe", "ping", [])).op).toBe("result");
   });
 
-  it("installs taskspace from source without trusted implementation hints", () => {
+  it("installs taskspace from source without trusted implementation hints", async () => {
     const world = createWorld({ catalogs: false });
     installCatalogManifest(world, readManifest("chat") as unknown as RuntimeCatalogManifest, {
       tap: "@local",
@@ -169,7 +169,7 @@ describe("local catalogs", () => {
     expect(world.object("$task").verbs.get("set_status")?.kind).toBe("bytecode");
 
     const session = world.auth("guest:catalog-taskspace");
-    const created = world.call("create-task", session.id, "the_taskspace", {
+    const created = await world.call("create-task", session.id, "the_taskspace", {
       actor: session.actor,
       target: "the_taskspace",
       verb: "create_task",
@@ -179,13 +179,13 @@ describe("local catalogs", () => {
     const task = created.op === "applied" ? String(created.observations[0].task) : "";
     expect(world.getProp(task, "title")).toBe("Source task");
 
-    world.call("requirement", session.id, "the_taskspace", { actor: session.actor, target: task, verb: "add_requirement", args: ["has source verbs"] });
-    const done = world.call("done", session.id, "the_taskspace", { actor: session.actor, target: task, verb: "set_status", args: ["done"] });
+    await world.call("requirement", session.id, "the_taskspace", { actor: session.actor, target: task, verb: "add_requirement", args: ["has source verbs"] });
+    const done = await world.call("done", session.id, "the_taskspace", { actor: session.actor, target: task, verb: "set_status", args: ["done"] });
     expect(world.getProp(task, "status")).toBe("done");
     if (done.op === "applied") expect(done.observations.map((obs) => obs.type)).toContain("done_premature");
   });
 
-  it("installs dubspace from source without trusted implementation hints", () => {
+  it("installs dubspace from source without trusted implementation hints", async () => {
     const world = createWorld({ catalogs: false });
     installCatalogManifest(world, readManifest("dubspace") as unknown as RuntimeCatalogManifest, {
       tap: "github:hugh/woo",
@@ -199,7 +199,7 @@ describe("local catalogs", () => {
 
     const session = world.auth("guest:catalog-dubspace");
     const actor = session.actor;
-    const applied = world.call("set-control", session.id, "the_dubspace", {
+    const applied = await world.call("set-control", session.id, "the_dubspace", {
       actor,
       target: "the_dubspace",
       verb: "set_control",
@@ -208,27 +208,27 @@ describe("local catalogs", () => {
     expect(applied.op).toBe("applied");
     expect(world.getProp("delay_1", "feedback")).toBe(0.44);
 
-    const preview = world.directCall("preview", actor, "the_dubspace", "preview_control", ["delay_1", "feedback", 0.5]);
+    const preview = await world.directCall("preview", actor, "the_dubspace", "preview_control", ["delay_1", "feedback", 0.5]);
     expect(preview.op).toBe("result");
     if (preview.op === "result") {
       expect(preview.observations[0]).toMatchObject({ type: "gesture_progress", source: "the_dubspace", actor, target: "delay_1", name: "feedback", value: 0.5 });
     }
     expect(world.getProp("delay_1", "feedback")).toBe(0.44);
 
-    world.call("drum", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_drum_step", args: ["tone", 3, true] });
-    world.call("tempo", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_tempo", args: [250] });
+    await world.call("drum", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_drum_step", args: ["tone", 3, true] });
+    await world.call("tempo", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_tempo", args: [250] });
     const pattern = world.getProp("drum_1", "pattern") as Record<string, boolean[]>;
     expect(pattern.tone[3]).toBe(true);
     expect(world.getProp("drum_1", "bpm")).toBe(200);
 
-    world.call("save", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "save_scene", args: ["Source Scene"] });
-    world.call("mutate", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_control", args: ["delay_1", "feedback", 0.11] });
+    await world.call("save", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "save_scene", args: ["Source Scene"] });
+    await world.call("mutate", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_control", args: ["delay_1", "feedback", 0.11] });
     expect(world.getProp("delay_1", "feedback")).toBe(0.11);
-    world.call("recall", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "recall_scene", args: ["default_scene"] });
+    await world.call("recall", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "recall_scene", args: ["default_scene"] });
     expect(world.getProp("delay_1", "feedback")).toBe(0.44);
   });
 
-  it("seeds the_cockatoo in the chatroom with random-pick squawk", () => {
+  it("seeds the_cockatoo in the chatroom with random-pick squawk", async () => {
     const world = createWorld();
     expect(world.objects.has("$cockatoo")).toBe(true);
     expect(world.objects.has("the_cockatoo")).toBe(true);
@@ -241,9 +241,9 @@ describe("local catalogs", () => {
     expect(phrases.length).toBeGreaterThan(0);
 
     // Cockatoo lives in the_chatroom; presence required to poke it
-    world.directCall("enter", session.actor, "the_chatroom", "enter", []);
+    await world.directCall("enter", session.actor, "the_chatroom", "enter", []);
 
-    const squawk = world.directCall("squawk", session.actor, "the_cockatoo", "squawk", []);
+    const squawk = await world.directCall("squawk", session.actor, "the_cockatoo", "squawk", []);
     expect(squawk.op).toBe("result");
     if (squawk.op === "result") {
       expect(phrases).toContain(String(squawk.result));
@@ -252,21 +252,21 @@ describe("local catalogs", () => {
 
     // Persistent mutations (teach/gag/ungag) are sequenced through the chatroom
     // so they appear in the room's log and replicate as sequenced state.
-    const taught = world.call("teach", session.id, "the_chatroom", { actor: session.actor, target: "the_cockatoo", verb: "teach", args: ["world of objects"] });
+    const taught = await world.call("teach", session.id, "the_chatroom", { actor: session.actor, target: "the_cockatoo", verb: "teach", args: ["world of objects"] });
     expect(taught.op).toBe("applied");
     expect((world.getProp("the_cockatoo", "phrases") as string[]).at(-1)).toBe("world of objects");
 
     // Non-string phrases must be rejected at the verb boundary (would otherwise
     // violate the cockatoo_squawk schema, which declares text: str).
-    const badTeach = world.call("teach-bad", session.id, "the_chatroom", { actor: session.actor, target: "the_cockatoo", verb: "teach", args: [{ not: "a string" } as unknown as string] });
+    const badTeach = await world.call("teach-bad", session.id, "the_chatroom", { actor: session.actor, target: "the_cockatoo", verb: "teach", args: [{ not: "a string" } as unknown as string] });
     expect(badTeach.op).toBe("applied");
     if (badTeach.op === "applied") {
       const errObs = badTeach.observations.find((obs) => obs.type === "$error");
       expect(errObs?.code).toBe("E_TYPE");
     }
 
-    world.call("gag", session.id, "the_chatroom", { actor: session.actor, target: "the_cockatoo", verb: "gag", args: [] });
-    const muffled = world.directCall("squawk-gagged", session.actor, "the_cockatoo", "squawk", []);
+    await world.call("gag", session.id, "the_chatroom", { actor: session.actor, target: "the_cockatoo", verb: "gag", args: [] });
+    const muffled = await world.directCall("squawk-gagged", session.actor, "the_cockatoo", "squawk", []);
     if (muffled.op === "result") {
       expect(muffled.result).toBe("*muffled noises*");
       expect(muffled.observations[0]).toMatchObject({ type: "cockatoo_muffled" });
@@ -275,7 +275,7 @@ describe("local catalogs", () => {
     // :look() composes room contents via :title() — the cockatoo is in
     // the_chatroom, so a looker sees it without subscribing or knowing the
     // objref ahead of time. The cockatoo overrides $root:title for flair.
-    const look = world.directCall("look", session.actor, "the_chatroom", "look", []);
+    const look = await world.directCall("look", session.actor, "the_chatroom", "look", []);
     expect(look.op).toBe("result");
     if (look.op === "result") {
       const room = look.result as { contents: Array<{ id: string; title: string; description: string }> };
@@ -288,57 +288,57 @@ describe("local catalogs", () => {
 
     // $root:title default is the object's name; verify directly on a fresh
     // object so the override-vs-default distinction is pinned.
-    const wizTitle = world.directCall("wiz-title", session.actor, "$wiz", "title", []);
+    const wizTitle = await world.directCall("wiz-title", session.actor, "$wiz", "title", []);
     expect(wizTitle.op).toBe("result");
     if (wizTitle.op === "result") expect(wizTitle.result).toBe(world.object("$wiz").name);
   });
 
-  it("plans chat speech and object commands through the room parser", () => {
+  it("plans chat speech and object commands through the room parser", async () => {
     const world = createWorld();
     const first = world.auth("guest:chat-command-first");
     const second = world.auth("guest:chat-command-second");
     expect(world.object("$conversational").verbs.get("command_plan")?.kind).toBe("native");
     expect(world.object("$match").verbs.get("parse_command")?.kind).toBe("native");
-    world.directCall("enter-first", first.actor, "the_chatroom", "enter", []);
-    world.directCall("enter-second", second.actor, "the_chatroom", "enter", []);
+    await world.directCall("enter-first", first.actor, "the_chatroom", "enter", []);
+    await world.directCall("enter-second", second.actor, "the_chatroom", "enter", []);
 
-    const emotePlan = world.directCall("plan-emote", first.actor, "the_chatroom", "command_plan", [":waves"]);
+    const emotePlan = await world.directCall("plan-emote", first.actor, "the_chatroom", "command_plan", [":waves"]);
     expect(emotePlan.op).toBe("result");
     if (emotePlan.op === "result") {
       expect(emotePlan.result).toMatchObject({ ok: true, route: "direct", target: "the_chatroom", verb: "emote", args: ["waves"] });
     }
 
-    const tellPlan = world.directCall("plan-tell", first.actor, "the_chatroom", "command_plan", [`tell ${second.actor} psst`]);
+    const tellPlan = await world.directCall("plan-tell", first.actor, "the_chatroom", "command_plan", [`tell ${second.actor} psst`]);
     expect(tellPlan.op).toBe("result");
     if (tellPlan.op === "result") {
       expect(tellPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_chatroom", verb: "tell", args: [second.actor, "psst"] });
     }
 
-    const lookPlan = world.directCall("plan-look-cockatoo", first.actor, "the_chatroom", "command_plan", ["l cock"]);
+    const lookPlan = await world.directCall("plan-look-cockatoo", first.actor, "the_chatroom", "command_plan", ["l cock"]);
     expect(lookPlan.op).toBe("result");
     if (lookPlan.op === "result") {
       expect(lookPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_cockatoo", verb: "look", args: [] });
     }
 
-    const prepPlan = world.directCall("plan-long-prep", first.actor, "the_chatroom", "command_plan", ["look cock in front of me"]);
+    const prepPlan = await world.directCall("plan-long-prep", first.actor, "the_chatroom", "command_plan", ["look cock in front of me"]);
     expect(prepPlan.op).toBe("result");
     if (prepPlan.op === "result") {
       const cmd = (prepPlan.result as Record<string, any>).cmd as Record<string, any>;
       expect(cmd).toMatchObject({ dobj: "the_cockatoo", dobjstr: "cock", prep: "in front of", iobj: first.actor, iobjstr: "me" });
     }
 
-    const squawkPlan = world.directCall("plan-squawk-cockatoo", first.actor, "the_chatroom", "command_plan", ["sq bird"]);
+    const squawkPlan = await world.directCall("plan-squawk-cockatoo", first.actor, "the_chatroom", "command_plan", ["sq bird"]);
     expect(squawkPlan.op).toBe("result");
     if (squawkPlan.op === "result") {
       expect(squawkPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_cockatoo", verb: "squawk", args: [] });
     }
 
-    const teachPlan = world.directCall("plan-teach-cockatoo", first.actor, "the_chatroom", "command_plan", ["teach duck \"object worlds\""]);
+    const teachPlan = await world.directCall("plan-teach-cockatoo", first.actor, "the_chatroom", "command_plan", ["teach duck \"object worlds\""]);
     expect(teachPlan.op).toBe("result");
     if (teachPlan.op === "result") {
       const plan = teachPlan.result as Record<string, any>;
       expect(plan).toMatchObject({ ok: true, route: "sequenced", space: "the_chatroom", target: "the_cockatoo", verb: "teach", args: ["object worlds"] });
-      const applied = world.call("teach-cockatoo-command", first.id, String(plan.space), {
+      const applied = await world.call("teach-cockatoo-command", first.id, String(plan.space), {
         actor: first.actor,
         target: String(plan.target),
         verb: String(plan.verb),
@@ -362,7 +362,7 @@ describe("local catalogs", () => {
       native: "describe",
       direct_callable: true
     } satisfies VerbDef);
-    const middleStarPlan = world.directCall("plan-middle-star-alias", first.actor, "the_chatroom", "command_plan", ["p bird"]);
+    const middleStarPlan = await world.directCall("plan-middle-star-alias", first.actor, "the_chatroom", "command_plan", ["p bird"]);
     expect(middleStarPlan.op).toBe("result");
     if (middleStarPlan.op === "result") {
       expect(middleStarPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_cockatoo", verb: "preen", args: [] });
@@ -373,7 +373,7 @@ describe("local catalogs", () => {
   return false;
 }`, null);
     expect(override.ok).toBe(true);
-    const huh = world.directCall("plan-huh-override", first.actor, "the_chatroom", "command_plan", ["/doesnotexist"]);
+    const huh = await world.directCall("plan-huh-override", first.actor, "the_chatroom", "command_plan", ["/doesnotexist"]);
     expect(huh.op).toBe("result");
     if (huh.op === "result") {
       expect(huh.result).toMatchObject({ ok: false, route: "huh", target: "the_chatroom", verb: "huh" });
@@ -381,7 +381,7 @@ describe("local catalogs", () => {
     }
   });
 
-  it("migrates the cockatoo into worlds installed before it landed", () => {
+  it("migrates the cockatoo into worlds installed before it landed", async () => {
     const world = createWorld();
     // Reset to before the cockatoo migration ran
     world.setProp("$system", "applied_migrations", ["2026-04-30-source-catalog-verbs", "2026-04-30-catalog-placement-metadata"]);
@@ -398,12 +398,12 @@ describe("local catalogs", () => {
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-chat-cockatoo");
 
     const session = world.auth("guest:migrated-cockatoo");
-    world.directCall("enter", session.actor, "the_chatroom", "enter", []);
-    const squawk = world.directCall("squawk", session.actor, "the_cockatoo", "squawk", []);
+    await world.directCall("enter", session.actor, "the_chatroom", "enter", []);
+    const squawk = await world.directCall("squawk", session.actor, "the_cockatoo", "squawk", []);
     expect(squawk.op).toBe("result");
   });
 
-  it("migrates stale local catalog native verbs to source bytecode", () => {
+  it("migrates stale local catalog native verbs to source bytecode", async () => {
     const world = createWorld();
     world.setProp("$system", "applied_migrations", []);
     const look = world.object("$conversational").verbs.get("look")!;
@@ -469,15 +469,15 @@ describe("local catalogs", () => {
     expect(world.getProp("the_taskspace", "host_placement")).toBe("self");
 
     const session = world.auth("guest:migrated-catalog");
-    expect(world.directCall("enter", session.actor, "the_chatroom", "enter", []).op).toBe("result");
-    const created = world.call("create-task", session.id, "the_taskspace", {
+    expect((await world.directCall("enter", session.actor, "the_chatroom", "enter", [])).op).toBe("result");
+    const created = await world.call("create-task", session.id, "the_taskspace", {
       actor: session.actor,
       target: "the_taskspace",
       verb: "create_task",
       args: ["Migrated task", ""]
     });
     const task = created.op === "applied" ? String(created.observations[0].task) : "";
-    const subtask = world.call("add-subtask", session.id, "the_taskspace", {
+    const subtask = await world.call("add-subtask", session.id, "the_taskspace", {
       actor: session.actor,
       target: task,
       verb: "add_subtask",
@@ -486,21 +486,21 @@ describe("local catalogs", () => {
     expect(subtask.op).toBe("applied");
   });
 
-  it("surfaces :title failures during room look composition", () => {
+  it("surfaces :title failures during room look composition", async () => {
     const world = createWorld();
     const session = world.auth("guest:title-failure");
-    world.directCall("enter", session.actor, "the_chatroom", "enter", []);
+    await world.directCall("enter", session.actor, "the_chatroom", "enter", []);
     world.createObject({ id: "bad_title_item", name: "Bad Title", parent: "$thing", owner: "$wiz", location: "the_chatroom" });
     expect(installVerb(world, "bad_title_item", "title", `verb :title() rxd {
   raise { code: "E_PERM", message: "title denied" };
 }`, null).ok).toBe(true);
 
-    const look = world.directCall("look-title-failure", session.actor, "the_chatroom", "look", []);
+    const look = await world.directCall("look-title-failure", session.actor, "the_chatroom", "look", []);
     expect(look.op).toBe("error");
     if (look.op === "error") expect(look.error.code).toBe("E_PERM");
   });
 
-  it("exposes generic catalog-derived state and object routes", () => {
+  it("exposes generic catalog-derived state and object routes", async () => {
     const world = createWorld();
     const session = world.auth("guest:catalog-state");
     const state = world.state(session.actor);
@@ -517,7 +517,7 @@ describe("local catalogs", () => {
     ]));
   });
 
-  it("declares source for every catalog verb", () => {
+  it("declares source for every catalog verb", async () => {
     for (const name of readdirSync(root).filter((entry) => existsSync(join(root, entry, "manifest.json")))) {
       const manifest = readManifest(name);
       const defs = [...(manifest.classes ?? []), ...(manifest.features ?? [])];

@@ -133,6 +133,7 @@ caller-controlled work; non-wizard frames cannot use it to escalate.
 | `E_INTRPT` | Task killed. |
 | `E_GONE` | Transient ref no longer valid (host disconnected). |
 | `E_TIMEOUT` | Deadline exceeded (task wall-time budget, cross-host RPC). |
+| `E_CROSS_HOST_WRITE` | Behavior attempted a property-definition or property-value write on an object outside the current host's atomic rollback scope. |
 | `E_NOSESSION` | Session token is expired or unknown. |
 | `E_VERSION` | Bytecode version mismatch (cache stale). |
 | `E_FED_DISABLED` | Federation not enabled (v1 single-world). |

@@ -26,7 +26,7 @@ Scope:
 Explicit non-scope:
 
 - Durable `SUSPEND`, `FORK`, and `READ`.
-- Cross-host task migration.
+- Cross-host RPC.
 - Durable task queues, alarms, or parked continuation storage.
 
 For v0.5a, async parking opcodes must have stable instruction shapes but either

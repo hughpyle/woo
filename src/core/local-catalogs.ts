@@ -1,6 +1,6 @@
 import { BUNDLED_CATALOGS } from "../generated/bundled-catalogs";
 import { installCatalogManifest, repairCatalogManifest, type CatalogManifest } from "./catalog-installer";
-import { wooError, type Message, type WooValue } from "./types";
+import type { WooValue } from "./types";
 import type { WooWorld } from "./world";
 
 export type LocalCatalogName = string;
@@ -37,8 +37,8 @@ export function installLocalCatalogs(world: WooWorld, names: readonly string[] =
 
 export function installLocalCatalog(world: WooWorld, name: string): void {
   if (!isLocalCatalogName(name)) throw new Error(`unknown local catalog: ${name}`);
-  // Boot auto-install is idempotent: the first install is sequenced through
-  // $catalog_registry, while later boot passes skip without adding no-op log rows.
+  // Boot auto-install is part of deterministic world construction, not a user
+  // catalog operation. Runtime installs still go through $catalog_registry.
   if (localCatalogInstalled(world, name)) return;
   const manifest = LOCAL_CATALOGS.get(name)!;
   const provenance: Record<string, WooValue> = {
@@ -48,21 +48,7 @@ export function installLocalCatalog(world: WooWorld, name: string): void {
     ref_requested: "@local",
     ref_resolved_sha: "unversioned"
   };
-  if (!world.objects.has("$catalog_registry") || !world.object("$catalog_registry").verbs.has("install")) {
-    installCatalogManifest(world, manifest, { tap: "@local", alias: name, actor: "$wiz", provenance });
-    return;
-  }
-  const message: Message = {
-    actor: "$wiz",
-    target: "$catalog_registry",
-    verb: "install",
-    args: [manifest as unknown as WooValue, {}, name, provenance]
-  };
-  const frame = world.applyCall(undefined, "$catalog_registry", message);
-  const errorObservation = frame.observations.find((observation) => observation.type === "$error");
-  if (errorObservation) {
-    throw wooError(String(errorObservation.code ?? "E_CATALOG"), String(errorObservation.message ?? "catalog install failed"), errorObservation as unknown as WooValue);
-  }
+  installCatalogManifest(world, manifest, { tap: "@local", alias: name, actor: "$wiz", provenance });
 }
 
 function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): void {

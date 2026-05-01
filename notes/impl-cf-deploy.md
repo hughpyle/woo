@@ -85,13 +85,13 @@ Substrate landed (works in-process):
 
 - `ObjectRepository` interface in `src/core/repository.ts` with full method set + `transaction()` + `savepoint()`.
 - In-memory and local SQLite repositories (`src/core/repository.ts` `InMemoryObjectRepository`, `src/server/sqlite-repository.ts`).
-- Two-phase log writes (`appendLog` returns pending, `recordLogOutcome` updates), guarded against committed-pending rows.
+- Sequenced log commit split (`appendLog` + `recordLogOutcome`) guarded against committed-pending rows. The async behavior path completes before the final storage transaction opens.
 - DSL compiler M1 (`src/core/dsl-compiler.ts`) — recompile-on-import works for catalogs.
 - REST API with six endpoints (`src/server/dev-server.ts` for the local Node target).
 - Wire ops `direct`/`result`/`event` over WebSocket.
 - Identity three-layer model (actor/session/connection); session table is credential-only, connection state in-memory.
 - Local + GitHub catalog install path; manifests for chat/dubspace/taskspace ship in `catalogs/`. GitHub tap helper lives in `src/server/github-taps.ts` and is wired through `POST /api/tap/install` and `GET /api/taps`. Wizard auth via `wizard:<WOO_INITIAL_WIZARD_TOKEN>`.
-- 98/98 tests pass; typecheck clean (split: main + `tsconfig.worker.json`).
+- 127/127 tests pass; typecheck clean (split: main + `tsconfig.worker.json`).
 
 Phase 0 (toolchain smoke test) — landed:
 
@@ -156,6 +156,14 @@ Phase 2.4 (host-scoped cluster loader) — landed:
 - Runtime-created object ids now include their anchor-derived scope (`obj_<scope>_<n>`) so independent hosts do not mint the same `obj_1` name.
 - Verification in the current worktree: `npm run typecheck`, `npm test` (105/105 after host-scope tests), `npm run build`, Playwright smoke, `wrangler deploy --dry-run`, and `git diff --check` pass.
 
+Phase 2.5 (single async runtime path + cross-host dispatch bridge) — landed locally:
+
+- `WooWorld.call`, `directCall`, `dispatch`, parked-task resume, and VM execution are async end to end. There is no sync compatibility path for behavior execution.
+- The host bridge is async: `hostForObject`, `getPropChecked`, and `dispatch` may await routed host work. VM `GET_PROP`, `CALL_VERB`, and `PASS` await through that bridge; property writes/definition edits to remote objects still raise `E_CROSS_HOST_WRITE`.
+- Behavior executions serialize through a per-world host queue (sequenced calls, direct calls, and parked-task resumes). Sequenced calls reserve `seq` in memory, run the awaited behavior under an in-memory behavior savepoint, then commit dirty local state plus `appendLog`/`recordLogOutcome` in one repository transaction. This is the clear async shape; it replaces the earlier "run behavior inside a sync storage transaction" sketch.
+- Worker hosts expose internal `/__internal/remote-get-prop` and `/__internal/remote-dispatch` routes. Routed dispatch returns both the verb result and emitted observations so the origin frame preserves live/replay observations.
+- Verification in the current worktree: `npm test` (127/127), `npx tsc --noEmit`, `npx tsc --noEmit -p tsconfig.worker.json`, `npm run build`, and `git diff --check` pass.
+
 Verb-flag persistence fix (storage-layer bug, both backends) — landed:
 
 - Both `LocalSQLiteRepository` and `CFObjectRepository` had a pre-existing schema bug: the `verb` table had no `flags` column, so `direct_callable` and `skip_presence_check` were silently dropped on save and reset to undefined on load. Locally invisible because the in-memory state from initial bootstrap survived in the same process; on CF every fresh DO instance re-hydrated from storage and lost the flags, so calls to chat verbs returned `E_DIRECT_DENIED`.
@@ -171,7 +179,7 @@ In dependency order:
 - **SSE stream** (`/api/objects/{id}/stream`) on the Worker. Returns 501 placeholder; browser clients use the WebSocket path. SSE matters for HTTP-only agent integrations.
 - **Authoring REST endpoints** in the Worker: `/api/compile`, `/api/install`, `/api/property`, `/api/property/value`, and `/api/authoring/objects/{create,move,chparent}`. The IDE tab can read object descriptions but cannot author verbs or object lifecycle changes against the deployed world. dev-server has the Node implementations; needs Web-standard ports.
 - **`wiz:rotate_bootstrap_token` verb** on `$system`. Spec'd in §R14.4; impl pending.
-- **General cross-DO RPC layer**: `RemoteHost.rpc(target, method, args)` stub used by `world.dispatch` when target is on a different anchor cluster. The first routing slice forwards top-level REST/WS calls, but verb bodies still assume local dispatch inside a host.
+- **Deployed cross-DO smoke for mid-verb RPC**: the async `HostBridge` and Worker internal routes are wired locally, but need a live CF/Miniflare exercise that proves a verb on one host can read/call another host and surface observations correctly.
 - **Authenticated internal forwarding headers**: the public Worker strips inbound `x-woo-internal-*` headers before forwarding, but cluster DOs currently trust headers from any caller with the same DO binding. Add an HMAC over the forwarded tuple (`session, actor, expires_at, token_class`) with a `WOO_INTERNAL_SECRET` before treating cluster DOs as an independently callable surface.
 - **General object-route registration**: Directory has `/register-objects`, and task creation is wired via `task_created` observations. General `createObject` paths still need a placement callback so new rooms/objects register their intended host at creation time.
 - **Aggregate health**: `/healthz` is gateway-local. Add a Directory/host fan-out health endpoint when routed-host liveness needs to be operator-visible.
@@ -196,7 +204,7 @@ In dependency order:
 
 1. **Sessions placement.** Current slice uses Directory's `session_id -> actor` table. Lean from §R11.4 still points toward embedded player ids for long-term removal of a session lookup hop; decide before player-DO routing.
 2. **`world.ts` decomposition.** The Worker can route top-level calls now, but `WooWorld` still assumes local class/verb availability and local dispatch within a host. Light refactor (cluster-aware dispatch + remote definition cache) vs. full decomposition along TECH_DEBT_AUDIT F001 lines remains open.
-3. **Storage transaction boundaries** at CF: `state.storage.transactionSync` compiles and dry-runs; still needs a Miniflare/DO storage probe for nested savepoint behavior under real CF storage.
+3. **Storage transaction boundaries** at CF: `state.storage.transactionSync` compiles and dry-runs; still needs a Miniflare/DO storage probe for commit behavior and repository-local savepoints under real CF storage.
 4. **Demo catalogs at boot**: should `WOO_AUTO_INSTALL_CATALOGS=chat,dubspace,taskspace` be the default for fresh dev deploys (current intent) or empty for CF deploys (clean world)? Probably default in dev, empty in production.
 
 ## Reference

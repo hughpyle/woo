@@ -3,7 +3,7 @@
 > Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **first-light** (T0 carries forward into v1-core as a subset of the full VM).
 
 The tiny demo should run real Woo behavior in a VM. It should not wait for the
-entire future VM: task migration, suspension, browser-host execution, exception
+entire future VM: host RPC, suspension, browser-host execution, exception
 machinery, and full source-language compilation are not required for first
 light.
 
@@ -30,7 +30,7 @@ behavior, not VM concepts.
 
 - No user-authored source language.
 - No full DSL parser.
-- No cross-host task migration.
+- No cross-host RPC.
 - No `suspend`, `fork`, or `read`.
 - No browser-hosted transient VM.
 - No long-lived task serialization.
@@ -43,12 +43,13 @@ authoring surface can come later.
 
 ## T0 Execution Model
 
-A T0 VM invocation is synchronous and local.
+A T0 VM invocation uses the same async runtime path as the full VM, but the T0
+opcode set itself does not initiate cross-host RPC or durable parking.
 
 1. `$space:call(message)` validates the incoming message.
 2. `$space` assigns `seq`.
 3. The runtime resolves `message.target` and `message.verb`.
-4. The target verb's bytecode runs to completion inside the call transaction.
+4. The target verb's bytecode runs to completion inside the behavior savepoint.
 5. If it succeeds, mutations commit and observations are delivered.
 6. If it fails, mutations roll back, the sequenced message remains accepted,
    and an error observation is delivered.
@@ -123,7 +124,7 @@ opcode representation is acceptable.
 | `GET_PROP` | `obj name -> value` | Read local persistent property. |
 | `SET_PROP` | `obj name value ->` | Write local persistent property. |
 
-In T0, `GET_PROP` and `SET_PROP` are local to the current space transaction.
+In T0, `GET_PROP` and `SET_PROP` are local to the current behavior savepoint.
 Cross-host property access is outside the tiny profile.
 
 ### Observations

@@ -18,7 +18,7 @@ does not need the full language, full VM, LambdaCore compatibility, federation,
 or full programmable end-user code.
 
 Prefer seeded objects and seeded T0 bytecode for the first slice. Add the full
-DSL, task migration, suspension, and browser-host VM only after the core
+DSL, host RPC, suspension, and browser-host VM only after the core
 message/object/space path is working.
 
 The minimal IDE is a planned small slice, not the full authoring system: object

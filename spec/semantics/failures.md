@@ -32,13 +32,13 @@ Each row cites its primary doc. This document only adds context not already cove
 | Tick exhaustion | task exceeds tick budget | `$error` `E_TICKS` in applied | as behavior failure | applied with error | refactor verb; monotone budget | [vm.md §8.4](vm.md#84-tick-metering) |
 | Memory exhaustion | task exceeds memory cap | `$error` `E_MEM` in applied | as behavior failure | applied with error | refactor verb; monotone budget | [vm.md §8.5](vm.md#85-memory-metering) |
 | Wall-time exceeded | task exceeds wall budget | `$error` `E_TIMEOUT` in applied | as behavior failure | applied with error | refactor verb; monotone clock | [vm.md §8.7](vm.md#87-wall-time-budget) |
-| Cross-host RPC timeout | receiver doesn't reply within deadline | `E_TIMEOUT` | originating task aborts; no cleanup of receiver | possible torn target state | retry with same id; gap recovery | [hosts.md §3.4 (6)](../protocol/hosts.md#34-task-migration-invariants) |
-| Receiver crash mid-call | host crashes during behavior | `E_TIMEOUT` to originator | tasks not in `task` table are lost; in-table tasks survive | possibly partial mutations on target | tooling-driven cleanup | [hosts.md §3.4 (5)](../protocol/hosts.md#34-task-migration-invariants) |
-| Originator hibernation mid-RPC | host hibernates while awaiting reply | n/a (resumes transparently) | reply queued by platform; host wakes, resumes from `awaiting_call` | nothing | automatic | [tasks.md §16.3](tasks.md#163-suspend-across-cross-host-rpc) |
-| Network partition | originator can't reach receiver | `E_TIMEOUT` | originator times out; receiver may still apply | receiver may complete | retry; gap recovery covers any duplicate | [hosts.md §3.4 (6)](../protocol/hosts.md#34-task-migration-invariants) |
+| Cross-host RPC timeout | receiver doesn't reply within deadline | `E_TIMEOUT` | originating task aborts; no cleanup of receiver | possible torn target state | retry with same id; gap recovery | [hosts.md §3.4 (6)](../protocol/hosts.md#34-host-rpc-invariants) |
+| Receiver crash mid-call | host crashes during behavior | `E_TIMEOUT` to originator | receiver tasks not in `task` table are lost; in-table tasks survive | possibly partial mutations on target | tooling-driven cleanup | [hosts.md §3.4 (5)](../protocol/hosts.md#34-host-rpc-invariants) |
+| Originator crash/hibernation mid-RPC | host disappears while awaiting reply | n/a | uncheckpointed running task is lost; no applied frame returned | local pre-commit state restored by restart | caller retry | [tasks.md §16.3](tasks.md#163-cross-host-rpc) |
+| Network partition | originator can't reach receiver | `E_TIMEOUT` | originator times out; receiver may still apply | receiver may complete | retry; gap recovery covers any duplicate | [hosts.md §3.4 (6)](../protocol/hosts.md#34-host-rpc-invariants) |
 | Duplicate RPC retry | client retries with same `id` | identical `applied` frame | correlation-id cache hit; no new seq | nothing | automatic | [wire.md §17.4](../protocol/wire.md#174-the-applied-push-model) |
-| Bytecode version skew | task resumes against incompatible bytecode | `E_VERSION` in applied | task aborts cleanly; never silently runs old code | applied with error | re-issue against current code | [hosts.md §3.4 (4)](../protocol/hosts.md#34-task-migration-invariants) |
-| Storage write failure (call transaction) | persistent storage rejects before the outer call transaction commits | `op:"error"` w/ `E_STORAGE` | call rejected; **no visible seq advance**; nothing committed to log | nothing | client retry; investigate operator-side | (this doc, §F6) |
+| Bytecode version skew | task resumes against incompatible bytecode | `E_VERSION` in applied | task aborts cleanly; never silently runs old code | applied with error | re-issue against current code | [hosts.md §3.4 (4)](../protocol/hosts.md#34-host-rpc-invariants) |
+| Storage write failure (call commit) | persistent storage rejects before the final call commit completes | `op:"error"` w/ `E_STORAGE` | call rejected; **no durable seq advance**; nothing committed to log | nothing | client retry; investigate operator-side | (this doc, §F6) |
 | Storage write failure (during behavior) | storage fails during verb body | `op:"applied"` w/ `$error E_STORAGE` | mutations rolled back; seq stays in log | applied with error | behavior-failure semantics; investigate operator-side | (this doc, §F6) |
 | Quota exceeded | per-task / per-owner / per-space cap hit | `E_QUOTA` in applied | call rejected before behavior runs | nothing | wait, request more quota | [permissions.md §11.7](permissions.md#117-storage-quotas-and-accounting), [tasks.md §16.7](tasks.md#167-fork-and-suspend-caps) |
 | Inbound rate limit | client over `connection_*` budget | `op:"error"` w/ `E_RATE` | excess frames dropped at WS | nothing | client backoff | [wire.md §17.5](../protocol/wire.md#175-backpressure-and-rate-limiting) |
@@ -66,7 +66,7 @@ These rules together preserve replay determinism: the log is faithful, the rolle
 
 ## F4. Cross-host failures and the migration invariants
 
-The five invariants in [hosts.md §3.4](../protocol/hosts.md#34-task-migration-invariants) cover the cross-host failure surface:
+The invariants in [hosts.md §3.4](../protocol/hosts.md#34-host-rpc-invariants) cover the cross-host failure surface:
 
 1. One-task-one-host.
 2. Idempotency via correlation id.
@@ -94,18 +94,18 @@ Tick weights for cross-host operations (`GET_PROP` remote 100, `CALL_VERB` remot
 
 ## F6. Storage and persistence failures
 
-The persistence layer (`spec/reference/persistence.md`) gives per-opcode atomicity. A sequenced call runs in one outer host transaction, with the behavior body inside a savepoint ([cloudflare.md §R3.4](../reference/cloudflare.md#r34-transactions-and-rollback-scope)). A verb body is *not* atomic across yield points; cross-DO ops give other tasks the chance to interleave. Storage-level failures fall into two categories with **distinct, definite semantics**:
+The persistence layer (`spec/reference/persistence.md`) gives per-write atomicity. A sequenced call runs on an async behavior path with an in-memory behavior savepoint, then commits the final local state and log outcome in one host transaction ([cloudflare.md §R3.4](../reference/cloudflare.md#r34-transactions-and-rollback-scope)). A verb body is *not* atomic across yield points; cross-DO ops give other tasks the chance to interleave. Storage-level failures fall into two categories with **distinct, definite semantics**:
 
-**Call-transaction storage failure.** If persistent storage fails before the outer call transaction commits — including validation/authorization storage reads, seq allocation, pending log insert, outcome update, or final commit — the call is rejected: `op:"error"` with code `E_STORAGE`. **No `seq` is visible.** Nothing is committed to the log. From all observers, the call did not happen.
+**Call-commit storage failure.** If persistent storage fails before the final call commit completes — including durable seq allocation, log insert, outcome update, dirty object writes, or final commit — the call is rejected: `op:"error"` with code `E_STORAGE`. **No durable `seq` is visible.** Nothing is committed to the log. From all replay readers and subscribers, the call did not happen.
 
-**Behavior storage rejection.** If a storage operation inside the behavior savepoint raises an error that leaves the outer transaction usable, the failure is treated as a behavior failure: `op:"applied"` with a `$error E_STORAGE` observation, behavior mutations rolled back to the savepoint, and the message committed at its assigned `seq` with `applied_ok = false`. Same shape as any other behavior failure.
+**Behavior storage rejection.** If user-visible behavior reaches a storage-backed primitive that raises a recoverable `E_STORAGE` before the final commit, the failure is treated as a behavior failure: `op:"applied"` with a `$error E_STORAGE` observation, behavior mutations rolled back to the savepoint, and the message committed at its assigned `seq` with `applied_ok = false`. Same shape as any other behavior failure.
 
-The cases are deliberately disjoint. The runtime never reaches a state where "seq advanced but the message is not durably in the log" — that combination is impossible by construction. If the outer transaction commits, the seq, message, and outcome are durable together; if it aborts, the seq was never visible.
+The cases are deliberately disjoint. The runtime never reaches a state where "seq durably advanced but the message is not durably in the log" — that combination is impossible by construction. If the final commit succeeds, the seq, message, outcome, and local state are durable together; if it aborts, the seq was never visible.
 
 Other storage incidents:
 
 - **Storage corruption (read returns inconsistent data).** Detection is best-effort. The host crashes loudly rather than returning corrupt values to user code. Recovery is operator-driven (restore from backup, run integrity checks); the spec does not define automatic repair.
-- **Crash mid-opcode.** SQLite gives all-or-nothing per opcode; a crash leaves either the pre or post state, not a partial. Cross-opcode atomicity within a verb body is provided by the host transaction wrapping the call.
+- **Crash mid-opcode.** SQLite gives all-or-nothing per storage opcode; a crash leaves either the pre or post state, not a partial. Cross-opcode rollback within a verb body is provided by the runtime behavior savepoint until the final commit.
 
 `E_STORAGE` is reserved for spec-internal storage rejections; `E_QUOTA` is the user-facing "you ran out of allowed space" signal. User code should not commonly see `E_STORAGE`; if it does, it's an operational signal.
 

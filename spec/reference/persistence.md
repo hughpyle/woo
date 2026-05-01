@@ -25,7 +25,7 @@ CREATE TABLE object (
   parent      TEXT,                -- ULID or NULL for root
   owner       TEXT NOT NULL,
   location    TEXT,                -- ULID or NULL
-  anchor      TEXT,                -- ULID of anchor; NULL = own host. Immutable.
+  anchor      TEXT,                -- ULID of anchor; NULL = no anchor cluster. Atomicity scope, not host placement (objects.md §4.1, §4.2). Immutable.
   flags       TEXT NOT NULL,       -- JSON {wizard?, programmer?, fertile?, recyclable?}
   created     INTEGER NOT NULL,
   modified    INTEGER NOT NULL
@@ -132,10 +132,10 @@ CREATE TABLE ancestor_chain (
 CREATE TABLE task (
   id              TEXT PRIMARY KEY,
   parked_on       TEXT NOT NULL,           -- the hosted object the task counts against
-  state           TEXT NOT NULL,           -- 'suspended' | 'awaiting_read' | 'awaiting_call'
+  state           TEXT NOT NULL,           -- 'suspended' | 'awaiting_read'
   resume_at       INTEGER,                 -- ms timestamp
   awaiting_player TEXT,                    -- objref
-  correlation_id  TEXT,                    -- for awaiting_call
+  correlation_id  TEXT,                    -- reserved for future durable RPC parking
   serialized      BLOB NOT NULL,           -- whole Task object, JSON-encoded for now
   created         INTEGER NOT NULL,
   origin          TEXT NOT NULL            -- objref where task started (may differ from parked_on)

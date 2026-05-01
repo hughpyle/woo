@@ -58,11 +58,11 @@ public capabilities.
 
 ### 11.5 Cross-host trust
 
-When a task migrates between persistent hosts within the same deployment, the receiver trusts the migrated frame's `progr`. The deployment boundary is the trust boundary.
+When a task calls between persistent hosts within the same deployment, the receiver trusts the call envelope's `progr`. The deployment boundary is the trust boundary.
 
-When a task migrates from a persistent host into a transient host (browser), the originating host retains the canonical task identity. The transient host may not modify `progr`; on return, the originating host re-stamps the result frame and rejects any mutation of identity fields. Enforcement: the originating host doesn't trust the returned frame's identity fields and uses its stored copy.
+When a task calls from a persistent host into a transient host (browser), the originating host retains the canonical task identity. The transient host may not modify `progr`; on return, the originating host uses its stored identity fields and treats browser output as untrusted return data.
 
-See [protocol/hosts.md §3.3](../protocol/hosts.md#33-trust-model-across-hosts) and [§3.4](../protocol/hosts.md#34-task-migration-invariants) for the protocol-level rules.
+See [protocol/hosts.md §3.3](../protocol/hosts.md#33-trust-model-across-hosts) and [§3.4](../protocol/hosts.md#34-host-rpc-invariants) for the protocol-level rules.
 
 ### 11.6 Capabilities (deferred)
 

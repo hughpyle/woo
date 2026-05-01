@@ -39,7 +39,7 @@ import {
   statusForError,
   type RestProtocolRequest
 } from "../core/protocol";
-import type { ObjRef, Session, WooValue } from "../core/types";
+import type { ObjRef, Observation, Session, WooValue } from "../core/types";
 import { wooError } from "../core/types";
 import type { AppliedFrame, DirectResultFrame, ErrorFrame, LiveEventFrame, Message } from "../core/types";
 import type { SerializedWorld } from "../core/repository";
@@ -48,7 +48,7 @@ import { CFObjectRepository } from "./cf-repository";
 
 // Re-import WooWorld type. Note `import type` must reach the world module
 // without dragging Node-only deps into the Worker bundle.
-import type { WooWorld } from "../core/world";
+import type { CallContext, HostBridge, WooWorld } from "../core/world";
 
 export interface Env {
   WOO: DurableObjectNamespace;
@@ -176,6 +176,7 @@ export class PersistentObjectDO {
       const world = hostKey === WORLD_HOST
         ? createWorld({ repository: this.repo, catalogs: parseAutoInstallCatalogs(this.env.WOO_AUTO_INSTALL_CATALOGS) })
         : await this.createHostScopedWorld(hostKey as ObjRef);
+      this.installHostBridge(world, hostKey);
       // Rehydrate live WebSocket attachments. After DO wake-from-hibernation,
       // state.getWebSockets() returns sockets whose serializeAttachment
       // payload survived hibernation; the in-memory world.sessions, however,
@@ -249,6 +250,57 @@ export class PersistentObjectDO {
       // Directory acceleration is best-effort. Fallback routing still sends
       // unknown objects to the world host or the caller-provided space host.
     }
+  }
+
+  private installHostBridge(world: WooWorld, localHost: string): void {
+    const hostForObject = async (id: ObjRef): Promise<string | null> => {
+      const cached = this.routeCache.get(id);
+      if (cached) return cached;
+      if (world.objects.has(id)) return localHost;
+      return await this.resolveObjectHost(id, localHost);
+    };
+    const bridge: HostBridge = {
+      localHost,
+      hostForObject,
+      getPropChecked: async (progr, objRef, name) => {
+        const host = await hostForObject(objRef);
+        if (!host || host === localHost) return await world.getPropChecked(progr, objRef, name);
+        const response = await this.forwardInternalChecked<{ value: WooValue }>(host, "/__internal/remote-get-prop", { progr, obj: objRef, name });
+        return response.value;
+      },
+      dispatch: async (ctx, target, verbName, args, startAt) => {
+        const host = await hostForObject(startAt ?? target);
+        if (!host || host === localHost) return await world.hostDispatch(ctx, target, verbName, args, startAt);
+        const response = await this.forwardInternalChecked<{ result: WooValue; observations?: Observation[] }>(host, "/__internal/remote-dispatch", {
+          ctx: this.serializedCallContext(ctx),
+          target,
+          verb: verbName,
+          args,
+          start_at: startAt ?? null
+        });
+        if (Array.isArray(response.observations)) {
+          for (const observation of response.observations) ctx.observations.push(observation);
+        }
+        return response.result;
+      }
+    };
+    world.setHostBridge(bridge);
+  }
+
+  private serializedCallContext(ctx: CallContext): Record<string, unknown> {
+    return {
+      space: ctx.space,
+      seq: ctx.seq,
+      actor: ctx.actor,
+      player: ctx.player,
+      caller: ctx.caller,
+      callerPerms: ctx.callerPerms,
+      progr: ctx.progr,
+      thisObj: ctx.thisObj,
+      verbName: ctx.verbName,
+      definer: ctx.definer,
+      message: ctx.message
+    };
   }
 
   private async registerRemoteObjectRoutes(host: string): Promise<void> {
@@ -380,7 +432,7 @@ export class PersistentObjectDO {
             ? raw.body as Record<string, WooValue>
             : undefined
         };
-        return jsonResponse(world.call(typeof body.frame_id === "string" ? body.frame_id : undefined, session.id, String(body.space ?? "") as ObjRef, message));
+        return jsonResponse(await world.call(typeof body.frame_id === "string" ? body.frame_id : undefined, session.id, String(body.space ?? "") as ObjRef, message));
       }
 
       if (request.method === "POST" && pathname === "/__internal/ws-direct") {
@@ -391,7 +443,7 @@ export class PersistentObjectDO {
           Number(body.expires_at ?? 0),
           body.token_class
         );
-        const result = world.directCall(
+        const result = await world.directCall(
           typeof body.frame_id === "string" ? body.frame_id : undefined,
           session.actor,
           String(body.target ?? "") as ObjRef,
@@ -414,6 +466,51 @@ export class PersistentObjectDO {
         const from = Math.max(1, Number(body.from ?? 1));
         const limit = Math.min(Math.max(1, Number(body.limit ?? 100)), 500);
         return jsonResponse({ op: "replay", id: body.frame_id, space, from, entries: world.replay(space, from, limit) });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/remote-get-prop") {
+        const progr = String(body.progr ?? "") as ObjRef;
+        const obj = String(body.obj ?? "") as ObjRef;
+        const name = String(body.name ?? "");
+        return jsonResponse({ value: await world.getPropChecked(progr, obj, name) });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/remote-dispatch") {
+        const rawCtx = body.ctx && typeof body.ctx === "object" && !Array.isArray(body.ctx)
+          ? body.ctx as Record<string, unknown>
+          : {};
+        const target = String(body.target ?? "") as ObjRef;
+        const verb = String(body.verb ?? "");
+        const args = Array.isArray(body.args) ? body.args as WooValue[] : [];
+        const startAt = typeof body.start_at === "string" ? body.start_at as ObjRef : null;
+        const observations: Observation[] = [];
+        const actor = String(rawCtx.actor ?? "") as ObjRef;
+        const player = String(rawCtx.player ?? actor) as ObjRef;
+        if (actor) this.ensureInternalActor(world, actor);
+        if (player) this.ensureInternalActor(world, player);
+        const message = rawCtx.message && typeof rawCtx.message === "object" && !Array.isArray(rawCtx.message)
+          ? rawCtx.message as Message
+          : { actor, target, verb, args };
+        const ctx: CallContext = {
+          world,
+          space: String(rawCtx.space ?? "#-1") as ObjRef,
+          seq: Number(rawCtx.seq ?? -1),
+          actor,
+          player,
+          caller: String(rawCtx.caller ?? "#-1") as ObjRef,
+          callerPerms: String(rawCtx.callerPerms ?? rawCtx.progr ?? actor) as ObjRef,
+          progr: String(rawCtx.progr ?? actor) as ObjRef,
+          thisObj: String(rawCtx.thisObj ?? target) as ObjRef,
+          verbName: String(rawCtx.verbName ?? verb),
+          definer: String(rawCtx.definer ?? target) as ObjRef,
+          message,
+          observations,
+          observe: (event) => {
+            observations.push({ ...event, source: event.source ?? String(rawCtx.space ?? "#-1") });
+          }
+        };
+        const result = await world.hostDispatch(ctx, target, verb, args, startAt);
+        return jsonResponse({ result, observations });
       }
 
       return jsonResponse({ error: { code: "E_OBJNF", message: `no internal route for ${request.method} ${pathname}` } }, 404);
@@ -550,7 +647,7 @@ export class PersistentObjectDO {
       call: async (frameId, session, space, messageValue) => {
         const host = await this.resolveObjectHost(space, WORLD_HOST);
         const result = host === WORLD_HOST
-          ? world.call(frameId, session.sessionId, space, messageValue)
+          ? await world.call(frameId, session.sessionId, space, messageValue)
           : await this.forwardWsCall(world, host, frameId, session, space, messageValue);
         if (result.op === "applied") {
           if (host !== WORLD_HOST) await this.registerRemoteObjectRoutes(host);
@@ -560,7 +657,7 @@ export class PersistentObjectDO {
       direct: async (frameId, session, target, verb, args) => {
         const host = await this.resolveObjectHost(target, WORLD_HOST);
         return host === WORLD_HOST
-          ? world.directCall(
+          ? await world.directCall(
               frameId,
               session.actor,
               target,
@@ -687,6 +784,14 @@ export class PersistentObjectDO {
       body: JSON.stringify(body)
     }));
     return await response.json() as T;
+  }
+
+  private async forwardInternalChecked<T>(host: string, path: string, body: Record<string, unknown>): Promise<T> {
+    const parsed = await this.forwardInternal<T | { error?: unknown }>(host, path, body);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "error" in parsed && (parsed as { error?: unknown }).error) {
+      throw normalizeError((parsed as { error: unknown }).error);
+    }
+    return parsed as T;
   }
 
   private forwardBody(

@@ -49,7 +49,7 @@ function vmCtx(world: ReturnType<typeof createWorld>, actor: string, target: str
 }
 
 describe("v0.5 in-memory VM", () => {
-  it("runs range loops and arithmetic", () => {
+  it("runs range loops and arithmetic", async () => {
     const { world, session, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -77,10 +77,10 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = world.call("sum", session.id, "the_dubspace", message(actor, "delay_1", "sum_to", [5]));
+    const applied = await world.call("sum", session.id, "the_dubspace", message(actor, "delay_1", "sum_to", [5]));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") expect(applied.observations).toEqual([]);
-    expect(world.dispatch(
+    expect(await world.dispatch(
       {
         world,
         space: "the_dubspace",
@@ -103,7 +103,7 @@ describe("v0.5 in-memory VM", () => {
     )).toBe(15);
   });
 
-  it("runs nested CALL_VERB and inherited PASS", () => {
+  it("runs nested CALL_VERB and inherited PASS", async () => {
     const { world, session, actor } = authedWorld();
     world.createObject({ id: "base_counter", name: "Base Counter", parent: "$thing", owner: "$wiz" });
     world.createObject({ id: "child_counter", name: "Child Counter", parent: "base_counter", owner: "$wiz" });
@@ -138,9 +138,9 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = world.call("call-counter", session.id, "the_dubspace", message(actor, "delay_1", "call_counter", []));
+    const applied = await world.call("call-counter", session.id, "the_dubspace", message(actor, "delay_1", "call_counter", []));
     expect(applied.op).toBe("applied");
-    expect(world.dispatch(
+    expect(await world.dispatch(
       {
         world,
         space: "the_dubspace",
@@ -163,7 +163,7 @@ describe("v0.5 in-memory VM", () => {
     )).toBe(15);
   });
 
-  it("turns excessive recursive CALL_VERB into E_CALL_DEPTH", () => {
+  it("turns excessive recursive CALL_VERB into E_CALL_DEPTH", async () => {
     const { world, session, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -176,7 +176,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = world.call("depth", session.id, "the_dubspace", message(actor, "delay_1", "recurse", []));
+    const applied = await world.call("depth", session.id, "the_dubspace", message(actor, "delay_1", "recurse", []));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") {
       expect(applied.observations[0].type).toBe("$error");
@@ -184,7 +184,7 @@ describe("v0.5 in-memory VM", () => {
     }
   });
 
-  it("catches raised VM errors with TRY handlers", () => {
+  it("catches raised VM errors with TRY handlers", async () => {
     const { world, session, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -206,7 +206,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    expect(world.dispatch(
+    expect(await world.dispatch(
       {
         world,
         space: "the_dubspace",
@@ -227,11 +227,11 @@ describe("v0.5 in-memory VM", () => {
       "catch_div",
       []
     )).toBe("E_DIV");
-    const applied = world.call("catch-div", session.id, "the_dubspace", message(actor, "delay_1", "catch_div", []));
+    const applied = await world.call("catch-div", session.id, "the_dubspace", message(actor, "delay_1", "catch_div", []));
     expect(applied.op).toBe("applied");
   });
 
-  it("unwinds nested bytecode CALL_VERB errors into caller handlers", () => {
+  it("unwinds nested bytecode CALL_VERB errors into caller handlers", async () => {
     const { world, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -255,7 +255,7 @@ describe("v0.5 in-memory VM", () => {
     );
 
     expect(
-      world.dispatch(
+      await world.dispatch(
         {
           world,
           space: "the_dubspace",
@@ -279,7 +279,7 @@ describe("v0.5 in-memory VM", () => {
     ).toBe("E_BOOM");
   });
 
-  it("hydrates a serialized VM call stack and resumes execution", () => {
+  it("hydrates a serialized VM call stack and resumes execution", async () => {
     const { world, actor } = authedWorld();
     const callerBytecode: TinyBytecode = {
       literals: [],
@@ -303,10 +303,10 @@ describe("v0.5 in-memory VM", () => {
       ]
     };
 
-    expect(runSerializedTinyVmTask(world, task).result).toBe(12);
+    expect((await runSerializedTinyVmTask(world, task)).result).toBe(12);
   });
 
-  it("turns tick exhaustion into a sequenced behavior failure", () => {
+  it("turns tick exhaustion into a sequenced behavior failure", async () => {
     const { world, session, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -320,7 +320,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = world.call("ticks", session.id, "the_dubspace", message(actor, "delay_1", "burn_ticks", []));
+    const applied = await world.call("ticks", session.id, "the_dubspace", message(actor, "delay_1", "burn_ticks", []));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") {
       expect(applied.observations[0].type).toBe("$error");
@@ -328,7 +328,7 @@ describe("v0.5 in-memory VM", () => {
     }
   });
 
-  it("turns wall-time exhaustion into a VM failure", () => {
+  it("turns wall-time exhaustion into a VM failure", async () => {
     const { world, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -344,7 +344,7 @@ describe("v0.5 in-memory VM", () => {
     const now = vi.spyOn(Date, "now");
     now.mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValueOnce(10);
     try {
-      expect(() =>
+      await expect(
         world.dispatch(
           {
             world,
@@ -366,13 +366,13 @@ describe("v0.5 in-memory VM", () => {
           "timeout",
           []
         )
-      ).toThrow(expect.objectContaining({ code: "E_TIMEOUT" }));
+      ).rejects.toMatchObject({ code: "E_TIMEOUT" });
     } finally {
       now.mockRestore();
     }
   });
 
-  it("runs collection hot-path opcodes and STR_INTERP", () => {
+  it("runs collection hot-path opcodes and STR_INTERP", async () => {
     const { world, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -398,7 +398,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
     expect(
-      world.dispatch(
+      await world.dispatch(
         {
           world,
           space: "the_dubspace",
@@ -422,7 +422,7 @@ describe("v0.5 in-memory VM", () => {
     ).toBe(14);
   });
 
-  it("schedules delayed FORK tasks through the durable task queue", () => {
+  it("schedules delayed FORK tasks through the durable task queue", async () => {
     const { world, session, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -458,11 +458,11 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const scheduled = world.call("fork", session.id, "the_dubspace", message(actor, "delay_1", "schedule_mark", ["later"]));
+    const scheduled = await world.call("fork", session.id, "the_dubspace", message(actor, "delay_1", "schedule_mark", ["later"]));
     expect(scheduled.op).toBe("applied");
     expect(world.parkedTasks.size).toBe(1);
     expect(world.propOrNull("delay_1", "forked")).toBeNull();
-    const ran = world.runDueTasks(Date.now() + 1);
+    const ran = await world.runDueTasks(Date.now() + 1);
     expect(ran).toHaveLength(1);
     expect(ran[0].frame?.op).toBe("applied");
     if (ran[0].frame?.op === "applied") {
@@ -475,7 +475,7 @@ describe("v0.5 in-memory VM", () => {
     expect(world.parkedTasks.size).toBe(0);
   });
 
-  it("parks SUSPEND continuations and resumes them through a sequenced frame", () => {
+  it("parks SUSPEND continuations and resumes them through a sequenced frame", async () => {
     const { world, session, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -502,14 +502,14 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = world.call("suspend", session.id, "the_dubspace", message(actor, "delay_1", "suspend_then_mark", ["ok"]));
+    const applied = await world.call("suspend", session.id, "the_dubspace", message(actor, "delay_1", "suspend_then_mark", ["ok"]));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") {
       expect(applied.observations[0].type).toBe("task_suspended");
     }
     expect(world.parkedTasks.size).toBe(1);
     expect(world.propOrNull("delay_1", "after_suspend")).toBeNull();
-    const ran = world.runDueTasks(Date.now() + 1);
+    const ran = await world.runDueTasks(Date.now() + 1);
     expect(ran).toHaveLength(1);
     expect(ran[0].frame?.op).toBe("applied");
     if (ran[0].frame?.op === "applied") {
@@ -522,7 +522,7 @@ describe("v0.5 in-memory VM", () => {
     expect(world.parkedTasks.size).toBe(0);
   });
 
-  it("serializes observations that exist when a VM continuation parks", () => {
+  it("serializes observations that exist when a VM continuation parks", async () => {
     const { world, session, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -535,14 +535,14 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = world.call("observe-suspend", session.id, "the_dubspace", message(actor, "delay_1", "observe_then_suspend", []));
+    const applied = await world.call("observe-suspend", session.id, "the_dubspace", message(actor, "delay_1", "observe_then_suspend", []));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") expect(applied.observations.map((obs) => obs.type)).toEqual(["before_suspend", "task_suspended"]);
     const parked = Array.from(world.parkedTasks.values())[0]?.serialized as any;
     expect(parked?.task?.frames?.[0]?.ctx?.observations?.map((obs: any) => obs.type)).toEqual(["before_suspend"]);
   });
 
-  it("does not count suspended wall time against resumed VM continuations", () => {
+  it("does not count suspended wall time against resumed VM continuations", async () => {
     const { world, session, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -556,19 +556,19 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = world.call("wall-suspend", session.id, "the_dubspace", message(actor, "delay_1", "short_wall_suspend", ["ok"]));
+    const applied = await world.call("wall-suspend", session.id, "the_dubspace", message(actor, "delay_1", "short_wall_suspend", ["ok"]));
     expect(applied.op).toBe("applied");
     const parked = Array.from(world.parkedTasks.values())[0]?.serialized as any;
     parked.task.frames[0].startedAt = Date.now() - 60_000;
     parked.task.frames[0].activeWallMs = 0;
 
-    const ran = world.runDueTasks(Date.now() + 1);
+    const ran = await world.runDueTasks(Date.now() + 1);
     expect(ran).toHaveLength(1);
     expect(ran[0].frame?.op).toBe("applied");
     expect(world.getProp("delay_1", "after_wall_suspend")).toBe("ok");
   });
 
-  it("parks READ continuations and resumes them through a sequenced input frame", () => {
+  it("parks READ continuations and resumes them through a sequenced input frame", async () => {
     const { world, session, actor } = authedWorld();
     world.addVerb(
       "delay_1",
@@ -597,16 +597,16 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = world.call("read", session.id, "the_dubspace", message(actor, "delay_1", "read_then_mark", []));
+    const applied = await world.call("read", session.id, "the_dubspace", message(actor, "delay_1", "read_then_mark", []));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") expect(applied.observations[0].type).toBe("task_awaiting_read");
     expect(world.parkedTasks.size).toBe(1);
     expect(world.propOrNull("delay_1", "read_value")).toBeNull();
 
-    const noTask = world.deliverInput("guest_999", "ignored");
+    const noTask = await world.deliverInput("guest_999", "ignored");
     expect(noTask).toBeNull();
 
-    const ran = world.deliverInput(actor, "typed text");
+    const ran = await world.deliverInput(actor, "typed text");
     expect(ran?.frame?.op).toBe("applied");
     if (ran?.frame?.op === "applied") {
       expect(ran.frame.seq).toBe(2);

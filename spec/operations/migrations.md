@@ -22,7 +22,7 @@ Each has its own answer.
 
 ## M2. Bytecode upgrades
 
-Already specced normatively in [hosts.md §3.4 invariant 4](../protocol/hosts.md#34-task-migration-invariants) and [failures.md §F8](../semantics/failures.md#f8-versioning-failures): every serialized task carries the `(definer, verb, version)` triple of its running bytecode. On resume, version mismatch raises `E_VERSION` and aborts the task.
+Already specced normatively in [hosts.md §3.4 invariant 4](../protocol/hosts.md#34-host-rpc-invariants) and [failures.md §F8](../semantics/failures.md#f8-versioning-failures): every serialized task carries the `(definer, verb, version)` triple of its running bytecode. On resume, version mismatch raises `E_VERSION` and aborts the task.
 
 Policy: **a task always runs the version it started under**. New calls into the same verb use the current version.
 

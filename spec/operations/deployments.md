@@ -85,7 +85,7 @@ Two deployment-replacement patterns:
 - **Rolling.** Gradual replacement of runtime instances. Each new instance picks up the new code; old instances continue until they drain. Works for runtime-only upgrades (no spec change).
 - **Blue/green.** Parallel deployments; traffic switches atomically. Required for spec upgrades that involve incompatible bytecode or schema; the new deployment runs migrations on a copy, traffic switches when ready.
 
-For spec v1, blue/green is the default for spec-version bumps; rolling is the default for code-only upgrades. The distinction is forced by the per-task bytecode-version invariant ([hosts.md §3.4 (4)](../protocol/hosts.md#34-task-migration-invariants)) — old in-flight tasks finish on old code; new calls use new code; no one runs against ambiguous code.
+For spec v1, blue/green is the default for spec-version bumps; rolling is the default for code-only upgrades. The distinction is forced by the per-task bytecode-version invariant ([hosts.md §3.4 (4)](../protocol/hosts.md#34-host-rpc-invariants)) — old in-flight tasks finish on old code; new calls use new code; no one runs against ambiguous code.
 
 ---
 

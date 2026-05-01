@@ -39,7 +39,7 @@ export type SpaceSnapshotRecord = {
 export type ParkedTaskRecord = {
   id: string;
   parked_on: ObjRef;
-  state: "suspended" | "awaiting_read" | "awaiting_call";
+  state: "suspended" | "awaiting_read";
   resume_at: number | null;
   awaiting_player: ObjRef | null;
   correlation_id: string | null;
@@ -83,10 +83,10 @@ export interface WorldRepository {
 // set; cross-host operations go through the RPC surface (cloudflare.md §R5),
 // not through this interface.
 //
-// All methods are synchronous in shape. The CF backend wraps `state.storage.sql`
-// (which is sync) with no extra ceremony. If a future backend needs async I/O,
-// the methods can return Promises and the runtime can await them; for v1 the
-// sync shape matches the storage primitives we have.
+// Repository methods are synchronous because the target storage primitives are
+// synchronous (local SQLite and CF Durable Object SQLite). The runtime above
+// this interface is async; it awaits cross-host work before entering a storage
+// transaction, then commits the final local state/log outcome synchronously.
 // ---------------------------------------------------------------------------
 
 /** A single property's persisted form (split out of SerializedObject for per-property ops). */
@@ -121,10 +121,12 @@ export interface ObjectRepository {
    * `save*`/`delete*`/`add*`/`remove*`/`recordLogOutcome` calls inside `fn` commit
    * together or roll back together if `fn` throws.
    *
-   * Required for `$space:call`'s "behavior failure rolls back mutations" rule
-   * (spec/semantics/space.md §S3.2). The CF backend uses
-   * `state.storage.transactionSync`; the in-memory backend snapshot-and-restores;
-   * the local SQLite backend uses BEGIN/COMMIT/ROLLBACK.
+   * Used for the final durable commit of a sequenced call, plus bootstrap,
+   * migrations, and repository-local maintenance. The async behavior body runs
+   * before this boundary; if it succeeds or produces a sequenced behavior
+   * failure, the resulting state and log outcome are committed together here.
+   * The CF backend uses `state.storage.transactionSync`; the in-memory backend
+   * snapshot-and-restores; the local SQLite backend uses BEGIN/COMMIT/ROLLBACK.
    *
    * Implementations may flatten nested `transaction` calls. Rollback scopes
    * inside a transaction use `savepoint` below.
@@ -136,10 +138,10 @@ export interface ObjectRepository {
    * If `fn` throws, mutations made inside the savepoint are rolled back, then
    * the error is rethrown and the outer transaction remains usable.
    *
-   * `$space:call` uses this for the behavior body: the accepted log row and seq
-   * allocation stay in the outer transaction, while failed behavior mutations
-   * roll back to the savepoint before
-   * `recordLogOutcome(..., false, observations, error)`.
+   * Runtime `$space:call` cannot run async cross-host behavior inside a sync
+   * storage transaction, so it uses an in-memory behavior savepoint and commits
+   * after the awaited body completes. Repository savepoints remain for purely
+   * storage-local maintenance code, conformance tests, and future migrations.
    *
    * The CF backend relies on nested `state.storage.transactionSync` savepoint
    * behavior; local SQLite uses `SAVEPOINT` / `ROLLBACK TO`; in-memory backends
@@ -219,16 +221,17 @@ export interface ObjectRepository {
   // ----- $sequenced_log surface (per spec/semantics/sequenced-log.md) -----
   //
   // Two-step write per spec/reference/cloudflare.md §R3.2:
-  //   1. `appendLog` allocates the seq and inserts a pending row inside the
-  //      caller's `transaction()`.
-  //   2. The behavior body runs inside `savepoint()`.
-  //   3. `recordLogOutcome` updates the same row before the outer transaction
-  //      commits. A committed row always has a final outcome.
+  //   1. The runtime has already run the async behavior path and knows the seq,
+  //      observations, and outcome it intends to commit.
+  //   2. `appendLog` inserts the row inside the caller's `transaction()`.
+  //   3. `recordLogOutcome` updates that row before the transaction commits.
+  //      A committed row always has a final outcome.
 
   /**
    * Within the caller's transaction: allocate `seq = next_seq`, increment
    * `next_seq`, and insert `(seq, ts, actor, message, applied_ok = NULL)`.
-   * Returns the assigned seq + ts.
+   * Returns the assigned seq + ts. The runtime checks that this seq matches the
+   * seq it reserved in memory before behavior execution.
    *
    * Callers must finish the row with `recordLogOutcome` before the outer
    * transaction commits. If the transaction aborts, the seq allocation and
@@ -238,9 +241,8 @@ export interface ObjectRepository {
 
   /**
    * Update the pending log row with the behavior outcome and replayable
-   * observations. Called inside the
-   * same outer `transaction()` as `appendLog`, after the behavior savepoint has
-   * either completed or rolled back (see §R3.4).
+   * observations. Called inside the same `transaction()` as `appendLog`, before
+   * commit (see §R3.4).
    *
    * Idempotent: calling twice with the same outcome is a no-op; calling with a
    * different outcome raises (an outcome should be immutable once set).

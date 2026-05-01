@@ -79,7 +79,7 @@ export async function installGitHubTap(
     verb: "install",
     args: [loaded.manifest as unknown as WooValue, loaded.frontmatter as WooValue, loaded.alias, loaded.provenance]
   };
-  return world.applyCall(undefined, "$catalog_registry", message);
+  return await world.applyCall(undefined, "$catalog_registry", message);
 }
 
 export function parseFrontmatter(markdown: string): Record<string, WooValue> {

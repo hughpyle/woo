@@ -183,7 +183,11 @@ server.listen(port, () => {
 });
 
 setInterval(() => {
-  for (const result of world.runDueTasks()) broadcastTaskResult(result);
+  void (async () => {
+    for (const result of await world.runDueTasks()) broadcastTaskResult(result);
+  })().catch((err: unknown) => {
+    console.error("runDueTasks failed", err);
+  });
   expireAttachedSessions(world.reapExpiredSessions());
 }, 250).unref();
 

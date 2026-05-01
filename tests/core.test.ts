@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { compileVerb, definePropertyVersioned, definePropertyVersionedAs, installVerb, installVerbAs } from "../src/core/authoring";
 import { bootstrap, createWorld, createWorldFromSerialized, nonEmptyHostScopedWorld, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
-import type { Message, TinyBytecode, VerbDef } from "../src/core/types";
+import type { CallContext, HostBridge, WooWorld } from "../src/core/world";
+import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
 
 function message(actor: string, target: string, verb: string, args: unknown[] = []): Message {
   return { actor, target, verb, args: args as any[] };
@@ -46,8 +47,37 @@ function bytecodeVerb(name: string, bytecode: TinyBytecode, owner = "$wiz", perm
   };
 }
 
+class LocalHostBridge implements HostBridge {
+  constructor(
+    readonly localHost: string,
+    private readonly worlds: Map<string, WooWorld>,
+    private readonly routes: Map<ObjRef, string>
+  ) {}
+
+  hostForObject(id: ObjRef): string | null {
+    return this.routes.get(id) ?? null;
+  }
+
+  async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue> {
+    return await this.worldFor(objRef).getPropChecked(progr, objRef, name);
+  }
+
+  async dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue> {
+    const remote = this.worldFor(startAt ?? target);
+    return await remote.hostDispatch({ ...ctx, world: remote }, target, verbName, args, startAt);
+  }
+
+  private worldFor(id: ObjRef): WooWorld {
+    const host = this.routes.get(id);
+    if (!host) throw new Error(`no route for ${id}`);
+    const world = this.worlds.get(host);
+    if (!world) throw new Error(`no world for ${host}`);
+    return world;
+  }
+}
+
 describe("woo core", () => {
-  it("bootstraps the seed graph and describes objects", () => {
+  it("bootstraps the seed graph and describes objects", async () => {
     const world = createWorld();
     expect(world.object("$root").id).toBe("$root");
     expect(world.object("the_dubspace").parent).toBe("$dubspace");
@@ -60,7 +90,7 @@ describe("woo core", () => {
     expect(description.schemas).toContain("control_changed");
   });
 
-  it("enforces property read permissions for actor-facing introspection", () => {
+  it("enforces property read permissions for actor-facing introspection", async () => {
     const { world, actor } = authedWorld();
     const name = "private_rest_probe";
     world.defineProperty("the_taskspace", {
@@ -86,12 +116,12 @@ describe("woo core", () => {
     expect((world.state(actor).objects.the_taskspace as Record<string, unknown>).description).toBeNull();
     expect((world.state("$wiz").objects.the_taskspace as Record<string, unknown>).description).toBe("private taskspace");
 
-    const described = world.directCall("describe-private", actor, "the_taskspace", "describe", []);
+    const described = await world.directCall("describe-private", actor, "the_taskspace", "describe", []);
     expect(described.op).toBe("result");
     if (described.op === "result") expect((described.result as Record<string, unknown>).description).toBeNull();
   });
 
-  it("rejects non-x verbs across direct, sequenced, CALL_VERB, and PASS dispatch", () => {
+  it("rejects non-x verbs across direct, sequenced, CALL_VERB, and PASS dispatch", async () => {
     const { world, session, actor } = authedWorld();
     world.createObject({ id: "no_x_target", name: "No X Target", parent: "$thing", owner: "$wiz" });
     world.addVerb("no_x_target", {
@@ -100,11 +130,11 @@ describe("woo core", () => {
       direct_callable: true
     });
 
-    const direct = world.directCall("no-x-direct", actor, "no_x_target", "sealed", []);
+    const direct = await world.directCall("no-x-direct", actor, "no_x_target", "sealed", []);
     expect(direct.op).toBe("error");
     if (direct.op === "error") expect(direct.error.code).toBe("E_PERM");
 
-    const sequenced = world.call("no-x-sequenced", session.id, "the_dubspace", message(actor, "no_x_target", "sealed", []));
+    const sequenced = await world.call("no-x-sequenced", session.id, "the_dubspace", message(actor, "no_x_target", "sealed", []));
     expect(sequenced.op).toBe("applied");
     if (sequenced.op === "applied") expect(sequenced.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
 
@@ -124,7 +154,7 @@ describe("woo core", () => {
     );
     let callErr: unknown;
     try {
-      world.dispatch(
+      await world.dispatch(
         {
           world,
           space: "the_dubspace",
@@ -162,7 +192,7 @@ describe("woo core", () => {
     );
     let passErr: unknown;
     try {
-      world.dispatch(
+      await world.dispatch(
         {
           world,
           space: "the_dubspace",
@@ -189,7 +219,95 @@ describe("woo core", () => {
     expect(passErr).toMatchObject({ code: "E_PERM" });
   });
 
-  it("checks VM property mutations against the running progr", () => {
+  it("routes VM reads and CALL_VERB through a host bridge but rejects cross-host writes", async () => {
+    const { world: home, session, actor } = authedWorld();
+    const remote = createWorld({ catalogs: false });
+    const worlds = new Map<string, WooWorld>([
+      ["home", home],
+      ["remote", remote]
+    ]);
+    const routes = new Map<ObjRef, string>([["remote_box", "remote"]]);
+    home.setHostBridge(new LocalHostBridge("home", worlds, routes));
+    remote.setHostBridge(new LocalHostBridge("remote", worlds, routes));
+
+    remote.createObject({ id: "remote_box", name: "Remote Box", parent: "$thing", owner: "$wiz" });
+    remote.defineProperty("remote_box", {
+      name: "value",
+      defaultValue: "remote",
+      owner: "$wiz",
+      perms: "rw",
+      typeHint: "str"
+    });
+    remote.addVerb(
+      "remote_box",
+      bytecodeVerb("value", {
+        literals: ["remote_box", "value"],
+        num_locals: 0,
+        max_stack: 2,
+        version: 1,
+        ops: [["PUSH_LIT", 0], ["PUSH_LIT", 1], ["GET_PROP"], ["RETURN"]]
+      })
+    );
+
+    home.createObject({ id: "local_reader", name: "Local Reader", parent: "$thing", owner: actor });
+    home.addVerb(
+      "local_reader",
+      bytecodeVerb(
+        "read_remote",
+        {
+          literals: ["remote_box", "value"],
+          num_locals: 0,
+          max_stack: 2,
+          version: 1,
+          ops: [["PUSH_LIT", 0], ["PUSH_LIT", 1], ["CALL_VERB", 0], ["RETURN"]]
+        },
+        actor
+      )
+    );
+
+    const ctx: CallContext = {
+      world: home,
+      space: "the_dubspace",
+      seq: 1,
+      actor,
+      player: actor,
+      caller: "#-1",
+      callerPerms: actor,
+      progr: actor,
+      thisObj: "local_reader",
+      verbName: "read_remote",
+      definer: "local_reader",
+      message: message(actor, "local_reader", "read_remote", []),
+      observations: [],
+      observe: () => {}
+    };
+
+    expect(await home.getPropChecked("$wiz", "remote_box", "value")).toBe("remote");
+    expect(await home.dispatch(ctx, "local_reader", "read_remote", [])).toBe("remote");
+
+    home.createObject({ id: "local_writer", name: "Local Writer", parent: "$thing", owner: actor });
+    home.addVerb(
+      "local_writer",
+      bytecodeVerb(
+        "write_remote",
+        {
+          literals: ["remote_box", "value", "changed", null],
+          num_locals: 0,
+          max_stack: 3,
+          version: 1,
+          ops: [["PUSH_LIT", 0], ["PUSH_LIT", 1], ["PUSH_LIT", 2], ["SET_PROP"], ["PUSH_LIT", 3], ["RETURN"]]
+        },
+        actor
+      )
+    );
+
+    const failedWrite = await home.call("cross-host-write", session.id, "the_dubspace", message(actor, "local_writer", "write_remote", []));
+    expect(failedWrite.op).toBe("applied");
+    if (failedWrite.op === "applied") expect(failedWrite.observations[0]).toMatchObject({ type: "$error", code: "E_CROSS_HOST_WRITE" });
+    expect(remote.getProp("remote_box", "value")).toBe("remote");
+  });
+
+  it("checks VM property mutations against the running progr", async () => {
     const { world, session, actor } = authedWorld();
     world.createObject({ id: "private_box", name: "Private Box", parent: "$thing", owner: "$wiz" });
     world.defineProperty("private_box", {
@@ -214,7 +332,7 @@ describe("woo core", () => {
       )
     );
 
-    const failedWrite = world.call("private-write", session.id, "the_dubspace", message(actor, "delay_1", "write_private", []));
+    const failedWrite = await world.call("private-write", session.id, "the_dubspace", message(actor, "delay_1", "write_private", []));
     expect(failedWrite.op).toBe("applied");
     if (failedWrite.op === "applied") expect(failedWrite.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.getProp("private_box", "secret")).toBe("before");
@@ -233,7 +351,7 @@ describe("woo core", () => {
         actor
       )
     );
-    const failedDefine = world.call("private-define", session.id, "the_dubspace", message(actor, "delay_1", "define_on_wiz", []));
+    const failedDefine = await world.call("private-define", session.id, "the_dubspace", message(actor, "delay_1", "define_on_wiz", []));
     expect(failedDefine.op).toBe("applied");
     if (failedDefine.op === "applied") expect(failedDefine.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(() => world.propertyInfo("$wiz", "new_private_prop")).toThrow();
@@ -252,59 +370,59 @@ describe("woo core", () => {
         actor
       )
     );
-    const failedInfo = world.call("private-info", session.id, "the_dubspace", message(actor, "delay_1", "retag_private", []));
+    const failedInfo = await world.call("private-info", session.id, "the_dubspace", message(actor, "delay_1", "retag_private", []));
     expect(failedInfo.op).toBe("applied");
     if (failedInfo.op === "applied") expect(failedInfo.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.propertyInfo("private_box", "secret").perms).toBe("r");
   });
 
-  it("does not expose inherited generic root setters as public capabilities", () => {
+  it("does not expose inherited generic root setters as public capabilities", async () => {
     const { world, session, actor } = authedWorld();
     const before = world.getProp("$wiz", "description");
-    const result = world.call("root-setter", session.id, "the_dubspace", message(actor, "$wiz", "set_prop", ["description", "pwned"]));
+    const result = await world.call("root-setter", session.id, "the_dubspace", message(actor, "$wiz", "set_prop", ["description", "pwned"]));
     expect(result.op).toBe("applied");
     if (result.op === "applied") expect(result.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.getProp("$wiz", "description")).toBe(before);
     expect(world.verbInfo("$root", "set_prop").perms).not.toContain("x");
   });
 
-  it("does not expose maintenance verbs as public capabilities", () => {
+  it("does not expose maintenance verbs as public capabilities", async () => {
     const { world, session, actor } = authedWorld();
     const wizLocation = world.object("$wiz").location;
-    const moved = world.call("move-wiz", session.id, "the_dubspace", message(actor, "$wiz", "moveto", ["the_dubspace"]));
+    const moved = await world.call("move-wiz", session.id, "the_dubspace", message(actor, "$wiz", "moveto", ["the_dubspace"]));
     expect(moved.op).toBe("applied");
     if (moved.op === "applied") expect(moved.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.object("$wiz").location).toBe(wizLocation);
 
-    const returned = world.call("return-guest", session.id, "the_dubspace", message(actor, "$system", "return_guest", [actor]));
+    const returned = await world.call("return-guest", session.id, "the_dubspace", message(actor, "$system", "return_guest", [actor]));
     expect(returned.op).toBe("applied");
     if (returned.op === "applied") expect(returned.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
 
-    const reset = world.call("reset-guest", session.id, "the_dubspace", message(actor, actor, "on_disfunc", []));
+    const reset = await world.call("reset-guest", session.id, "the_dubspace", message(actor, actor, "on_disfunc", []));
     expect(reset.op).toBe("applied");
     if (reset.op === "applied") expect(reset.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
   });
 
-  it("scopes dubspace public mutators to controls in that dubspace", () => {
+  it("scopes dubspace public mutators to controls in that dubspace", async () => {
     const { world, session, actor } = authedWorld();
     const before = world.getProp("$wiz", "description");
-    const rejected = world.call("dubspace-set-wiz", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["$wiz", "description", "pwned"]));
+    const rejected = await world.call("dubspace-set-wiz", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["$wiz", "description", "pwned"]));
     expect(rejected.op).toBe("applied");
     if (rejected.op === "applied") expect(rejected.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.getProp("$wiz", "description")).toBe(before);
 
-    const valid = world.call("dubspace-set-valid", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.63]));
+    const valid = await world.call("dubspace-set-valid", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.63]));
     expect(valid.op).toBe("applied");
     if (valid.op === "applied") expect(valid.observations[0]).toMatchObject({ type: "control_changed", target: "delay_1", name: "wet" });
     expect(world.getProp("delay_1", "wet")).toBe(0.63);
 
-    const badSlot = world.call("dubspace-start-wiz", session.id, "the_dubspace", message(actor, "the_dubspace", "start_loop", ["$wiz"]));
+    const badSlot = await world.call("dubspace-start-wiz", session.id, "the_dubspace", message(actor, "the_dubspace", "start_loop", ["$wiz"]));
     expect(badSlot.op).toBe("applied");
     if (badSlot.op === "applied") expect(badSlot.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.propOrNull("$wiz", "playing")).toBeNull();
   });
 
-  it("runs chat command dispatch under actor authority when entering the planned verb", () => {
+  it("runs chat command dispatch under actor authority when entering the planned verb", async () => {
     const { world, actor } = authedWorld();
     world.createObject({ id: "sealed_sign", name: "Sealed Sign", parent: "$thing", owner: "$wiz", location: "the_chatroom" });
     world.addVerb("sealed_sign", {
@@ -313,12 +431,12 @@ describe("woo core", () => {
       direct_callable: true
     });
 
-    const result = world.directCall("sealed-command", actor, "the_chatroom", "command", ["poke Sealed Sign"]);
+    const result = await world.directCall("sealed-command", actor, "the_chatroom", "command", ["poke Sealed Sign"]);
     expect(result.op).toBe("error");
     if (result.op === "error") expect(result.error.code).toBe("E_PERM");
   });
 
-  it("seeds readable descriptions for every bootstrap object", () => {
+  it("seeds readable descriptions for every bootstrap object", async () => {
     const world = createWorld();
     for (const id of world.objects.keys()) {
       const description = world.getProp(id, "description");
@@ -327,14 +445,14 @@ describe("woo core", () => {
     }
   });
 
-  it("installs first-light demos from local catalog manifests", () => {
+  it("installs first-light demos from local catalog manifests", async () => {
     const world = createWorld();
     const installed = world.getProp("$catalog_registry", "installed_catalogs") as Record<string, unknown>[];
     const aliases = bundledCatalogAliases();
     expect(installed.map((record) => record.alias)).toEqual(aliases);
-    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(aliases.map(() => "install"));
+    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual([]);
     bootstrap(world);
-    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(aliases.map(() => "install"));
+    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual([]);
     expect(world.object("catalog_dubspace").parent).toBe("$catalog");
     expect(world.object("$space").parent).toBe("$sequenced_log");
     expect(world.object("$dubspace").parent).toBe("$space");
@@ -346,7 +464,7 @@ describe("woo core", () => {
     expect(world.verbInfo("the_chatroom", "say").definer).toBe("$conversational");
   });
 
-  it("can boot without demo catalogs and install them later", () => {
+  it("can boot without demo catalogs and install them later", async () => {
     const world = createWorld({ catalogs: false });
     expect(() => world.object("the_dubspace")).toThrow(/E_OBJNF|object not found/);
     expect(world.getProp("$catalog_registry", "installed_catalogs")).toEqual([]);
@@ -360,7 +478,7 @@ describe("woo core", () => {
     expect(world.verbInfo("the_taskspace", "say").definer).toBe("$conversational");
   });
 
-  it("exports host-scoped worlds for routed cluster hosts", () => {
+  it("exports host-scoped worlds for routed cluster hosts", async () => {
     const world = createWorld();
     const session = world.auth("guest:host-scope");
     const scoped = world.exportHostScopedWorld("the_taskspace");
@@ -378,7 +496,7 @@ describe("woo core", () => {
 
     const cluster = createWorldFromSerialized(scoped, { persist: false });
     cluster.ensureSessionForActor(session.id, session.actor, session.tokenClass, session.expiresAt);
-    const created = cluster.call("host-scope-create", session.id, "the_taskspace", message(session.actor, "the_taskspace", "create_task", ["Scoped", ""]));
+    const created = await cluster.call("host-scope-create", session.id, "the_taskspace", message(session.actor, "the_taskspace", "create_task", ["Scoped", ""]));
     expect(created.op).toBe("applied");
     if (created.op !== "applied") return;
     const task = String(created.observations.find((obs) => obs.type === "task_created")?.task ?? "");
@@ -387,7 +505,7 @@ describe("woo core", () => {
     expect(cluster.objectRoutes()).toContainEqual({ id: task, host: "the_taskspace", anchor: "the_taskspace" });
   });
 
-  it("treats stored worlds without a host slice as unusable for cluster boot", () => {
+  it("treats stored worlds without a host slice as unusable for cluster boot", async () => {
     const full = createWorld().exportWorld();
     const stale = {
       ...full,
@@ -400,7 +518,7 @@ describe("woo core", () => {
     expect(nonEmptyHostScopedWorld(full, "the_dubspace")?.objects.map((obj) => obj.id)).toContain("the_dubspace");
   });
 
-  it("can prune a full serialized world to one host slice", () => {
+  it("can prune a full serialized world to one host slice", async () => {
     const full = createWorld().exportWorld();
     const scoped = scopeSerializedWorldToHost(full, "the_dubspace");
     const ids = scoped.objects.map((obj) => obj.id);
@@ -413,7 +531,7 @@ describe("woo core", () => {
     expect(ids).not.toContain("the_chatroom");
   });
 
-  it("normalizes legacy d permission shorthand while importing worlds", () => {
+  it("normalizes legacy d permission shorthand while importing worlds", async () => {
     const serialized = createWorld({ catalogs: false }).exportWorld();
     const root = serialized.objects.find((obj) => obj.id === "$root");
     const describe = root?.verbs.find((verb) => verb.name === "describe");
@@ -428,10 +546,10 @@ describe("woo core", () => {
     expect(info.direct_callable).toBe(true);
   });
 
-  it("sequences calls and emits observations", () => {
+  it("sequences calls and emits observations", async () => {
     const { world, session, actor } = authedWorld();
-    const first = world.call("1", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.77]));
-    const second = world.call("2", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["filter_1", "cutoff", 1440]));
+    const first = await world.call("1", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.77]));
+    const second = await world.call("2", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["filter_1", "cutoff", 1440]));
     expect(first.op).toBe("applied");
     expect(second.op).toBe("applied");
     if (first.op === "applied" && second.op === "applied") {
@@ -444,7 +562,7 @@ describe("woo core", () => {
     expect(world.replay("the_dubspace", 2, 1).map((entry) => entry.seq)).toEqual([2]);
   });
 
-  it("resumes a live session token", () => {
+  it("resumes a live session token", async () => {
     const world = createWorld();
     const first = world.auth("guest:resume");
     const resumed = world.auth(`session:${first.id}`);
@@ -452,7 +570,7 @@ describe("woo core", () => {
     expect(resumed.actor).toBe(first.actor);
   });
 
-  it("claims the wizard bootstrap token exactly once", () => {
+  it("claims the wizard bootstrap token exactly once", async () => {
     const world = createWorld({ catalogs: false });
     const session = world.claimWizardBootstrapSession("secret", "secret");
     expect(session.actor).toBe("$wiz");
@@ -460,7 +578,7 @@ describe("woo core", () => {
     expect(() => world.claimWizardBootstrapSession("secret", "secret")).toThrow(/E_TOKEN_CONSUMED|already been consumed/);
   });
 
-  it("allocates guest instances, not the guest class", () => {
+  it("allocates guest instances, not the guest class", async () => {
     const world = createWorld();
     const session = world.auth("guest:instance");
     expect(session.actor).toMatch(/^guest_/);
@@ -468,19 +586,19 @@ describe("woo core", () => {
     expect(world.object(session.actor).parent).toBe("$guest");
   });
 
-  it("does not join the chatroom until explicit enter", () => {
+  it("does not join the chatroom until explicit enter", async () => {
     const world = createWorld();
     const session = world.auth("guest:no-chat-autojoin");
     expect(world.hasPresence(session.actor, "the_dubspace")).toBe(true);
     expect(world.hasPresence(session.actor, "the_taskspace")).toBe(true);
     expect(world.hasPresence(session.actor, "the_chatroom")).toBe(false);
 
-    const enter = world.directCall("enter-chat", session.actor, "the_chatroom", "enter", []);
+    const enter = await world.directCall("enter-chat", session.actor, "the_chatroom", "enter", []);
     expect(enter.op).toBe("result");
     expect(world.hasPresence(session.actor, "the_chatroom")).toBe(true);
   });
 
-  it("keeps detached guest sessions resumable during grace", () => {
+  it("keeps detached guest sessions resumable during grace", async () => {
     const world = createWorld();
     const session = world.auth("guest:grace");
     world.attachSocket(session.id, "ws-1");
@@ -493,7 +611,7 @@ describe("woo core", () => {
     expect(world.sessions.get(session.id)?.lastDetachAt).toBeNull();
   });
 
-  it("does not expire a session while a socket is attached", () => {
+  it("does not expire a session while a socket is attached", async () => {
     const world = createWorld();
     const session = world.auth("guest:attached");
     world.attachSocket(session.id, "ws-1");
@@ -504,7 +622,7 @@ describe("woo core", () => {
     expect(world.sessions.has(session.id)).toBe(true);
   });
 
-  it("keeps a long-attached session resumable for the detach grace window", () => {
+  it("keeps a long-attached session resumable for the detach grace window", async () => {
     const world = createWorld();
     const session = world.auth("guest:long-attached");
     world.attachSocket(session.id, "ws-1");
@@ -518,11 +636,11 @@ describe("woo core", () => {
     expect(world.auth(`session:${session.id}`).actor).toBe(session.actor);
   });
 
-  it("reaps detached guest sessions and returns guests to the pool", () => {
+  it("reaps detached guest sessions and returns guests to the pool", async () => {
     const world = createWorld();
     const session = world.auth("guest:reap");
     const actor = session.actor;
-    world.directCall("enter-chat-before-reap", actor, "the_chatroom", "enter", []);
+    await world.directCall("enter-chat-before-reap", actor, "the_chatroom", "enter", []);
     world.setProp(actor, "description", "temporary guest description");
     world.setProp(actor, "aliases", ["temp"]);
     world.attachSocket(session.id, "ws-1");
@@ -543,7 +661,7 @@ describe("woo core", () => {
     expect(next.actor).toBe(actor);
   });
 
-  it("rejects calls from expired sessions", () => {
+  it("rejects calls from expired sessions", async () => {
     const world = createWorld();
     const session = world.auth("guest:expired-call");
     const actor = session.actor;
@@ -552,32 +670,32 @@ describe("woo core", () => {
     const detachedAt = world.sessions.get(session.id)?.lastDetachAt ?? Date.now();
     world.reapExpiredSessions(detachedAt + 60_001);
 
-    const result = world.call("expired-call", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.5]));
+    const result = await world.call("expired-call", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.5]));
     expect(result.op).toBe("error");
     if (result.op === "error") expect(result.error.code).toBe("E_NOSESSION");
   });
 
-  it("rejects calls whose actor does not match the session", () => {
+  it("rejects calls whose actor does not match the session", async () => {
     const world = createWorld();
     const first = world.auth("guest:actor-one");
     const second = world.auth("guest:actor-two");
-    const result = world.call("actor-mismatch", first.id, "the_dubspace", message(second.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.5]));
+    const result = await world.call("actor-mismatch", first.id, "the_dubspace", message(second.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.5]));
     expect(result.op).toBe("error");
     if (result.op === "error") expect(result.error.code).toBe("E_PERM");
   });
 
-  it("returns the same applied frame for idempotent retry", () => {
+  it("returns the same applied frame for idempotent retry", async () => {
     const { world, session, actor } = authedWorld();
     const msg = message(actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.91]);
-    const first = world.call("same-id", session.id, "the_dubspace", msg);
-    const second = world.call("same-id", session.id, "the_dubspace", msg);
+    const first = await world.call("same-id", session.id, "the_dubspace", msg);
+    const second = await world.call("same-id", session.id, "the_dubspace", msg);
     expect(first).toEqual(second);
     expect(world.replay("the_dubspace", 1, 10)).toHaveLength(1);
   });
 
-  it("keeps failed behavior in sequence while rolling back mutation", () => {
+  it("keeps failed behavior in sequence while rolling back mutation", async () => {
     const { world, session, actor } = authedWorld();
-    const result = world.call("bad", session.id, "the_dubspace", message(actor, "the_dubspace", "missing_verb", []));
+    const result = await world.call("bad", session.id, "the_dubspace", message(actor, "the_dubspace", "missing_verb", []));
     expect(result.op).toBe("applied");
     if (result.op === "applied") {
       expect(result.seq).toBe(1);
@@ -587,11 +705,11 @@ describe("woo core", () => {
     expect(world.replay("the_dubspace", 1, 10)[0].applied_ok).toBe(false);
   });
 
-  it("updates dubspace percussion pattern and transport through sequenced calls", () => {
+  it("updates dubspace percussion pattern and transport through sequenced calls", async () => {
     const { world, session, actor } = authedWorld();
-    const step = world.call("drum-step", session.id, "the_dubspace", message(actor, "the_dubspace", "set_drum_step", ["tone", 3, true]));
-    const tempo = world.call("tempo", session.id, "the_dubspace", message(actor, "the_dubspace", "set_tempo", [132]));
-    const start = world.call("start", session.id, "the_dubspace", message(actor, "the_dubspace", "start_transport", []));
+    const step = await world.call("drum-step", session.id, "the_dubspace", message(actor, "the_dubspace", "set_drum_step", ["tone", 3, true]));
+    const tempo = await world.call("tempo", session.id, "the_dubspace", message(actor, "the_dubspace", "set_tempo", [132]));
+    const start = await world.call("start", session.id, "the_dubspace", message(actor, "the_dubspace", "start_transport", []));
     const pattern = world.getProp("drum_1", "pattern") as Record<string, boolean[]>;
     expect(pattern.tone[3]).toBe(true);
     expect(world.getProp("drum_1", "bpm")).toBe(132);
@@ -602,9 +720,9 @@ describe("woo core", () => {
     if (start.op === "applied") expect(start.observations[0].type).toBe("transport_started");
   });
 
-  it("runs direct dubspace previews as live-only observations", () => {
+  it("runs direct dubspace previews as live-only observations", async () => {
     const { world, actor } = authedWorld();
-    const result = world.directCall("preview-1", actor, "the_dubspace", "preview_control", ["delay_1", "feedback", 0.42]);
+    const result = await world.directCall("preview-1", actor, "the_dubspace", "preview_control", ["delay_1", "feedback", 0.42]);
     expect(result.op).toBe("result");
     if (result.op === "result") {
       expect(result.result).toBe(0.42);
@@ -618,44 +736,44 @@ describe("woo core", () => {
     expect(world.replay("the_dubspace", 1, 10)).toEqual([]);
   });
 
-  it("runs chatroom speech as direct live-only observations", () => {
+  it("runs chatroom speech as direct live-only observations", async () => {
     const world = createWorld();
     const first = world.auth("guest:first");
     const second = world.auth("guest:second");
     expect(world.verbInfo("the_chatroom", "say").definer).toBe("$conversational");
     expect(world.verbInfo("the_taskspace", "say").definer).toBe("$conversational");
 
-    const enterFirst = world.directCall("enter-first", first.actor, "the_chatroom", "enter", []);
-    const enterSecond = world.directCall("enter-second", second.actor, "the_chatroom", "enter", []);
+    const enterFirst = await world.directCall("enter-first", first.actor, "the_chatroom", "enter", []);
+    const enterSecond = await world.directCall("enter-second", second.actor, "the_chatroom", "enter", []);
     expect(enterFirst.op).toBe("result");
     expect(enterSecond.op).toBe("result");
 
-    const who = world.directCall("who", first.actor, "the_chatroom", "who", []);
+    const who = await world.directCall("who", first.actor, "the_chatroom", "who", []);
     expect(who.op).toBe("result");
     if (who.op === "result") expect(who.result).toEqual([first.actor, second.actor]);
 
-    const say = world.directCall("say", first.actor, "the_chatroom", "say", ["hello room"]);
+    const say = await world.directCall("say", first.actor, "the_chatroom", "say", ["hello room"]);
     expect(say.op).toBe("result");
     if (say.op === "result") {
       expect(say.audience).toBe("the_chatroom");
       expect(say.observations).toMatchObject([{ type: "said", source: "the_chatroom", actor: first.actor, text: "hello room" }]);
     }
 
-    const tell = world.directCall("tell", first.actor, "the_chatroom", "tell", [second.actor, "psst"]);
+    const tell = await world.directCall("tell", first.actor, "the_chatroom", "tell", [second.actor, "psst"]);
     expect(tell.op).toBe("result");
     if (tell.op === "result") {
       expect(tell.observations).toMatchObject([{ type: "told", source: "the_chatroom", from: first.actor, to: second.actor, text: "psst" }]);
     }
 
-    world.directCall("leave-second", second.actor, "the_chatroom", "leave", []);
-    world.directCall("enter-other", first.actor, "the_chatroom", "enter", [second.actor]);
-    const afterEnter = world.directCall("who-2", first.actor, "the_chatroom", "who", []);
+    await world.directCall("leave-second", second.actor, "the_chatroom", "leave", []);
+    await world.directCall("enter-other", first.actor, "the_chatroom", "enter", [second.actor]);
+    const afterEnter = await world.directCall("who-2", first.actor, "the_chatroom", "who", []);
     if (afterEnter.op === "result") expect(afterEnter.result).toEqual([first.actor]);
 
     expect(world.getProp("the_chatroom", "next_seq")).toBe(1);
     expect(world.replay("the_chatroom", 1, 10)).toEqual([]);
 
-    const taskspaceSay = world.directCall("taskspace-say", first.actor, "the_taskspace", "say", ["same feature"]);
+    const taskspaceSay = await world.directCall("taskspace-say", first.actor, "the_taskspace", "say", ["same feature"]);
     expect(taskspaceSay.op).toBe("result");
     if (taskspaceSay.op === "result") {
       expect(taskspaceSay.audience).toBe("the_taskspace");
@@ -665,7 +783,7 @@ describe("woo core", () => {
     expect(world.replay("the_taskspace", 1, 10)).toEqual([]);
   });
 
-  it("resolves feature verbs after the parent chain in feature-list order", () => {
+  it("resolves feature verbs after the parent chain in feature-list order", async () => {
     const world = createWorld();
     world.createObject({ id: "feature_a", parent: "$thing", owner: "$wiz" });
     world.createObject({ id: "feature_b", parent: "$thing", owner: "$wiz" });
@@ -687,7 +805,7 @@ describe("woo core", () => {
     expect(world.verbInfo("the_taskspace", "ping").definer).toBe("$taskspace");
   });
 
-  it("manages feature lists through space feature verbs", () => {
+  it("manages feature lists through space feature verbs", async () => {
     const world = createWorld();
     const session = world.auth("guest:feature-owner");
     world.createObject({ id: "owned_space", parent: "$space", owner: session.actor });
@@ -697,27 +815,27 @@ describe("woo core", () => {
     world.setProp("owned_space", "last_snapshot_seq", 0);
     world.setProp(session.actor, "presence_in", [...(world.getProp(session.actor, "presence_in") as string[]), "owned_space"]);
 
-    const add = world.call("add-feature", session.id, "owned_space", message(session.actor, "owned_space", "add_feature", ["owned_feature"]));
+    const add = await world.call("add-feature", session.id, "owned_space", message(session.actor, "owned_space", "add_feature", ["owned_feature"]));
     expect(add.op).toBe("applied");
     if (add.op === "applied") expect(add.observations[0]).toMatchObject({ type: "feature_added", source: "owned_space", feature: "owned_feature" });
     expect(world.getProp("owned_space", "features")).toEqual(["owned_feature"]);
     expect(world.getProp("owned_space", "features_version")).toBe(1);
 
-    const has = world.directCall("has-feature", session.actor, "owned_space", "has_feature", ["owned_feature"]);
+    const has = await world.directCall("has-feature", session.actor, "owned_space", "has_feature", ["owned_feature"]);
     expect(has.op).toBe("result");
     if (has.op === "result") expect(has.result).toBe(true);
 
-    const duplicate = world.call("add-feature-again", session.id, "owned_space", message(session.actor, "owned_space", "add_feature", ["owned_feature"]));
+    const duplicate = await world.call("add-feature-again", session.id, "owned_space", message(session.actor, "owned_space", "add_feature", ["owned_feature"]));
     expect(world.getProp("owned_space", "features_version")).toBe(1);
     if (duplicate.op === "applied") expect(duplicate.observations[0].type).toBe("feature_already_added");
 
-    const remove = world.call("remove-feature", session.id, "owned_space", message(session.actor, "owned_space", "remove_feature", ["owned_feature"]));
+    const remove = await world.call("remove-feature", session.id, "owned_space", message(session.actor, "owned_space", "remove_feature", ["owned_feature"]));
     expect(remove.op).toBe("applied");
     expect(world.getProp("owned_space", "features")).toEqual([]);
     expect(world.getProp("owned_space", "features_version")).toBe(2);
   });
 
-  it("allows conversational feature attachment by non-wizard space owners", () => {
+  it("allows conversational feature attachment by non-wizard space owners", async () => {
     const world = createWorld();
     const session = world.auth("guest:chat-feature-owner");
     world.createObject({ id: "owned_chat_space", parent: "$space", owner: session.actor });
@@ -726,27 +844,27 @@ describe("woo core", () => {
     world.setProp("owned_chat_space", "last_snapshot_seq", 0);
     world.setProp(session.actor, "presence_in", [...(world.getProp(session.actor, "presence_in") as string[]), "owned_chat_space"]);
 
-    const add = world.call("add-conversational", session.id, "owned_chat_space", message(session.actor, "owned_chat_space", "add_feature", ["$conversational"]));
+    const add = await world.call("add-conversational", session.id, "owned_chat_space", message(session.actor, "owned_chat_space", "add_feature", ["$conversational"]));
     expect(add.op).toBe("applied");
     expect(world.getProp("owned_chat_space", "features")).toEqual(["$conversational"]);
   });
 
-  it("rejects non-direct-callable verbs over direct ingress", () => {
+  it("rejects non-direct-callable verbs over direct ingress", async () => {
     const { world, actor } = authedWorld();
-    const result = world.directCall("direct-denied", actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.44]);
+    const result = await world.directCall("direct-denied", actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.44]);
     expect(result.op).toBe("error");
     if (result.op === "error") expect(result.error.code).toBe("E_DIRECT_DENIED");
     expect(world.getProp("delay_1", "feedback")).toBe(0.35);
     expect(world.replay("the_dubspace", 1, 10)).toEqual([]);
   });
 
-  it("allows wizard force-direct repair and records the bypass", () => {
+  it("allows wizard force-direct repair and records the bypass", async () => {
     const { world, actor } = authedWorld();
-    const nonWizard = world.directCall("force-denied", actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.44], { forceDirect: true });
+    const nonWizard = await world.directCall("force-denied", actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.44], { forceDirect: true });
     expect(nonWizard.op).toBe("error");
     if (nonWizard.op === "error") expect(nonWizard.error.code).toBe("E_PERM");
 
-    const wizard = world.directCall("force-wizard", "$wiz", "the_dubspace", "set_control", ["delay_1", "feedback", 0.44], {
+    const wizard = await world.directCall("force-wizard", "$wiz", "the_dubspace", "set_control", ["delay_1", "feedback", 0.44], {
       forceDirect: true,
       forceReason: "test repair"
     });
@@ -765,29 +883,29 @@ describe("woo core", () => {
 });
 
 describe("taskspace", () => {
-  it("creates hierarchical tasks and emits soft definition-of-done observations", () => {
+  it("creates hierarchical tasks and emits soft definition-of-done observations", async () => {
     const { world, session, actor } = authedWorld();
-    const create = world.call("create", session.id, "the_taskspace", message(actor, "the_taskspace", "create_task", ["Build core", "Make it real"]));
+    const create = await world.call("create", session.id, "the_taskspace", message(actor, "the_taskspace", "create_task", ["Build core", "Make it real"]));
     expect(create.op).toBe("applied");
     const task = create.op === "applied" ? (create.observations[0].task as string) : "";
-    world.call("sub", session.id, "the_taskspace", message(actor, task, "add_subtask", ["Write tests", ""]));
-    world.call("claim", session.id, "the_taskspace", message(actor, task, "claim", []));
-    world.call("req", session.id, "the_taskspace", message(actor, task, "add_requirement", ["passes tests"]));
-    const done = world.call("done", session.id, "the_taskspace", message(actor, task, "set_status", ["done"]));
+    await world.call("sub", session.id, "the_taskspace", message(actor, task, "add_subtask", ["Write tests", ""]));
+    await world.call("claim", session.id, "the_taskspace", message(actor, task, "claim", []));
+    await world.call("req", session.id, "the_taskspace", message(actor, task, "add_requirement", ["passes tests"]));
+    const done = await world.call("done", session.id, "the_taskspace", message(actor, task, "set_status", ["done"]));
     expect(world.getProp(task, "status")).toBe("done");
     if (done.op === "applied") {
       expect(done.observations.map((obs) => obs.type)).toContain("done_premature");
     }
   });
 
-  it("prevents conflicting claims", () => {
+  it("prevents conflicting claims", async () => {
     const world = createWorld();
     const session1 = world.auth("guest:1");
     const session2 = world.auth("guest:2");
-    const create = world.call("create", session1.id, "the_taskspace", message(session1.actor, "the_taskspace", "create_task", ["Claimed", ""]));
+    const create = await world.call("create", session1.id, "the_taskspace", message(session1.actor, "the_taskspace", "create_task", ["Claimed", ""]));
     const task = create.op === "applied" ? (create.observations[0].task as string) : "";
-    world.call("claim-1", session1.id, "the_taskspace", message(session1.actor, task, "claim", []));
-    const conflict = world.call("claim-2", session2.id, "the_taskspace", message(session2.actor, task, "claim", []));
+    await world.call("claim-1", session1.id, "the_taskspace", message(session1.actor, task, "claim", []));
+    const conflict = await world.call("claim-2", session2.id, "the_taskspace", message(session2.actor, task, "claim", []));
     expect(conflict.op).toBe("applied");
     if (conflict.op === "applied") {
       expect(conflict.observations[0].type).toBe("$error");
@@ -795,7 +913,7 @@ describe("taskspace", () => {
     }
   });
 
-  it("lets anyone close claimed tasks while keeping other claimed status updates gated", () => {
+  it("lets anyone close claimed tasks while keeping other claimed status updates gated", async () => {
     const world = createWorld();
     const assignee = world.auth("guest:assignee");
     const other = world.auth("guest:other");
@@ -808,23 +926,23 @@ describe("taskspace", () => {
       tokenClass: "bearer",
       attachedSockets: new Set()
     });
-    const create = world.call("create", assignee.id, "the_taskspace", message(assignee.actor, "the_taskspace", "create_task", ["Wizard check", ""]));
+    const create = await world.call("create", assignee.id, "the_taskspace", message(assignee.actor, "the_taskspace", "create_task", ["Wizard check", ""]));
     const task = create.op === "applied" ? (create.observations[0].task as string) : "";
-    world.call("claim", assignee.id, "the_taskspace", message(assignee.actor, task, "claim", []));
-    const rejected = world.call("other-status", other.id, "the_taskspace", message(other.actor, task, "set_status", ["blocked"]));
+    await world.call("claim", assignee.id, "the_taskspace", message(assignee.actor, task, "claim", []));
+    const rejected = await world.call("other-status", other.id, "the_taskspace", message(other.actor, task, "set_status", ["blocked"]));
     expect(world.getProp(task, "status")).toBe("claimed");
     if (rejected.op === "applied") expect(rejected.observations[0].code).toBe("E_PERM");
-    const closed = world.call("other-done", other.id, "the_taskspace", message(other.actor, task, "set_status", ["done"]));
+    const closed = await world.call("other-done", other.id, "the_taskspace", message(other.actor, task, "set_status", ["done"]));
     expect(world.getProp(task, "status")).toBe("done");
     if (closed.op === "applied") expect(closed.observations[0].type).toBe("status_changed");
-    const wizard = world.call("wiz-status", "wiz-session", "the_taskspace", message("$wiz", task, "set_status", ["blocked"]));
+    const wizard = await world.call("wiz-status", "wiz-session", "the_taskspace", message("$wiz", task, "set_status", ["blocked"]));
     expect(world.getProp(task, "status")).toBe("blocked");
     if (wizard.op === "applied") expect(wizard.observations[0].type).toBe("status_changed");
   });
 });
 
 describe("authoring", () => {
-  it("compiles T0 source and installs with expected version", () => {
+  it("compiles T0 source and installs with expected version", async () => {
     const { world, session, actor } = authedWorld();
     const source = `verb :set_feedback(value) rx {
   this.feedback = value;
@@ -848,20 +966,20 @@ describe("authoring", () => {
     expect(info.perms).toBe("rx");
     expect(info.arg_spec).toEqual({ params: ["value"] });
     expect(Object.keys(info.line_map as Record<string, unknown>).length).toBeGreaterThan(0);
-    const applied = world.call("test", session.id, "the_dubspace", message(actor, "delay_1", "set_feedback", [0.62]));
+    const applied = await world.call("test", session.id, "the_dubspace", message(actor, "delay_1", "set_feedback", [0.62]));
     expect(world.getProp("delay_1", "feedback")).toBe(0.62);
     if (applied.op === "applied") expect(applied.observations[0].type).toBe("control_changed");
     expect(() => installVerb(world, "delay_1", "set_feedback", source, null)).toThrow();
   });
 
-  it("rejects undocumented verb permission letters", () => {
+  it("rejects undocumented verb permission letters", async () => {
     const compiled = compileVerb(`verb :bad() rxt {
   return true;
 }`);
     expect(compiled.ok).toBe(false);
   });
 
-  it("lets a programmer build an object, install behavior, and keep private state filtered", () => {
+  it("lets a programmer build an object, install behavior, and keep private state filtered", async () => {
     const world = createWorld();
     const builder = world.auth("guest:builder");
     const other = world.auth("guest:other-builder-test");
@@ -869,8 +987,8 @@ describe("authoring", () => {
     builderObj.owner = builder.actor;
     builderObj.flags.programmer = true;
 
-    expect(world.directCall("builder-enter", builder.actor, "the_chatroom", "enter", []).op).toBe("result");
-    expect(world.directCall("other-enter", other.actor, "the_chatroom", "enter", []).op).toBe("result");
+    expect((await world.directCall("builder-enter", builder.actor, "the_chatroom", "enter", [])).op).toBe("result");
+    expect((await world.directCall("other-enter", other.actor, "the_chatroom", "enter", [])).op).toBe("result");
 
     expect(() => world.createAuthoredObject(other.actor, { parent: "$thing", name: "Should Fail", location: "the_chatroom" })).toThrow();
 
@@ -900,12 +1018,12 @@ describe("authoring", () => {
 }`, null);
     expect(installed.ok).toBe(true);
 
-    const used = world.call("rub-lamp", other.id, "the_chatroom", message(other.actor, lamp, "rub", []));
+    const used = await world.call("rub-lamp", other.id, "the_chatroom", message(other.actor, lamp, "rub", []));
     expect(used.op).toBe("applied");
     expect(world.getProp(lamp, "rub_count")).toBe(1);
     if (used.op === "applied") expect(used.observations[0]).toMatchObject({ type: "builder_rubbed", target: lamp, count: 1, actor: other.actor });
 
-    const look = world.directCall("look-builder-room", other.actor, "the_chatroom", "look", []);
+    const look = await world.directCall("look-builder-room", other.actor, "the_chatroom", "look", []);
     expect(look.op).toBe("result");
     if (look.op === "result") {
       const room = look.result as { contents: Array<{ id: string; title: string; description: unknown }> };
@@ -919,7 +1037,7 @@ describe("authoring", () => {
     expect(reloaded.propOrNullForActor(other.actor, lamp, "description")).toBe(null);
   });
 
-  it("exposes task permission primitives without allowing non-wizard escalation", () => {
+  it("exposes task permission primitives without allowing non-wizard escalation", async () => {
     const { world, actor } = authedWorld();
     world.createObject({ id: "perm_box", name: "Perm Box", parent: "$thing", owner: "$wiz" });
     world.defineProperty("perm_box", { name: "secret", defaultValue: "sealed", owner: "$wiz", perms: "r", typeHint: "str" });
@@ -928,7 +1046,7 @@ describe("authoring", () => {
   set_task_perms(actor);
   return [before, task_perms(), caller_perms()];
 }`, null).ok).toBe(true);
-    const probe = world.directCall("perms-probe", actor, "perm_box", "perms_probe", []);
+    const probe = await world.directCall("perms-probe", actor, "perm_box", "perms_probe", []);
     expect(probe.op).toBe("result");
     if (probe.op === "result") expect(probe.result).toEqual(["$wiz", actor, actor]);
 
@@ -937,7 +1055,7 @@ describe("authoring", () => {
   this.secret = "pwned";
   return true;
 }`, null).ok).toBe(true);
-    const denied = world.directCall("drop-write", actor, "perm_box", "drop_then_write", []);
+    const denied = await world.directCall("drop-write", actor, "perm_box", "drop_then_write", []);
     expect(denied.op).toBe("error");
     if (denied.op === "error") expect(denied.error.code).toBe("E_PERM");
     expect(world.getProp("perm_box", "secret")).toBe("sealed");
@@ -949,12 +1067,12 @@ describe("authoring", () => {
   set_task_perms("$wiz");
   return true;
 }`, null).ok).toBe(true);
-    const escalated = world.directCall("try-escalate", actor, owned, "try_escalate", []);
+    const escalated = await world.directCall("try-escalate", actor, owned, "try_escalate", []);
     expect(escalated.op).toBe("error");
     if (escalated.op === "error") expect(escalated.error.code).toBe("E_PERM");
   });
 
-  it("compiles string interpolation and dynamic index get/set", () => {
+  it("compiles string interpolation and dynamic index get/set", async () => {
     const { world, session, actor } = authedWorld();
     const source = `verb :index_and_interp(name, value) rx {
   let controls = { feedback: 1 };
@@ -969,7 +1087,7 @@ describe("authoring", () => {
     expect(compiled.bytecode?.ops.map(([op]) => op)).toEqual(expect.arrayContaining(["INDEX_SET", "INDEX_GET", "SET_PROP", "GET_PROP", "STR_INTERP"]));
     expect(installVerb(world, "delay_1", "index_and_interp", source, null).ok).toBe(true);
 
-    const applied = world.call("index", session.id, "the_dubspace", message(actor, "delay_1", "index_and_interp", ["feedback", 0.7]));
+    const applied = await world.call("index", session.id, "the_dubspace", message(actor, "delay_1", "index_and_interp", ["feedback", 0.7]));
     expect(applied.op).toBe("applied");
     expect(world.getProp("delay_1", "feedback")).toBe(0.7);
     if (applied.op === "applied") {
@@ -977,14 +1095,14 @@ describe("authoring", () => {
     }
   });
 
-  it("adds line-mapped runtime traces to VM error observations", () => {
+  it("adds line-mapped runtime traces to VM error observations", async () => {
     const { world, session, actor } = authedWorld();
     const source = `verb :explode() rx {
   let denom = 0;
   return 1 / denom;
 }`;
     expect(installVerb(world, "delay_1", "explode", source, null).ok).toBe(true);
-    const applied = world.call("explode", session.id, "the_dubspace", message(actor, "delay_1", "explode", []));
+    const applied = await world.call("explode", session.id, "the_dubspace", message(actor, "delay_1", "explode", []));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") {
       expect(applied.observations[0].type).toBe("$error");
@@ -994,21 +1112,21 @@ describe("authoring", () => {
     }
   });
 
-  it("seeds dubspace loop transport verbs as authored source", () => {
+  it("seeds dubspace loop transport verbs as authored source", async () => {
     const { world, session, actor } = authedWorld();
     const info = world.verbInfo("the_dubspace", "start_loop");
     expect(info.source).toContain("slot.playing = true");
     expect(info.bytecode_version).toBeGreaterThan(0);
 
-    const started = world.call("start-loop", session.id, "the_dubspace", message(actor, "the_dubspace", "start_loop", ["slot_1"]));
+    const started = await world.call("start-loop", session.id, "the_dubspace", message(actor, "the_dubspace", "start_loop", ["slot_1"]));
     expect(world.getProp("slot_1", "playing")).toBe(true);
     if (started.op === "applied") expect(started.observations[0]).toMatchObject({ type: "loop_started", slot: "slot_1", loop_id: "loop-1" });
-    const stopped = world.call("stop-loop", session.id, "the_dubspace", message(actor, "the_dubspace", "stop_loop", ["slot_1"]));
+    const stopped = await world.call("stop-loop", session.id, "the_dubspace", message(actor, "the_dubspace", "stop_loop", ["slot_1"]));
     expect(world.getProp("slot_1", "playing")).toBe(false);
     if (stopped.op === "applied") expect(stopped.observations[0]).toMatchObject({ type: "loop_stopped", slot: "slot_1" });
   });
 
-  it("compiles M1 source with locals, loops, conditionals, and observations", () => {
+  it("compiles M1 source with locals, loops, conditionals, and observations", async () => {
     const { world, session, actor } = authedWorld();
     const source = `verb :sum_to(limit) rx {
   let total = 0;
@@ -1035,7 +1153,7 @@ describe("authoring", () => {
     const installed = installVerb(world, "delay_1", "sum_to", source, null);
     expect(installed.ok).toBe(true);
 
-    const applied = world.call("compiled-sum", session.id, "the_dubspace", message(actor, "delay_1", "sum_to", [5]));
+    const applied = await world.call("compiled-sum", session.id, "the_dubspace", message(actor, "delay_1", "sum_to", [5]));
     expect(applied.op).toBe("applied");
     expect(world.getProp("delay_1", "feedback")).toBe(15);
     if (applied.op === "applied") {
@@ -1043,7 +1161,7 @@ describe("authoring", () => {
     }
   });
 
-  it("compiles source verb calls, pass, and try/except", () => {
+  it("compiles source verb calls, pass, and try/except", async () => {
     const { world, actor } = authedWorld();
     world.createObject({ id: "compiler_base", name: "Compiler Base", parent: "$thing", owner: "$wiz" });
     world.createObject({ id: "compiler_child", name: "Compiler Child", parent: "compiler_base", owner: "$wiz" });
@@ -1081,11 +1199,11 @@ describe("authoring", () => {
       observations: [],
       observe: () => {}
     };
-    expect(world.dispatch(ctx, "delay_1", "call_child", [])).toBe(15);
-    expect(world.dispatch({ ...ctx, verbName: "catcher", message: message(actor, "delay_1", "catcher", []) }, "delay_1", "catcher", [])).toBe("E_BOOM");
+    expect(await world.dispatch(ctx, "delay_1", "call_child", [])).toBe(15);
+    expect(await world.dispatch({ ...ctx, verbName: "catcher", message: message(actor, "delay_1", "catcher", []) }, "delay_1", "catcher", [])).toBe("E_BOOM");
   });
 
-  it("returns structured diagnostics for bad source", () => {
+  it("returns structured diagnostics for bad source", async () => {
     const result = compileVerb(`verb :bad() rx {
   let x = ;
 }`);
@@ -1094,7 +1212,7 @@ describe("authoring", () => {
     expect(result.diagnostics[0].span?.line).toBe(2);
   });
 
-  it("verifies raw JSON bytecode fallback and versions property definitions", () => {
+  it("verifies raw JSON bytecode fallback and versions property definitions", async () => {
     const world = createWorld();
     const raw = JSON.stringify({
       ops: [["PUSH_ARG", 0], ["RETURN"]],
@@ -1111,7 +1229,7 @@ describe("authoring", () => {
     expect(updated.version).toBe(2);
   });
 
-  it("uses structural map equality in T0 EQ", () => {
+  it("uses structural map equality in T0 EQ", async () => {
     const { world, session, actor } = authedWorld();
     world.addVerb("delay_1", {
       kind: "bytecode",
@@ -1143,7 +1261,7 @@ describe("authoring", () => {
         version: 1
       }
     });
-    const applied = world.call("eq", session.id, "the_dubspace", message(actor, "delay_1", "observe_eq", []));
+    const applied = await world.call("eq", session.id, "the_dubspace", message(actor, "delay_1", "observe_eq", []));
     if (applied.op === "applied") expect(applied.observations[0].value).toBe(true);
   });
 });

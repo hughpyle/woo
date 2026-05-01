@@ -21,9 +21,6 @@ created → running → done
               ↓
            running (input arrives)
 
-          awaiting_call (cross-host RPC out)
-              ↓
-           running (RPC reply)
 ```
 
 ### 16.2 Suspend across host eviction
@@ -47,16 +44,15 @@ This is the load-bearing test for the architecture; it must work for `seconds = 
 
 > **Open question:** the design here is straightforward but needs empirical validation against the runtime's alarm-after-hibernate behavior — particularly that alarms set across multi-day boundaries fire reliably and that hibernated state is fully reconstructible from persistent storage alone. First runtime task: write a test that suspends for 24h+ and verifies resume. See [LATER.md](../../LATER.md).
 
-### 16.3 Suspend across cross-host RPC
+### 16.3 Cross-host RPC
 
-`CALL_VERB` to remote obj:
-1. Frame state serialized.
-2. RPC sent to receiver host with `{frames: [...], args, target, name, correlation_id}`.
-3. Receiver creates a new task with the migrated frame as bottom frame, runs to completion.
-4. On return: receiver RPCs `{correlation_id, result}` back.
-5. Originating host: deserialize task (it was stored with `state='awaiting_call'`), push result onto its top frame's stack, resume.
+`CALL_VERB` to a remote object is an awaited host RPC:
 
-If the originating host is hibernated when the reply arrives, the reply is queued by the runtime; host wakes; resume. Idempotency on retry is per [protocol/hosts.md §3.4](../protocol/hosts.md#34-task-migration-invariants) — a duplicate reply with the same correlation id is dropped.
+1. Origin keeps the caller continuation in memory and sends `{target, name, args, ctx, correlation_id}` to the receiver host.
+2. Receiver runs the callee frame under the caller's authority and returns `{correlation_id, result, observations}`.
+3. Origin pushes the result onto its top frame's stack and appends the returned observations to the current frame.
+
+The v1 baseline does not persist a parked RPC task. If the origin host crashes while awaiting the reply, the in-memory task is lost just like any other uncheckpointed running task. Idempotency on retry is per [protocol/hosts.md §3.4](../protocol/hosts.md#34-host-rpc-invariants) — a duplicate request with the same correlation id returns the cached reply rather than re-executing.
 
 ### 16.4 Killing tasks
 

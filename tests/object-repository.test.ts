@@ -92,7 +92,7 @@ function task(id: string, overrides: Partial<ParkedTaskRecord> = {}): ParkedTask
 }
 
 describe.each(backends)("ObjectRepository contract: $name", ({ make }) => {
-  it("round-trips object slices at object/property/verb granularity", () => {
+  it("round-trips object slices at object/property/verb granularity", async () => {
     const { repo, cleanup } = make();
     try {
       repo.saveObject(object("space"));
@@ -133,7 +133,7 @@ describe.each(backends)("ObjectRepository contract: $name", ({ make }) => {
     }
   });
 
-  it("uses a savepoint to roll back behavior while preserving the accepted log row", () => {
+  it("uses a savepoint to roll back behavior while preserving the accepted log row", async () => {
     const { repo, cleanup } = make();
     try {
       repo.saveObject(object("space"));
@@ -161,7 +161,7 @@ describe.each(backends)("ObjectRepository contract: $name", ({ make }) => {
     }
   });
 
-  it("rejects a transaction that leaves a pending log outcome", () => {
+  it("rejects a transaction that leaves a pending log outcome", async () => {
     const { repo, cleanup } = make();
     try {
       repo.saveObject(object("space"));
@@ -177,7 +177,7 @@ describe.each(backends)("ObjectRepository contract: $name", ({ make }) => {
     }
   });
 
-  it("rejects divergent attempts to record a log outcome twice", () => {
+  it("rejects divergent attempts to record a log outcome twice", async () => {
     const { repo, cleanup } = make();
     try {
       repo.saveObject(object("space"));
@@ -195,7 +195,7 @@ describe.each(backends)("ObjectRepository contract: $name", ({ make }) => {
     }
   });
 
-  it("persists sessions, tasks, snapshots, counters, and meta records", () => {
+  it("persists sessions, tasks, snapshots, counters, and meta records", async () => {
     const { repo, cleanup } = make();
     try {
       repo.saveObject(object("space"));

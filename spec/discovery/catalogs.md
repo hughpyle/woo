@@ -138,7 +138,7 @@ Three operations, all wizard-only and audited. Catalog operations are themselves
 
 `$catalog_registry` is a universal singleton (corename `$catalog_registry`) that descends from `$space`. Every install, uninstall, and update is a sequenced call **through `$catalog_registry`** — its log is the catalog-operations history. Replay over the registry log reconstructs the sequence of catalog mutations the world has seen.
 
-Because the registry is a `$space` subclass, it inherits the same call lifecycle, replay, and snapshot machinery ([sequenced-log.md §SL2](../semantics/sequenced-log.md#sl2-the-native-host-operations), [space.md §S2](../semantics/space.md#s2-the-call-lifecycle)). The two-phase commit + savepoint discipline applies: a partial install rolls back inside the savepoint while the registry log row stays with `applied_ok=false`. Crash-safety and audit follow without new mechanisms.
+Because the registry is a `$space` subclass, it inherits the same call lifecycle, replay, and snapshot machinery ([sequenced-log.md §SL2](../semantics/sequenced-log.md#sl2-the-native-host-operations), [space.md §S2](../semantics/space.md#s2-the-call-lifecycle)). The async behavior-savepoint discipline applies: a partial install rolls back inside the behavior savepoint while the registry log row commits with `applied_ok=false`. Crash-safety and audit follow without new mechanisms.
 
 This places catalog ops in a different sequencing scope from `$space:call` traffic in user spaces — installs don't conflict with normal world activity, but they are themselves totally ordered relative to each other and replay-deterministic.
 
@@ -216,7 +216,7 @@ Boot-time auto-install is controlled by `WOO_AUTO_INSTALL_CATALOGS` (a comma-sep
 - `WOO_AUTO_INSTALL_CATALOGS=` (empty) — clean world; operators install what they want.
 - Each entry is a catalog name resolved against `@local:<name>`.
 
-Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the boot-time pass skips it without appending a no-op registry log row. The first successful auto-install of each catalog is sequenced through `$catalog_registry`, so the install history records the mutation rather than every later reboot.
+Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the boot-time pass skips it without appending a no-op registry log row. Boot-time local auto-install is part of deterministic world construction, so it installs directly from the bundled manifest and records the catalog in `$catalog_registry` state without routing through `$catalog_registry:call`. Runtime catalog install/update/uninstall operations are sequenced through `$catalog_registry` and audited.
 
 Implementation rule: source code must not contain catalog-specific install policy. Adding, removing, or renaming a bundled catalog is a filesystem/catalog operation: place or remove a manifest directory under `catalogs/`, regenerate the bundled catalog index for non-filesystem deployment targets, and let install ordering follow declared dependencies. Runtime code that branches on demo object names or catalog names is a bug unless it is explicitly part of a temporary demo UI adapter.
 
@@ -319,7 +319,7 @@ Trust is rooted in **the operator's choice of which repo to install from**. v1 h
 
 - Public repos only, by URL.
 - Optional commit-signature verification — deferred to v1.1; GitHub's UI shows verified commits today.
-- Every install/uninstall/update is sequenced through `$catalog_registry` (§CT5.1) **and** logged as a wizard action ([cloudflare.md §R10.4](../reference/cloudflare.md#r104-wizard-audit)). Both records carry the full `install_provenance`: tap, catalog, requested ref, **resolved commit SHA**, and SHA-256 hashes of the fetched manifest and README. A later operator can reconstruct exactly what bytes were installed even if the upstream tag has been moved or the branch has advanced.
+- Every runtime install/uninstall/update is sequenced through `$catalog_registry` (§CT5.1) **and** logged as a wizard action ([cloudflare.md §R10.4](../reference/cloudflare.md#r104-wizard-audit)). Boot-time local auto-install is direct deterministic bootstrap (§CT5.4). Both records carry the full `install_provenance`: tap, catalog, requested ref, **resolved commit SHA**, and SHA-256 hashes of the fetched manifest and README. A later operator can reconstruct exactly what bytes were installed even if the upstream tag has been moved or the branch has advanced.
 
 When the operator says `tap install hugh/woo-libs:dubspace`, they are vouching for `hugh/woo-libs` as a source. Exactly the same trust model as `cargo install` from a git URL or `homebrew tap`.
 

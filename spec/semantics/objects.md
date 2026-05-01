@@ -17,7 +17,7 @@ Every object has:
 | `parent` | objref \| `#-1` | Single inheritance. `#-1` = no parent. |
 | `owner` | objref | The user object that controls this object. |
 | `location` | objref \| `#-1` | The object's container. May be remote. May change at runtime (this is what "moving" means). |
-| `anchor` | objref \| `null` | Host placement. `null` = own host (default). Set = share host with anchor object. **Immutable after creation.** See §4.1. |
+| `anchor` | objref \| `null` | Atomicity scope. `null` (default) = no anchor cluster. Set = mutations to this object and to other objects sharing the anchor commit atomically together. **Immutable after creation.** Anchor does not by itself decide host placement — see §4.2. |
 | `flags` | bitset | `wizard`, `programmer`, `fertile`, `recyclable`. (See §11.) |
 | `created`, `modified` | int (ms) | Audit. |
 
@@ -36,12 +36,14 @@ Inheritance is **single-parent**. There is no multiple inheritance and no mixin 
 
 ### 4.1 Anchor and atomicity scope
 
-`anchor` is a structural placement decision: an object with `anchor = X` lives on the same host as `X`, and a verb body that mutates objects within one anchor cluster runs as a single atomic transaction. Cross-cluster mutations (a verb call from one cluster into another) are not atomic; partial failures are observable.
+`anchor` declares an atomicity cluster: a verb body that mutates objects sharing one anchor runs as a single atomic transaction. Cross-cluster mutations (a verb call from one cluster into another) are not atomic; partial failures are observable.
+
+Anchor is a *consequence-of-placement* construct, not the placement primitive. When an anchor's root resolves to a self-hosted host (§4.2), every object in that cluster lives on that host as a side effect — that is what makes the cluster atomic. When the anchor's root is co-resident, the cluster is co-resident with it; atomicity then depends on every cluster member being co-resident in fact, which the runtime guarantees by stamping host placement at create time.
 
 Constraints:
 
 - `anchor` must be a persistent objref. Transients can't anchor anything; transients live on their player's host.
-- Anchor relationships form a tree — no cycles. Anchoring places transitively: if `B.anchor = A` and `C.anchor = B`, then `C` lives on `A`'s host.
+- Anchor relationships form a tree — no cycles. Anchoring places transitively: if `B.anchor = A` and `C.anchor = B`, then `C` shares an atomicity cluster with `A`.
 - **`anchor` is set at creation time and cannot be changed.** Re-anchoring would be a recursive host migration with task drain, routing redirects, and an atomicity-scope shift. v1 does not provide it. If an object truly needs to live in a different cluster, the answer is: create a new object in the target cluster, copy state, recycle the old. Routine "move this object to that container" is a `location` update — that's free and unrelated to anchor.
 - `anchor` is independent of `parent` (inheritance) and `location` (containment). The three axes don't constrain each other.
 
@@ -49,15 +51,36 @@ Default: `anchor = null`. Use anchoring deliberately, when atomic coordination a
 
 ### 4.2 Host placement
 
-Where an object physically lives — which host owns its persistent storage — is determined at **creation time** by the object's class metadata, not by per-instance configuration. Two cases:
+Where an object physically lives — which host owns its persistent storage — is determined at **creation time** by the object's class metadata, and never changes again. Two cases:
 
-1. **Self-hosted instances.** A class that declares `instances_self_host: true` (inherited through the parent chain) produces instances that each run as their own host. Every instance of such a class gets a dedicated persistent host (in the Cloudflare reference, a Durable Object) at creation, with its own storage, scheduling alarm, and hibernation lifecycle. The `instances_self_host` property is **monotone for the class's lifetime** — it must not be flipped while extant instances exist, because that would split the population across two policies. Catalog-update migrations fail loud on such a flip.
+1. **Self-hosted instances.** A class whose `instances_self_host` property resolves to `true` (by normal inheritance lookup, §10.5) produces instances that each run as their own host. Every instance of such a class gets a dedicated persistent host (in the Cloudflare reference, a Durable Object) at creation, with its own storage, scheduling alarm, and hibernation lifecycle.
 
-2. **Co-resident instances.** A class without `instances_self_host` produces instances that live on the host of their creator (`progr` of the verb that called `create`). Carryable objects — books, hats, notes — fall here. The instance's `location` may change freely at runtime as it is carried between containers (§10.2 location and contents); host placement does not move with location. A book created on a player's host stays on that host even after it has been put on a table in another room. Lookups of the book through its container are resolved via Directory routing and per-host RPC (see [reference/cloudflare.md §R1](../reference/cloudflare.md#r1-host-mapping)).
+2. **Co-resident instances.** A class whose `instances_self_host` resolves to `false` (the default) produces instances that live on the host that ran the `create` call — the *executing host*, the persistent host whose verb body invoked `create`. Carryable objects — books, hats, notes — fall here. The instance's `location` may change freely at runtime as it is carried between containers (§10.2 location and contents); **host placement does not change with location**. A book created on a player's host stays on that host even after it has been put on a table in a different room. Lookups of the book through its container are resolved via Directory routing and per-host RPC (see [reference/cloudflare.md §R1](../reference/cloudflare.md#r1-host-mapping)).
 
-Subclass semantics: `instances_self_host` is inherited as a logical OR through the parent chain. A subclass of a self-hosting class is itself self-hosting; a subclass of a co-resident class can opt in by declaring its own flag.
+The executing host is distinct from the verb's `progr`. `progr` is permission authority, set at compile time and carried in every frame; the executing host is the persistent host that physically runs the call. A wizard-owned helper verb invoked from a player's host runs on the player's host with `progr = $wiz`; objects it creates are co-resident with the player, not with the wizard. Catalog seeds and bootstrap fixtures, by construction, run on the gateway host; objects they create without an explicit placement are gateway-resident.
 
-The classes that declare `instances_self_host: true` in v1-core and the bundled first-light catalogs:
+#### How `instances_self_host` is represented
+
+`instances_self_host` is a regular property defined on `$root_object`:
+
+- name: `instances_self_host`
+- default value: `false`
+- owner: `$wiz`
+- perms: `r` (read-public, wizard-only writable)
+- type hint: `bool`
+
+Subclasses opt in by setting `instances_self_host = true` on the class itself. Resolution at `create()` is the standard inheritance lookup on the parent class — the value defined nearest in the parent chain wins, equivalent to a logical OR if no ancestor sets it back to `false`. (The runtime treats any explicit `false` between an instance and a `true`-declaring ancestor as the spec's monotone-class-lifetime rule violated, and rejects it as `E_INVARG` at create time; flipping the flag while extant instances exist would split the population across two policies.)
+
+The runtime stamps the resolved decision onto the new instance as a runtime property `host_placement`:
+
+- name: `host_placement`
+- value: `"self"` for self-hosted instances; `null` for co-resident instances
+- owner: `$wiz`, perms: `r`
+- written by the runtime during `create()` and not user-writable thereafter
+
+`host_placement` is the on-disk projection. `instances_self_host` is the class-level declaration.
+
+The classes that declare `instances_self_host = true` in v1-core and the bundled first-light catalogs:
 
 - `$room` (and subclasses) — every room has its own log, subscribers, and fixtures, scaling independently of other rooms.
 - `$player` (and subclasses including `$wiz`, `$guest`) — every player owns a host for sessions, attached connections, and inventory.
@@ -65,21 +88,26 @@ The classes that declare `instances_self_host: true` in v1-core and the bundled 
 
 Authority to instantiate self-hosting classes is narrower than ordinary `create()`. Because each instance reserves a real host resource, the `assertCanCreateObject` check requires wizard authority (or an explicit programmer capability grant under v1-ops); ordinary programmer-creates-own-fertile-parent authority is not sufficient. See [permissions.md §11.4](permissions.md#114-progr-and-actor) and [reference/cloudflare.md §R1.1](../reference/cloudflare.md#r11-routing).
 
-The relationship between `host_placement` and `anchor`:
+#### Routing precedence
 
-- `host_placement = "self"` is the runtime materialization of `instances_self_host`. The runtime stamps it on the new instance during `create`.
-- `anchor` is independent and continues to govern atomicity scope (§4.1). A non-self-hosted object may still anchor to a self-hosted ancestor for atomicity; in practice, most objects do not anchor at all (default `null`).
-- The implementation routes a request for an object in this order: if `host_placement = "self"`, the object is its own host; else if its `anchor` resolves to a self-hosted host, route there; else if its `location` resolves to a self-hosted host, route there; else fall back to the gateway/owner host. The catalog-installed pattern of `host_placement: "self"` on `the_dubspace` and anchored controls under it is the canonical example.
+The implementation resolves an object id to a host in this order:
+
+1. **Self-hosted.** If the object's `host_placement = "self"`, the id is its own host.
+2. **Anchored to a self-hosted root.** Else if the object's `anchor` (transitively) resolves to a self-hosted host, route there.
+3. **Directory record.** Else, the runtime stamps the executing host onto the object at `create()` and registers it in Directory; the route is fixed for the object's lifetime and does not vary with `location`.
+
+`location` does not participate in routing. A book whose location is a self-hosted room continues to route to its creation host; rendering the room's contents resolves each member's host via Directory and dispatches `:title()` per-host. The catalog-installed pattern of `host_placement = "self"` on `the_dubspace` (with anchored controls under it) is the canonical example of (1) and (2).
 
 ### 4.3 Containment and cross-host invariants
 
 `obj.location = container` and `container.contents includes obj` are bidirectional: every move updates both sides. In a single-host world this is one in-memory operation, persisted in a single transaction. Across hosts, the invariant becomes a distributed responsibility:
 
 - The object's `location` field is the **source of truth**. It lives with the object on its own host; the move primitive writes it transactionally on the host that owns the object.
-- Each container's `contents` is a **cache** maintained by push-mirror RPC from the host that owns the moving object. When an object's `location` changes, the moving host RPCs the source container's host (`contents.delete(obj)`) and the target container's host (`contents.add(obj, {title})`).
-- The cache may drift if a push fails. A reconcile sweep — triggered on `:look` or by periodic policy — verifies each `contents` entry by querying the member's actual `location` via Directory and prunes ghosts. Ghost entries do not affect routing or correctness; they affect rendering until reconciled.
+- Each container's `contents` is a **cache**: a set of object ids maintained on the container's host. When an object's `location` changes, the moving host RPCs the source container's host with `contents.delete(obj_id)` and the target container's host with `contents.add(obj_id)` immediately after writing `obj.location`. The container stores ids only; it does not cache titles, hosts, or other display data.
+- **Rendering enriches at read time.** When a verb such as `:look` walks `contents`, it resolves each member's host via Directory and dispatches `:title()` (and any other display verbs) per-host. The dispatched titles are not stored on the container.
+- The `contents` cache may drift if a push fails. A reconcile sweep — triggered on `:look` or by periodic policy — verifies each cache entry by querying the member's actual `location` via Directory and prunes ghosts. Ghost entries do not affect routing or correctness; they affect rendering until reconciled.
 
-The Directory does not track `location`. It routes `id → host` only. Containment lives with the container; the Directory's job stays scoped to host lookup. See [reference/cloudflare.md §R1.1](../reference/cloudflare.md#r11-routing) for the wire-level mechanics.
+The Directory tracks `id → host` only. Containment lives with the container; `location` is recorded on the object itself, not in Directory. See [reference/cloudflare.md §R1.1](../reference/cloudflare.md#r11-routing) for the wire-level mechanics.
 
 ---
 
@@ -142,7 +170,7 @@ The Directory host is a singleton holding small, read-mostly tables:
 - **Corename map**: `$system → ULID`, `$root_object → ULID`, `$wiz → ULID`, etc. Dozens of entries, edited only by wizards.
 - **World metadata**: bootstrap state, schema version.
 
-The Directory is **not** in the path of ID allocation, runtime routing, or dispatch. It is read-cacheable and rarely written.
+The Directory **is** the authoritative `id → host` route table (per §4.2 routing precedence step 3 and [reference/cloudflare.md §R1.1](../reference/cloudflare.md#r11-routing)), but it is read-cacheable and not on the create or dispatch hot path: hosts cache route lookups, self-hosted ids are computed without reading Directory, and most calls resolve from a local cache. Directory is **not** in the path of ID allocation.
 
 There is no global object registry, by design. "All instances of `$room`" is answered by walking `children($room)` recursively. Operations requiring host enumeration (cleanup, stats, dump) go via the runtime's management plane (see [../reference/cloudflare.md §R2](../reference/cloudflare.md#r2-singleton-dos)), not the runtime API.
 

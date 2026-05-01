@@ -33,14 +33,14 @@ Wire-level interaction between a player host and a browser tab hosting transient
 When server-side code calls `~3@#42:render(event)`:
 
 1. Originating host sees target host = `#42` (the player host).
-2. RPC to player host with the migrated frame.
+2. RPC to player host with the call envelope.
 3. Player host holds an open websocket to the browser; sends `{op: "host_call", ...}` with the frame.
 4. Browser VM runs the verb to completion; sends `{op: "host_return", ...}` or `host_raise`.
 5. Player host returns to originating host via cross-host RPC.
 
 ### 18.4 Trust at the browser boundary
 
-The abstract host trust rules in [hosts.md §3.3](hosts.md#33-trust-model-across-hosts) and the migration invariants in [§3.4](hosts.md#34-task-migration-invariants) apply to this transport. The player host is the enforcement point: it strips identity-changing fields from migrated frames returned through the websocket and rejects any operation the browser attempts at higher than its player's permission level. Returned values are bounded in size and typed against the calling verb's return type when known.
+The abstract host trust rules in [hosts.md §3.3](hosts.md#33-trust-model-across-hosts) and the host RPC invariants in [§3.4](hosts.md#34-host-rpc-invariants) apply to this transport. The player host is the enforcement point: it strips identity-changing fields from browser returns and rejects any operation the browser attempts at higher than its player's permission level. Returned values are bounded in size and typed against the calling verb's return type when known.
 
 ### 18.5 Disconnect
 

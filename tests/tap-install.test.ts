@@ -123,7 +123,7 @@ describe("GitHub catalog taps", () => {
     }
   });
 
-  it("parses the README frontmatter subset used by catalogs", () => {
+  it("parses the README frontmatter subset used by catalogs", async () => {
     expect(parseFrontmatter(readme)).toEqual({
       name: "remote-demo",
       version: "1.2.0",

@@ -25,7 +25,7 @@ import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializ
 import { installCatalogManifest, type CatalogManifest } from "./catalog-installer";
 import { normalizeVerbPerms } from "./verb-perms";
 
-type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue;
+type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
 const GUEST_SESSION_GRACE_MS = 60_000;
 const GUEST_SESSION_TTL_MS = 5 * 60_000;
 const CREDENTIAL_SESSION_GRACE_MS = 5 * 60_000;
@@ -74,6 +74,13 @@ export type CallContext = {
   message: Message;
   observations: Observation[];
   observe(event: Observation): void;
+};
+
+export type HostBridge = {
+  localHost: string;
+  hostForObject(id: ObjRef): string | null | Promise<string | null>;
+  getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue>;
+  dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue>;
 };
 
 export type WorldSnapshot = {
@@ -145,14 +152,33 @@ export class WooWorld {
   private guestFreePool = new Set<ObjRef>();
   private objectRepository: ObjectRepository | null;
   private incrementalPersistenceEnabled = false;
+  private hostBridge: HostBridge | null;
+  // One host runs one behavior at a time. Awaited cross-host RPC must not let a
+  // second local behavior mutate the same in-memory state mid-savepoint.
+  private hostQueue: Promise<unknown> = Promise.resolve();
 
-  constructor(private repository?: WooRepository) {
+  constructor(private repository?: WooRepository, options: { hostBridge?: HostBridge | null } = {}) {
     this.objectRepository = isObjectRepository(repository) ? repository : null;
+    this.hostBridge = options.hostBridge ?? null;
     this.registerNativeHandlers();
   }
 
   enableIncrementalPersistence(): void {
     if (this.objectRepository) this.incrementalPersistenceEnabled = true;
+  }
+
+  setHostBridge(bridge: HostBridge | null): void {
+    this.hostBridge = bridge;
+  }
+
+  async isRemoteObject(objRef: ObjRef): Promise<boolean> {
+    return (await this.remoteHostForObject(objRef)) !== null;
+  }
+
+  private async remoteHostForObject(objRef: ObjRef): Promise<string | null> {
+    const host = await (this.hostBridge?.hostForObject(objRef) ?? null);
+    if (!host || host === this.hostBridge?.localHost) return null;
+    return host;
   }
 
   createObject(input: {
@@ -360,14 +386,21 @@ export class WooWorld {
     return this.canBypassPerms(progr) || info.owner === progr || String(info.perms).includes("w");
   }
 
-  getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): WooValue {
+  async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue> {
+    if (await this.remoteHostForObject(objRef)) {
+      if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      return await this.hostBridge.getPropChecked(progr, objRef, name);
+    }
     if (!this.canReadProperty(progr, objRef, name)) {
       throw wooError("E_PERM", `${progr} cannot read ${objRef}.${name}`, { progr, obj: objRef, property: name });
     }
     return this.getProp(objRef, name);
   }
 
-  setPropChecked(progr: ObjRef, objRef: ObjRef, name: string, value: WooValue): void {
+  async setPropChecked(progr: ObjRef, objRef: ObjRef, name: string, value: WooValue): Promise<void> {
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host writes are not atomic: ${objRef}.${name}`, { progr, obj: objRef, property: name, value });
+    }
     try {
       if (!this.canWriteProperty(progr, objRef, name)) {
         throw wooError("E_PERM", `${progr} cannot write ${objRef}.${name}`, { progr, obj: objRef, property: name });
@@ -382,7 +415,10 @@ export class WooWorld {
     this.setProp(objRef, name, value);
   }
 
-  definePropertyChecked(progr: ObjRef, objRef: ObjRef, def: Omit<PropertyDef, "version"> & { version?: number }): PropertyDef {
+  async definePropertyChecked(progr: ObjRef, objRef: ObjRef, def: Omit<PropertyDef, "version"> & { version?: number }): Promise<PropertyDef> {
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host property definitions are not atomic: ${objRef}.${def.name}`, { progr, obj: objRef, property: def.name });
+    }
     const obj = this.object(objRef);
     const wizard = this.canBypassPerms(progr);
     if (!wizard && obj.owner !== progr) {
@@ -400,7 +436,10 @@ export class WooWorld {
     return this.defineProperty(objRef, def);
   }
 
-  undefinePropertyChecked(progr: ObjRef, objRef: ObjRef, name: string): void {
+  async undefinePropertyChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<void> {
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host property definitions are not atomic: ${objRef}.${name}`, { progr, obj: objRef, property: name });
+    }
     const obj = this.object(objRef);
     const def = obj.propertyDefs.get(name);
     if (!def) throw wooError("E_PROPNF", `property not defined on ${objRef}: ${name}`, { obj: objRef, property: name });
@@ -415,7 +454,10 @@ export class WooWorld {
     this.persist();
   }
 
-  setPropertyInfoChecked(progr: ObjRef, objRef: ObjRef, name: string, info: Record<string, WooValue>): void {
+  async setPropertyInfoChecked(progr: ObjRef, objRef: ObjRef, name: string, info: Record<string, WooValue>): Promise<void> {
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host property metadata writes are not atomic: ${objRef}.${name}`, { progr, obj: objRef, property: name });
+    }
     const currentInfo = this.propertyInfo(objRef, name);
     const definedOn = assertObj(currentInfo.defined_on);
     const obj = this.object(definedOn);
@@ -665,7 +707,11 @@ export class WooWorld {
     return Array.isArray(presence) && presence.includes(space);
   }
 
-  call(frameId: string | undefined, sessionId: string, space: ObjRef, message: Message): AppliedFrame | ErrorFrame {
+  async call(frameId: string | undefined, sessionId: string, space: ObjRef, message: Message): Promise<AppliedFrame | ErrorFrame> {
+    return await this.enqueueHostTask(() => this.callNow(frameId, sessionId, space, message));
+  }
+
+  private async callNow(frameId: string | undefined, sessionId: string, space: ObjRef, message: Message): Promise<AppliedFrame | ErrorFrame> {
     const session = this.sessions.get(sessionId);
     if (!session || !this.sessionAlive(sessionId)) {
       return { op: "error", id: frameId, error: wooError("E_NOSESSION", "session token is expired or unknown") };
@@ -680,7 +726,7 @@ export class WooWorld {
     }
     let frame: AppliedFrame | ErrorFrame;
     try {
-      frame = this.applyCall(frameId, space, message);
+      frame = await this.applyCall(frameId, space, message);
     } catch (err) {
       const error = normalizeError(err);
       frame = { op: "error", id: frameId, error };
@@ -689,7 +735,20 @@ export class WooWorld {
     return frame;
   }
 
-  directCall(frameId: string | undefined, actor: ObjRef, target: ObjRef, verbName: string, args: WooValue[], options: DirectCallOptions = {}): DirectResultFrame | ErrorFrame {
+  private async enqueueHostTask<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.hostQueue.then(fn, fn);
+    this.hostQueue = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return await run;
+  }
+
+  async directCall(frameId: string | undefined, actor: ObjRef, target: ObjRef, verbName: string, args: WooValue[], options: DirectCallOptions = {}): Promise<DirectResultFrame | ErrorFrame> {
+    return await this.enqueueHostTask(() => this.directCallNow(frameId, actor, target, verbName, args, options));
+  }
+
+  private async directCallNow(frameId: string | undefined, actor: ObjRef, target: ObjRef, verbName: string, args: WooValue[], options: DirectCallOptions = {}): Promise<DirectResultFrame | ErrorFrame> {
     try {
       assertObj(actor);
       assertObj(target);
@@ -710,7 +769,7 @@ export class WooWorld {
       const message: Message = { actor, target, verb: verbName, args };
       let result: WooValue = null;
       let mutated = false;
-      this.withPersistencePaused(() => {
+      await this.withPersistencePaused(async () => {
         const before = this.snapshotProps();
         const beforeParkedTasks = new Map(this.parkedTasks);
         const beforeParkedTaskCounter = this.parkedTaskCounter;
@@ -734,7 +793,7 @@ export class WooWorld {
           }
         };
         try {
-          result = this.dispatch(ctx, target, verbName, args);
+          result = await this.dispatch(ctx, target, verbName, args);
           mutated =
             beforeObjectCount !== this.objects.size ||
             this.propsChanged(before) ||
@@ -758,10 +817,10 @@ export class WooWorld {
     return (this.logs.get(space) ?? []).filter((entry) => entry.seq >= from).slice(0, limit);
   }
 
-  applyCall(id: string | undefined, spaceRef: ObjRef, message: Message): AppliedFrame {
+  async applyCall(id: string | undefined, spaceRef: ObjRef, message: Message): Promise<AppliedFrame> {
     const repo = this.activeObjectRepository();
-    if (repo) return this.applyCallRepository(repo, id, spaceRef, message);
-    return this.withPersistencePaused(() => {
+    if (repo) return await this.applyCallRepository(repo, id, spaceRef, message);
+    return await this.withPersistencePaused(async () => {
       this.validateMessage(message);
       const space = this.object(spaceRef);
       this.authorizePresence(message.actor, spaceRef);
@@ -803,8 +862,8 @@ export class WooWorld {
       };
 
       try {
-        this.withBehaviorSavepoint(() => {
-          this.dispatch(ctx, message.target, message.verb, message.args);
+        await this.withBehaviorSavepoint(async () => {
+          await this.dispatch(ctx, message.target, message.verb, message.args);
         });
         logEntry.applied_ok = true;
       } catch (err) {
@@ -832,16 +891,16 @@ export class WooWorld {
     });
   }
 
-  private applyCallRepository(repo: ObjectRepository, id: string | undefined, spaceRef: ObjRef, message: Message): AppliedFrame {
+  private async applyCallRepository(repo: ObjectRepository, id: string | undefined, spaceRef: ObjRef, message: Message): Promise<AppliedFrame> {
     const before = this.snapshotBehaviorState();
     const beforeLogs = this.snapshotLogs();
     try {
-      let frame!: AppliedFrame;
-      repo.transaction(() => {
+      const frame = await this.withPersistencePaused(async () => {
         this.validateMessage(message);
         const space = this.object(spaceRef);
         this.authorizePresence(message.actor, spaceRef);
-        const { seq, ts } = repo.appendLog(spaceRef, message.actor, message);
+        const seq = Number(this.getProp(spaceRef, "next_seq"));
+        const ts = Date.now();
         this.setPropLocal(spaceRef, "next_seq", seq + 1);
 
         const logEntry: SpaceLogEntry = {
@@ -877,42 +936,38 @@ export class WooWorld {
           }
         };
 
-        let parked: unknown;
         try {
-          repo.savepoint(() => {
-            try {
-              this.withBehaviorSavepoint(() => {
-                this.dispatch(ctx, message.target, message.verb, message.args);
-              });
-            } catch (err) {
-              if (isVmSuspendSignal(err) || isVmReadSignal(err)) {
-                parked = err;
-                return;
-              }
-              throw err;
-            }
+          await this.withBehaviorSavepoint(async () => {
+            await this.dispatch(ctx, message.target, message.verb, message.args);
           });
-          if (isVmSuspendSignal(parked)) {
-            const task = this.parkVmContinuation(ctx, parked.seconds, parked.task);
-            observations.push({ type: "task_suspended", source: spaceRef, task, resume_at: this.parkedTasks.get(task)?.resume_at ?? null });
-          } else if (isVmReadSignal(parked)) {
-            const task = this.parkReadContinuation(ctx, parked.player, parked.task);
-            observations.push({ type: "task_awaiting_read", source: spaceRef, task, player: parked.player });
-          }
           logEntry.applied_ok = true;
-          logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
-          repo.recordLogOutcome(spaceRef, seq, true, observations);
         } catch (err) {
-          const error = normalizeError(err);
-          logEntry.applied_ok = false;
-          logEntry.error = error;
-          observations.length = 0;
-          observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null, trace: error.trace ?? [] });
-          logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
-          repo.recordLogOutcome(spaceRef, seq, false, observations, error);
+          if (isVmSuspendSignal(err)) {
+            const task = this.parkVmContinuation(ctx, err.seconds, err.task);
+            logEntry.applied_ok = true;
+            observations.push({ type: "task_suspended", source: spaceRef, task, resume_at: this.parkedTasks.get(task)?.resume_at ?? null });
+          } else if (isVmReadSignal(err)) {
+            const task = this.parkReadContinuation(ctx, err.player, err.task);
+            logEntry.applied_ok = true;
+            observations.push({ type: "task_awaiting_read", source: spaceRef, task, player: err.player });
+          } else {
+            const error = normalizeError(err);
+            logEntry.applied_ok = false;
+            logEntry.error = error;
+            observations.length = 0;
+            observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null, trace: error.trace ?? [] });
+          }
         }
 
-        frame = { op: "applied", id, space: spaceRef, seq, ts: logEntry.ts, message, observations };
+        logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
+        repo.transaction(() => {
+          const appended = repo.appendLog(spaceRef, message.actor, message);
+          if (appended.seq !== seq) throw wooError("E_STORAGE", `sequenced log drift for ${spaceRef}: expected ${seq}, got ${appended.seq}`);
+          logEntry.ts = appended.ts;
+          repo.recordLogOutcome(spaceRef, seq, logEntry.applied_ok === true, observations, logEntry.error);
+          this.flushIncrementalState();
+        });
+        return { op: "applied" as const, id, space: spaceRef, seq, ts: logEntry.ts, message, observations };
       });
       return frame;
     } catch (err) {
@@ -922,7 +977,15 @@ export class WooWorld {
     }
   }
 
-  dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): WooValue {
+  async hostDispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue> {
+    return await this.enqueueHostTask(() => this.dispatch(ctx, target, verbName, args, startAt));
+  }
+
+  async dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue> {
+    if (await this.remoteHostForObject(target) || (startAt ? await this.remoteHostForObject(startAt) : false)) {
+      if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      return await this.hostBridge.dispatch(ctx, target, verbName, args, startAt);
+    }
     if (this.callDepth >= MAX_CALL_DEPTH) throw wooError("E_CALL_DEPTH", "maximum verb call depth exceeded");
     this.callDepth += 1;
     try {
@@ -941,9 +1004,9 @@ export class WooWorld {
       if (verb.kind === "native") {
         const handler = this.nativeHandlers.get(verb.native);
         if (!handler) throw wooError("E_VERBNF", `native handler not found: ${verb.native}`);
-        return handler(runCtx, args);
+        return await handler(runCtx, args);
       }
-      return runTinyVm(runCtx, verb.bytecode, args);
+      return await runTinyVm(runCtx, verb.bytecode, args);
     } finally {
       this.callDepth -= 1;
     }
@@ -975,8 +1038,13 @@ export class WooWorld {
     const hostFor = (id: ObjRef): string | null => {
       if (selfHosted.has(id)) return id;
       const obj = this.object(id);
-      if (obj.anchor && selfHosted.has(obj.anchor)) return obj.anchor;
-      if (obj.location && selfHosted.has(obj.location)) return obj.location;
+      let cursor: ObjRef | null = obj.anchor;
+      const seen = new Set<ObjRef>();
+      while (cursor && !seen.has(cursor)) {
+        if (selfHosted.has(cursor)) return cursor;
+        seen.add(cursor);
+        cursor = this.objects.has(cursor) ? this.object(cursor).anchor : null;
+      }
       return null;
     };
     return Array.from(this.objects.values())
@@ -1162,19 +1230,27 @@ export class WooWorld {
     return id;
   }
 
-  deliverInput(player: ObjRef, input: WooValue): ParkedTaskRun | null {
+  async deliverInput(player: ObjRef, input: WooValue): Promise<ParkedTaskRun | null> {
+    return await this.enqueueHostTask(() => this.deliverInputNow(player, input));
+  }
+
+  private async deliverInputNow(player: ObjRef, input: WooValue): Promise<ParkedTaskRun | null> {
     const task = Array.from(this.parkedTasks.values())
       .filter((item) => item.state === "awaiting_read" && item.awaiting_player === player)
       .sort((left, right) => left.created - right.created || left.id.localeCompare(right.id))[0];
     if (!task) return null;
     this.parkedTasks.delete(task.id);
     this.deletePersistedTask(task.id);
-    const result = this.runParkedTask(task, input);
+    const result = await this.runParkedTask(task, input);
     this.persist(true);
     return result;
   }
 
-  runDueTasks(now = Date.now()): ParkedTaskRun[] {
+  async runDueTasks(now = Date.now()): Promise<ParkedTaskRun[]> {
+    return await this.enqueueHostTask(() => this.runDueTasksNow(now));
+  }
+
+  private async runDueTasksNow(now = Date.now()): Promise<ParkedTaskRun[]> {
     const due = Array.from(this.parkedTasks.values())
       .filter((task) => task.state === "suspended" && task.resume_at !== null && task.resume_at <= now)
       .sort((left, right) => (left.resume_at ?? 0) - (right.resume_at ?? 0) || left.created - right.created || left.id.localeCompare(right.id));
@@ -1182,7 +1258,7 @@ export class WooWorld {
     for (const task of due) {
       this.parkedTasks.delete(task.id);
       this.deletePersistedTask(task.id);
-      results.push(this.runParkedTask(task));
+      results.push(await this.runParkedTask(task));
     }
     if (due.length > 0) this.persist(true);
     return results;
@@ -1444,12 +1520,23 @@ export class WooWorld {
     return this.repository?.latestSpaceSnapshot?.(space) ?? this.snapshots.filter((snapshot) => snapshot.space_id === space).sort((a, b) => b.seq - a.seq)[0] ?? null;
   }
 
-  withPersistencePaused<T>(fn: () => T): T {
+  withPersistencePaused<T>(fn: () => Promise<T>): Promise<T>;
+  withPersistencePaused<T>(fn: () => T): T;
+  withPersistencePaused<T>(fn: () => T | Promise<T>): T | Promise<T> {
     this.persistencePaused += 1;
-    try {
-      return fn();
-    } finally {
+    const release = (): void => {
       this.persistencePaused -= 1;
+    };
+    try {
+      const result = fn();
+      if (isPromiseLike(result)) {
+        return result.finally(release);
+      }
+      release();
+      return result;
+    } catch (err) {
+      release();
+      throw err;
     }
   }
 
@@ -1658,38 +1745,26 @@ export class WooWorld {
   private reapSession(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
+    const isGuest = this.inheritsFrom(session.actor, "$guest");
     session.attachedSockets.clear();
     this.killReadTasksFor(session.actor);
     this.removeActorPresence(session.actor);
-    try {
-      const observations: Observation[] = [];
-      const message: Message = { actor: session.actor, target: session.actor, verb: "on_disfunc", args: [] };
-      const ctx: CallContext = {
-        world: this,
-        space: "#-1",
-        seq: -1,
-        actor: session.actor,
-        player: session.actor,
-        caller: "#-1",
-        callerPerms: this.object(session.actor).owner,
-        progr: this.object(session.actor).owner,
-        thisObj: session.actor,
-        verbName: "on_disfunc",
-        definer: session.actor,
-        message,
-        observations,
-        observe: () => {
-          // Session reap is host maintenance; disfunc observations are not broadcast.
-        }
-      };
-      this.dispatch(ctx, session.actor, "on_disfunc", []);
-    } catch {
-      if (this.inheritsFrom(session.actor, "$guest")) this.returnGuest(session.actor);
-    }
     this.setProp(session.actor, "session_id", null);
     this.sessions.delete(sessionId);
     this.deletePersistedSession(sessionId);
-    if (this.inheritsFrom(session.actor, "$guest")) this.returnGuest(session.actor);
+    if (isGuest) this.resetGuestOnDisconnect(session.actor);
+  }
+
+  private resetGuestOnDisconnect(actor: ObjRef): void {
+    const homeValue = this.propOrNull(actor, "home");
+    const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
+    this.moveObject(actor, home);
+    this.setProp(actor, "description", "");
+    this.setProp(actor, "aliases", []);
+    this.setProp(actor, "features", []);
+    this.setProp(actor, "features_version", Number(this.propOrNull(actor, "features_version") ?? 0) + 1);
+    for (const item of Array.from(this.object(actor).contents)) this.moveObject(item, home);
+    this.returnGuest(actor);
   }
 
   private killReadTasksFor(actor: ObjRef): void {
@@ -1789,7 +1864,7 @@ export class WooWorld {
     this.setProp(objRef, "features_version", Number.isFinite(current) ? current + 1 : 1);
   }
 
-  private canFeatureBeAttachedBy(feature: ObjRef, actor: ObjRef): boolean {
+  private async canFeatureBeAttachedBy(feature: ObjRef, actor: ObjRef): Promise<boolean> {
     const message: Message = { actor, target: feature, verb: "can_be_attached_by", args: [actor] };
     const observations: Observation[] = [];
     const ctx: CallContext = {
@@ -1811,7 +1886,7 @@ export class WooWorld {
       }
     };
     try {
-      return Boolean(this.dispatch(ctx, feature, "can_be_attached_by", [actor]));
+      return Boolean(await this.dispatch(ctx, feature, "can_be_attached_by", [actor]));
     } catch (err) {
       const error = normalizeError(err);
       if (error.code === "E_VERBNF") return actor === this.object(feature).owner;
@@ -1819,7 +1894,7 @@ export class WooWorld {
     }
   }
 
-  private addFeature(consumer: ObjRef, feature: ObjRef, actor: ObjRef, observations?: Observation[]): boolean {
+  private async addFeature(consumer: ObjRef, feature: ObjRef, actor: ObjRef, observations?: Observation[]): Promise<boolean> {
     this.assertFeatureConsumer(consumer);
     if (feature.startsWith("~")) throw wooError("E_INVARG", "transient objects cannot be features", feature);
     this.object(feature);
@@ -1827,7 +1902,7 @@ export class WooWorld {
     const consumerOwner = this.object(consumer).owner;
     const wizard = this.isWizard(actor);
     if (!wizard && consumerOwner !== actor) throw wooError("E_PERM", `${actor} cannot add features to ${consumer}`);
-    if (!wizard && !this.canFeatureBeAttachedBy(feature, actor)) throw wooError("E_PERM", `${feature} cannot be attached by ${actor}`);
+    if (!wizard && !(await this.canFeatureBeAttachedBy(feature, actor))) throw wooError("E_PERM", `${feature} cannot be attached by ${actor}`);
     const features = this.featureList(consumer);
     if (features.includes(feature)) {
       observations?.push({ type: "feature_already_added", source: consumer, feature });
@@ -1926,10 +2001,10 @@ export class WooWorld {
     }
   }
 
-  private runParkedTask(task: ParkedTaskRecord, input?: WooValue): ParkedTaskRun {
+  private async runParkedTask(task: ParkedTaskRecord, input?: WooValue): Promise<ParkedTaskRun> {
     try {
       const serialized = assertMap(task.serialized);
-      if (serialized.kind === "vm_continuation") return this.runParkedVmContinuation(task, serialized, input);
+      if (serialized.kind === "vm_continuation") return await this.runParkedVmContinuation(task, serialized, input);
       if (serialized.kind !== "fork") throw wooError("E_INVARG", "unsupported parked task kind", serialized.kind);
       const actor = assertObj(serialized.actor);
       const player = assertObj(serialized.player);
@@ -1940,7 +2015,7 @@ export class WooWorld {
       const rawSpace = serialized.space;
       if (typeof rawSpace === "string" && rawSpace !== "#-1") {
         const message: Message = { actor, target, verb: verbName, args };
-        const frame = this.applyCall(undefined, rawSpace, message);
+        const frame = await this.applyCall(undefined, rawSpace, message);
         return { task, frame, observations: frame.observations };
       }
       const message =
@@ -1969,12 +2044,12 @@ export class WooWorld {
       };
 
       let error: ErrorValue | undefined;
-      this.withPersistencePaused(() => {
+      await this.withPersistencePaused(async () => {
         const before = this.snapshotProps();
         const beforeParkedTasks = new Map(this.parkedTasks);
         const beforeParkedTaskCounter = this.parkedTaskCounter;
         try {
-          this.dispatch(ctx, target, verbName, args);
+          await this.dispatch(ctx, target, verbName, args);
         } catch (err) {
           if (isVmSuspendSignal(err)) {
             const resumedTask = this.parkVmContinuation(ctx, err.seconds, err.task);
@@ -2001,22 +2076,22 @@ export class WooWorld {
     }
   }
 
-  private runParkedVmContinuation(task: ParkedTaskRecord, serialized: Record<string, WooValue>, input?: WooValue): ParkedTaskRun {
+  private async runParkedVmContinuation(task: ParkedTaskRecord, serialized: Record<string, WooValue>, input?: WooValue): Promise<ParkedTaskRun> {
     const rawSpace = serialized.space;
     if (typeof rawSpace === "string" && rawSpace !== "#-1") {
-      const frame = this.applyResumeFrame(task, serialized, rawSpace, input);
+      const frame = await this.applyResumeFrame(task, serialized, rawSpace, input);
       return { task, frame, observations: frame.observations };
     }
 
     const observations: Observation[] = [];
     let error: ErrorValue | undefined;
-    this.withPersistencePaused(() => {
+    await this.withPersistencePaused(async () => {
       const before = this.snapshotProps();
       const beforeParkedTasks = new Map(this.parkedTasks);
       const beforeParkedTaskCounter = this.parkedTaskCounter;
       try {
-        if (input === undefined) runSerializedTinyVmTask(this, serialized.task as unknown as SerializedVmTask, observations);
-        else runSerializedTinyVmTaskWithInput(this, serialized.task as unknown as SerializedVmTask, input, observations);
+        if (input === undefined) await runSerializedTinyVmTask(this, serialized.task as unknown as SerializedVmTask, observations);
+        else await runSerializedTinyVmTaskWithInput(this, serialized.task as unknown as SerializedVmTask, input, observations);
       } catch (err) {
         if (isVmSuspendSignal(err)) {
           const resumedTask = this.parkVmContinuation(this.hostContinuationContext(serialized, observations), err.seconds, err.task);
@@ -2039,10 +2114,10 @@ export class WooWorld {
     return { task, observations, error };
   }
 
-  private applyResumeFrame(task: ParkedTaskRecord, serialized: Record<string, WooValue>, spaceRef: ObjRef, input?: WooValue): AppliedFrame {
+  private async applyResumeFrame(task: ParkedTaskRecord, serialized: Record<string, WooValue>, spaceRef: ObjRef, input?: WooValue): Promise<AppliedFrame> {
     const repo = this.activeObjectRepository();
-    if (repo) return this.applyResumeFrameRepository(repo, task, serialized, spaceRef, input);
-    return this.withPersistencePaused(() => {
+    if (repo) return await this.applyResumeFrameRepository(repo, task, serialized, spaceRef, input);
+    return await this.withPersistencePaused(async () => {
       const actor = assertObj(serialized.actor);
       this.authorizePresence(actor, spaceRef);
       const space = this.object(spaceRef);
@@ -2078,9 +2153,9 @@ export class WooWorld {
 
       const observations: Observation[] = [{ type: "task_resumed", source: spaceRef, task: task.id }];
       try {
-        this.withBehaviorSavepoint(() => {
-          if (input === undefined) runSerializedTinyVmTask(this, serialized.task as unknown as SerializedVmTask, observations);
-          else runSerializedTinyVmTaskWithInput(this, serialized.task as unknown as SerializedVmTask, input, observations);
+        await this.withBehaviorSavepoint(async () => {
+          if (input === undefined) await runSerializedTinyVmTask(this, serialized.task as unknown as SerializedVmTask, observations);
+          else await runSerializedTinyVmTaskWithInput(this, serialized.task as unknown as SerializedVmTask, input, observations);
         });
       } catch (err) {
         if (isVmSuspendSignal(err)) {
@@ -2105,12 +2180,11 @@ export class WooWorld {
     });
   }
 
-  private applyResumeFrameRepository(repo: ObjectRepository, task: ParkedTaskRecord, serialized: Record<string, WooValue>, spaceRef: ObjRef, input?: WooValue): AppliedFrame {
+  private async applyResumeFrameRepository(repo: ObjectRepository, task: ParkedTaskRecord, serialized: Record<string, WooValue>, spaceRef: ObjRef, input?: WooValue): Promise<AppliedFrame> {
     const before = this.snapshotBehaviorState();
     const beforeLogs = this.snapshotLogs();
     try {
-      let frame!: AppliedFrame;
-      repo.transaction(() => {
+      const frame = await this.withPersistencePaused(async () => {
         const actor = assertObj(serialized.actor);
         this.authorizePresence(actor, spaceRef);
         const space = this.object(spaceRef);
@@ -2127,7 +2201,8 @@ export class WooWorld {
           args: [task.id],
           body
         };
-        const { seq, ts } = repo.appendLog(spaceRef, actor, message);
+        const seq = Number(this.getProp(spaceRef, "next_seq"));
+        const ts = Date.now();
         this.setPropLocal(spaceRef, "next_seq", seq + 1);
         const logEntry: SpaceLogEntry = {
           space: spaceRef,
@@ -2143,43 +2218,39 @@ export class WooWorld {
         this.logs.set(spaceRef, log);
 
         const observations: Observation[] = [{ type: "task_resumed", source: spaceRef, task: task.id }];
-        let parked: unknown;
         try {
-          repo.savepoint(() => {
-            try {
-              this.withBehaviorSavepoint(() => {
-                if (input === undefined) runSerializedTinyVmTask(this, serialized.task as unknown as SerializedVmTask, observations);
-                else runSerializedTinyVmTaskWithInput(this, serialized.task as unknown as SerializedVmTask, input, observations);
-              });
-            } catch (err) {
-              if (isVmSuspendSignal(err) || isVmReadSignal(err)) {
-                parked = err;
-                return;
-              }
-              throw err;
-            }
+          await this.withBehaviorSavepoint(async () => {
+            if (input === undefined) await runSerializedTinyVmTask(this, serialized.task as unknown as SerializedVmTask, observations);
+            else await runSerializedTinyVmTaskWithInput(this, serialized.task as unknown as SerializedVmTask, input, observations);
           });
-          if (isVmSuspendSignal(parked)) {
-            const resumedTask = this.parkVmContinuation(this.resumeContext(serialized, message, observations, spaceRef, seq), parked.seconds, parked.task);
-            observations.push({ type: "task_suspended", source: spaceRef, task: resumedTask, resume_at: this.parkedTasks.get(resumedTask)?.resume_at ?? null });
-          } else if (isVmReadSignal(parked)) {
-            const resumedTask = this.parkReadContinuation(this.resumeContext(serialized, message, observations, spaceRef, seq), parked.player, parked.task);
-            observations.push({ type: "task_awaiting_read", source: spaceRef, task: resumedTask, player: parked.player });
-          }
           logEntry.applied_ok = true;
-          logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
-          repo.recordLogOutcome(spaceRef, seq, true, observations);
         } catch (err) {
-          const error = normalizeError(err);
-          logEntry.applied_ok = false;
-          logEntry.error = error;
-          observations.length = 0;
-          observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null, trace: error.trace ?? [] });
-          logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
-          repo.recordLogOutcome(spaceRef, seq, false, observations, error);
+          if (isVmSuspendSignal(err)) {
+            const resumedTask = this.parkVmContinuation(this.resumeContext(serialized, message, observations, spaceRef, seq), err.seconds, err.task);
+            logEntry.applied_ok = true;
+            observations.push({ type: "task_suspended", source: spaceRef, task: resumedTask, resume_at: this.parkedTasks.get(resumedTask)?.resume_at ?? null });
+          } else if (isVmReadSignal(err)) {
+            const resumedTask = this.parkReadContinuation(this.resumeContext(serialized, message, observations, spaceRef, seq), err.player, err.task);
+            logEntry.applied_ok = true;
+            observations.push({ type: "task_awaiting_read", source: spaceRef, task: resumedTask, player: err.player });
+          } else {
+            const error = normalizeError(err);
+            logEntry.applied_ok = false;
+            logEntry.error = error;
+            observations.length = 0;
+            observations.push({ type: "$error", code: error.code, message: error.message ?? error.code, value: error.value ?? null, trace: error.trace ?? [] });
+          }
         }
 
-        frame = { op: "applied", space: space.id, seq, ts: logEntry.ts, message, observations };
+        logEntry.observations = cloneValue(observations as unknown as WooValue) as unknown as Observation[];
+        repo.transaction(() => {
+          const appended = repo.appendLog(spaceRef, actor, message);
+          if (appended.seq !== seq) throw wooError("E_STORAGE", `sequenced log drift for ${spaceRef}: expected ${seq}, got ${appended.seq}`);
+          logEntry.ts = appended.ts;
+          repo.recordLogOutcome(spaceRef, seq, logEntry.applied_ok === true, observations, logEntry.error);
+          this.flushIncrementalState();
+        });
+        return { op: "applied" as const, space: space.id, seq, ts: logEntry.ts, message, observations };
       });
       return frame;
     } catch (err) {
@@ -2266,10 +2337,19 @@ export class WooWorld {
     return false;
   }
 
-  private withBehaviorSavepoint<T>(fn: () => T): T {
+  private withBehaviorSavepoint<T>(fn: () => Promise<T>): Promise<T>;
+  private withBehaviorSavepoint<T>(fn: () => T): T;
+  private withBehaviorSavepoint<T>(fn: () => T | Promise<T>): T | Promise<T> {
     const savepoint = this.snapshotBehaviorState();
     try {
-      return fn();
+      const result = fn();
+      if (isPromiseLike(result)) {
+        return result.catch((err) => {
+          if (!isVmSuspendSignal(err) && !isVmReadSignal(err)) this.restoreBehaviorState(savepoint);
+          throw err;
+        });
+      }
+      return result;
     } catch (err) {
       if (!isVmSuspendSignal(err) && !isVmReadSignal(err)) this.restoreBehaviorState(savepoint);
       throw err;
@@ -2401,10 +2481,10 @@ export class WooWorld {
     this.nativeHandlers.set("parse_command", (ctx, args) => this.parseCommandMap(assertString(args[0] ?? ""), ctx.actor, ctx.space) as unknown as WooValue);
     this.nativeHandlers.set("space_look_self", (ctx) => this.spaceLookSelf(ctx));
     this.nativeHandlers.set("chat_command_plan", (ctx, args) => this.chatCommandPlan(ctx, assertString(args[0] ?? "")));
-    this.nativeHandlers.set("chat_command", (ctx, args) => {
-      const plan = this.chatCommandPlan(ctx, assertString(args[0] ?? ""));
+    this.nativeHandlers.set("chat_command", async (ctx, args) => {
+      const plan = await this.chatCommandPlan(ctx, assertString(args[0] ?? ""));
       if (!isCommandPlanOk(plan) || plan.route !== "direct") return plan;
-      return this.dispatch({ ...ctx, progr: ctx.actor }, assertObj(plan.target), assertString(plan.verb), Array.isArray(plan.args) ? plan.args : []);
+      return await this.dispatch({ ...ctx, progr: ctx.actor }, assertObj(plan.target), assertString(plan.verb), Array.isArray(plan.args) ? plan.args : []);
     });
   }
 
@@ -2413,33 +2493,33 @@ export class WooWorld {
     return Array.isArray(present) ? [...present] : [];
   }
 
-  private defaultLookSelf(ctx: CallContext): WooValue {
+  private async defaultLookSelf(ctx: CallContext): Promise<WooValue> {
     return {
       id: ctx.thisObj,
-      title: this.titleForLook(ctx, ctx.caller, ctx.thisObj),
+      title: await this.titleForLook(ctx, ctx.caller, ctx.thisObj),
       description: this.propOrNullForActor(ctx.actor, ctx.thisObj, "description")
     } as unknown as WooValue;
   }
 
-  private spaceLookSelf(ctx: CallContext): WooValue {
+  private async spaceLookSelf(ctx: CallContext): Promise<WooValue> {
     const room = ctx.thisObj;
-    const contents = Array.from(this.object(room).contents).map((item) => ({
+    const contents = await Promise.all(Array.from(this.object(room).contents).map(async (item) => ({
       id: item,
-      title: this.titleForLook(ctx, room, item),
+      title: await this.titleForLook(ctx, room, item),
       description: this.propOrNullForActor(ctx.actor, item, "description")
-    }));
+    })));
     return {
       id: room,
-      title: this.titleForLook(ctx, ctx.caller, room),
+      title: await this.titleForLook(ctx, ctx.caller, room),
       description: this.propOrNullForActor(ctx.actor, room, "description"),
       present_actors: this.chatPresent(room),
       contents
     } as unknown as WooValue;
   }
 
-  private titleForLook(ctx: CallContext, room: ObjRef, item: ObjRef): string {
+  private async titleForLook(ctx: CallContext, room: ObjRef, item: ObjRef): Promise<string> {
     try {
-      const value = this.dispatch({ ...ctx, caller: room, progr: ctx.actor }, item, "title", []);
+      const value = await this.dispatch({ ...ctx, caller: room, progr: ctx.actor }, item, "title", []);
       if (typeof value !== "string") throw wooError("E_TYPE", `${item}:title() must return a string`, value);
       return value;
     } catch (err) {
@@ -2449,11 +2529,11 @@ export class WooWorld {
     }
   }
 
-  private chatCommandPlan(ctx: CallContext, rawText: string): WooValue {
+  private async chatCommandPlan(ctx: CallContext, rawText: string): Promise<WooValue> {
     const text = rawText.trim();
-    if (!text) return this.huhPlan(ctx, rawText, "empty command");
+    if (!text) return await this.huhPlan(ctx, rawText, "empty command");
 
-    const speech = this.speechPlan(ctx, text);
+    const speech = await this.speechPlan(ctx, text);
     if (speech) return speech;
 
     const parsed = this.parseCommandMap(text, ctx.actor, ctx.thisObj);
@@ -2466,7 +2546,7 @@ export class WooWorld {
     const prefix = this.longestObjectPrefix(tokens, ctx.actor, ctx.thisObj);
     if (prefix) {
       const resolved = this.tryResolveVerb(prefix.object, parsed.verb);
-      if (!resolved) return this.huhPlan(ctx, text, `${prefix.object} does not understand "${parsed.verb}".`);
+      if (!resolved) return await this.huhPlan(ctx, text, `${prefix.object} does not understand "${parsed.verb}".`);
       const rest = tokenPhrase(tokens.slice(prefix.length));
       return this.routePlan(resolved.verb.direct_callable === true ? "direct" : "sequenced", prefix.object, resolved.verb.name, rest ? [rest] : [], parsed, ctx.thisObj);
     }
@@ -2476,10 +2556,10 @@ export class WooWorld {
     }
 
     if (!text.startsWith("/")) return this.routePlan("direct", ctx.thisObj, "say", [text], parsed);
-    return this.huhPlan(ctx, text, `I don't see "${parsed.argstr}".`);
+    return await this.huhPlan(ctx, text, `I don't see "${parsed.argstr}".`);
   }
 
-  private speechPlan(ctx: CallContext, text: string): WooValue | null {
+  private async speechPlan(ctx: CallContext, text: string): Promise<WooValue | null> {
     const room = ctx.thisObj;
     if (text.startsWith("/me ")) return this.routePlan("direct", room, "emote", [text.slice(4).trim()], this.parseCommandMap(`emote ${text.slice(4).trim()}`, ctx.actor, room));
     if (text.startsWith(":") && text.length > 1) return this.routePlan("direct", room, "emote", [text.slice(1).trim()], this.parseCommandMap(`emote ${text.slice(1).trim()}`, ctx.actor, room));
@@ -2489,25 +2569,25 @@ export class WooWorld {
     if (text.startsWith("\"") && text.length > 1) return this.routePlan("direct", room, "say", [text.slice(1).trim()], this.parseCommandMap(`say ${text.slice(1).trim()}`, ctx.actor, room));
 
     if (text.startsWith("`") && text.length > 1) {
-      return this.directedSpeechPlan(ctx, text.slice(1).trim(), "say_to") ?? this.huhPlan(ctx, text, "Directed speech needs a recipient and text.");
+      return this.directedSpeechPlan(ctx, text.slice(1).trim(), "say_to") ?? await this.huhPlan(ctx, text, "Directed speech needs a recipient and text.");
     }
 
     const bracket = /^\[([^\]]+)\]\s*:?\s*(.*)$/.exec(text);
     if (bracket) {
       const style = bracket[1].trim();
       const message = bracket[2].trim();
-      if (!style || !message) return this.huhPlan(ctx, text, "Styled speech needs a style and text.");
+      if (!style || !message) return await this.huhPlan(ctx, text, "Styled speech needs a style and text.");
       return this.routePlan("direct", room, "say_as", [style, message], this.parseCommandMap(`say_as ${message}`, ctx.actor, room));
     }
 
     const tokens = tokenizeCommand(text);
     const verb = tokens[0]?.value.toLowerCase();
     const argstr = tokens.length > 0 ? text.slice(tokens[0].end).trim() : "";
-    if (verb === "say") return argstr ? this.routePlan("direct", room, "say", [argstr], this.parseCommandMap(text, ctx.actor, room)) : this.huhPlan(ctx, text, "Say what?");
-    if (verb === "emote" || verb === "pose") return argstr ? this.routePlan("direct", room, verb, [argstr], this.parseCommandMap(text, ctx.actor, room)) : this.huhPlan(ctx, text, `${verb} needs text.`);
+    if (verb === "say") return argstr ? this.routePlan("direct", room, "say", [argstr], this.parseCommandMap(text, ctx.actor, room)) : await this.huhPlan(ctx, text, "Say what?");
+    if (verb === "emote" || verb === "pose") return argstr ? this.routePlan("direct", room, verb, [argstr], this.parseCommandMap(text, ctx.actor, room)) : await this.huhPlan(ctx, text, `${verb} needs text.`);
     if (verb === "tell" || verb === "whisper" || verb === "page" || text.startsWith("/tell ")) {
       const rest = text.startsWith("/tell ") ? text.slice(6).trim() : argstr;
-      return this.directedSpeechPlan(ctx, rest, "tell") ?? this.huhPlan(ctx, text, "Tell needs a recipient and text.");
+      return this.directedSpeechPlan(ctx, rest, "tell") ?? await this.huhPlan(ctx, text, "Tell needs a recipient and text.");
     }
     if ((verb === "who" || verb === "look") && !argstr) return this.routePlan("direct", room, verb, [], this.parseCommandMap(text, ctx.actor, room));
     return null;
@@ -2542,9 +2622,9 @@ export class WooWorld {
     };
   }
 
-  private huhPlan(ctx: CallContext, text: string, reason: string): WooValue {
+  private async huhPlan(ctx: CallContext, text: string, reason: string): Promise<WooValue> {
     try {
-      this.dispatch(ctx, ctx.thisObj, "huh", [text, reason]);
+      await this.dispatch(ctx, ctx.thisObj, "huh", [text, reason]);
     } catch (err) {
       if (!isErrorValue(err) || err.code !== "E_VERBNF") throw err;
       ctx.observe({ type: "huh", actor: ctx.actor, text, reason, ts: Date.now() });
@@ -2774,6 +2854,10 @@ function runtimeObjectScope(value: ObjRef): string {
 
 function isPlainValueMap(value: WooValue | undefined): value is Record<string, WooValue> {
   return value !== null && value !== undefined && typeof value === "object" && !Array.isArray(value);
+}
+
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  return value !== null && typeof value === "object" && typeof (value as Promise<T>).then === "function";
 }
 
 function hashCanonical(value: WooValue): string {

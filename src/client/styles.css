@@ -732,6 +732,9 @@ textarea {
     padding: 0.55rem;
     border: 0;
     border-bottom: 1px solid #d0d7cd;
+    position: static;
+    height: auto;
+    overflow: visible;
   }
 
   .events {

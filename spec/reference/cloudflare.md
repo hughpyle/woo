@@ -24,14 +24,17 @@ DO instances fall into three classes, all of which use the same `PersistentObjec
 
 **Routing precedence.** The runtime resolves an object id to a host in order:
 
-1. If the object's `host_placement` property is `"self"`, the id is its own host (the runtime materialization of `instances_self_host` from §4.2).
-2. Else if the object's `anchor` resolves to a self-hosted ancestor, route to that anchor's host.
-3. Else if the object's `location` resolves to a self-hosted container, route there.
-4. Else, route to the creator/owner host. For ordinary runtime-created objects, this is the host of the verb's `progr` at create time. For seeded objects it is the host configured by the catalog or, if none, the gateway.
+1. If the object's `host_placement` property is `"self"`, the id is its own host (the runtime materialization of `instances_self_host` from [semantics/objects.md §4.2](../semantics/objects.md#42-host-placement)).
+2. Else if the object's `anchor` (transitively) resolves to a self-hosted host, route to that anchor's host.
+3. Else, the object has a fixed Directory route stamped at `create()` and never changed thereafter. The route is the **executing host** that ran the create call: for runtime-created objects, the persistent host whose verb body invoked `create`; for seeded/bootstrap objects, the gateway (or whichever host the catalog explicitly nominates).
 
-The runtime maintains the resolved id-to-host map in **Directory** ([§R2](#r2-singleton-dos)) so the Worker entry can answer the lookup without contacting the owning DO. Self-hosted instances register themselves at first call; non-self-hosted instances are registered by their owning host when created.
+The executing host is **not** the verb's `progr`. `progr` is permission identity (set at compile time, carried in every frame); the executing host is the physical DO running the call. A wizard helper verb invoked from a player's host runs on the player's host and creates objects co-resident with the player, not with the wizard.
 
-**Carryable objects do not migrate.** When an object's `location` changes (a player carries a book between rooms, then puts it on a table), the object's host does not change. The book's storage stays on the host that created it; the moving host writes the object's `location` field locally and uses cross-DO RPC to update the source and target container's `contents` cache (see §R1.7). This avoids subtree migration, two-phase storage, and Directory fences for ordinary movement.
+`location` does not participate in routing. A carryable object's host is fixed at creation; routing of a request for that object never consults `location`.
+
+The runtime stores the resolved id-to-host map in **Directory** ([§R2](#r2-singleton-dos)) so the Worker entry can answer the lookup without contacting the owning DO. Self-hosted instances register themselves on first call; co-resident instances are registered by their executing host at create time. Directory rows are immutable once written for a given id (because placement is immutable for a given id) — so Directory is read-mostly, write-rare, off the hot path.
+
+**Carryable objects do not migrate.** When an object's `location` changes (a player carries a book between rooms, then puts it on a table), neither its host nor its Directory row changes. The book's storage stays on the host that created it; the moving host writes the object's `location` field locally and uses cross-DO RPC to update the source and target container's `contents` cache (see §R1.7). This avoids subtree migration, two-phase storage, and Directory fences for ordinary movement.
 
 **Cross-DO RPC** uses the DO stub returned from `idFromName`. The stub's methods are the inter-host RPC surface (verb dispatch, property read/write, version-checked artifact fetch, and the contents-mirror updates described below).
 
@@ -40,10 +43,11 @@ The runtime maintains the resolved id-to-host map in **Directory** ([§R2](#r2-s
 Every container — a room, a table, a mailbox — maintains its own `contents` set as the authoritative inverse of `obj.location`. Across DOs, that invariant is distributed:
 
 - The **source of truth** is `obj.location` on the object's own DO. Every move primitive writes this field transactionally on the host that owns the object.
-- The **container cache** is `container.contents`, a set of foreign object handles `{id, title, host}` maintained on the container's host. The mover RPCs the source container's host with `contents.delete(obj_id)` and the target container's host with `contents.add(obj_id, title_snapshot)` immediately after writing `obj.location`.
-- **Cache drift is tolerated.** If a push fails, the cache is stale; rendering looks wrong until reconciled. A reconcile sweep — triggered on `:look` or by periodic policy — verifies each cache entry by querying the member's actual `location` (via Directory routing) and prunes ghosts. Routing and correctness are unaffected by cache drift; only rendering is.
+- The **container cache** is `container.contents`, a set of object **ids** (`ObjRef[]`) maintained on the container's host. The mover RPCs the source container's host with `contents.delete(obj_id)` and the target container's host with `contents.add(obj_id)` immediately after writing `obj.location`. The container does not store cached titles, hosts, or display data; only ids.
+- **Rendering enriches at read time.** When a verb such as `:look` walks `contents`, it resolves each member's host via Directory and dispatches `:title()` (and any other display verbs) per-host. Because routes are fixed, a given member's host can be resolved from cache without a Directory round-trip in the common case.
+- **Cache drift is tolerated.** If a push fails, the cache is stale; rendering looks wrong until reconciled. A reconcile sweep — triggered on `:look` or by periodic policy — verifies each cache entry by querying the member's actual `location` (via the member's own host) and prunes ghosts. Routing and correctness are unaffected by cache drift; only rendering is.
 
-This keeps the **Directory scoped to id-to-host routing** rather than expanding it into a centralized containment ledger. Move-frequency writes flow to the affected containers, not to Directory; Directory writes happen only when an object's host changes (i.e., never, for non-self-hosted instances after creation).
+This keeps the **Directory scoped to id-to-host routing** rather than expanding it into a centralized containment ledger. Move-frequency writes flow to the affected containers, not to Directory; Directory writes happen only at object creation (placement is immutable thereafter, per §R1.1).
 
 **Player movement** between rooms (`go north`) does not migrate the player's storage. The player has its own DO; `player.location = next_room` is a local write on the player's DO, plus two cross-DO RPCs to update each room's subscriber list. Inventory items, anchored to the player or carried in `player.contents`, stay on the player's DO and travel with the player by reference (their `location` continues to point at the player; the rooms never see them).
 
@@ -500,7 +504,7 @@ GET  /ws                                → WS upgrade → gateway/player host
 
 The Worker resolves `<id-or-name>` to a DO id:
 
-- `#<ulid>` → Directory route lookup; unanchored fallback is `env.WOO.idFromName(ulid)`.
+- `#<ulid>` → Directory route lookup. If Directory has no row for the id (uncreated, or pre-§R1.1 storage from before Directory rows existed) the Worker returns `404 E_OBJNF`; there is no `idFromName(ulid)` fallback because that would route co-resident ids to nonexistent dedicated DOs.
 - `$<corename>` → fetch from Directory DO, then `env.WOO.idFromName(host_key)`.
 - `$me` → resolve from `Authorization: Session <id>` → session.actor → `idFromName(actor)`.
 - `~<tref>` → not on this hop; transient refs route to the carrying player's DO.

@@ -92,7 +92,7 @@ function installReadFixture(world: ReturnType<typeof createWorld>): void {
 }
 
 describe("sqlite persistence", () => {
-  it("reloads host-scoped cluster state from per-object writes after initial seed save", () => {
+  it("reloads host-scoped cluster state from per-object writes after initial seed save", async () => {
     const { dir, path } = tempDb();
     try {
       const gateway = createWorld();
@@ -106,7 +106,7 @@ describe("sqlite persistence", () => {
       firstRepo.saves = 0;
 
       firstCluster.ensureSessionForActor(session.id, session.actor, session.tokenClass, session.expiresAt);
-      const created = firstCluster.call(
+      const created = await firstCluster.call(
         "cluster-create",
         session.id,
         "the_taskspace",
@@ -133,7 +133,7 @@ describe("sqlite persistence", () => {
       expect(secondCluster.replay("the_taskspace", 1, 10).map((entry) => entry.message.verb)).toEqual(["create_task"]);
 
       secondCluster.ensureSessionForActor(session.id, session.actor, session.tokenClass, session.expiresAt);
-      const status = secondCluster.call("cluster-status", session.id, "the_taskspace", message(session.actor, task, "set_status", ["done"]));
+      const status = await secondCluster.call("cluster-status", session.id, "the_taskspace", message(session.actor, task, "set_status", ["done"]));
       expect(status.op).toBe("applied");
       expect(secondCluster.getProp(task, "status")).toBe("done");
       expect(secondRepo.saves).toBe(0);
@@ -143,7 +143,7 @@ describe("sqlite persistence", () => {
     }
   });
 
-  it("uses object-repository writes after bootstrap instead of whole-world saves", () => {
+  it("uses object-repository writes after bootstrap instead of whole-world saves", async () => {
     const { dir, path } = tempDb();
     try {
       const firstRepo = new CountingLocalSQLiteRepository(path);
@@ -152,7 +152,7 @@ describe("sqlite persistence", () => {
       firstRepo.saves = 0;
 
       const session = firstWorld.auth("guest:incremental");
-      const applied = firstWorld.call("incremental-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.73]));
+      const applied = await firstWorld.call("incremental-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.73]));
       expect(applied.op).toBe("applied");
       firstWorld.saveSnapshot("the_dubspace");
       firstRepo.close();
@@ -171,13 +171,13 @@ describe("sqlite persistence", () => {
     }
   });
 
-  it("reloads object state, sessions, and space logs from SQLite", () => {
+  it("reloads object state, sessions, and space logs from SQLite", async () => {
     const { dir, path } = tempDb();
     try {
       const firstRepo = new LocalSQLiteRepository(path);
       const firstWorld = createWorld({ repository: firstRepo });
       const session = firstWorld.auth("guest:persist");
-      const applied = firstWorld.call("persist-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.91]));
+      const applied = await firstWorld.call("persist-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.91]));
       expect(applied.op).toBe("applied");
       expect(firstWorld.getProp("delay_1", "wet")).toBe(0.91);
       firstRepo.close();
@@ -195,7 +195,7 @@ describe("sqlite persistence", () => {
     }
   });
 
-  it("does not persist socket attachments across SQLite reload", () => {
+  it("does not persist socket attachments across SQLite reload", async () => {
     const { dir, path } = tempDb();
     try {
       const firstRepo = new LocalSQLiteRepository(path);
@@ -219,13 +219,13 @@ describe("sqlite persistence", () => {
     }
   });
 
-  it("persists space snapshots", () => {
+  it("persists space snapshots", async () => {
     const { dir, path } = tempDb();
     try {
       const firstRepo = new LocalSQLiteRepository(path);
       const firstWorld = createWorld({ repository: firstRepo });
       const session = firstWorld.auth("guest:snapshot");
-      firstWorld.call("snapshot-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["filter_1", "cutoff", 1800]));
+      await firstWorld.call("snapshot-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["filter_1", "cutoff", 1800]));
       const snapshot = firstWorld.saveSnapshot("the_dubspace");
       expect(snapshot.seq).toBe(1);
       firstRepo.close();
@@ -242,14 +242,14 @@ describe("sqlite persistence", () => {
     }
   });
 
-  it("persists delayed fork tasks and runs them after restart", () => {
+  it("persists delayed fork tasks and runs them after restart", async () => {
     const { dir, path } = tempDb();
     try {
       const firstRepo = new LocalSQLiteRepository(path);
       const firstWorld = createWorld({ repository: firstRepo });
       installForkFixture(firstWorld);
       const session = firstWorld.auth("guest:fork-persist");
-      const scheduled = firstWorld.call("fork-persist", session.id, "the_dubspace", message(session.actor, "delay_1", "schedule_restart_mark", ["ok"]));
+      const scheduled = await firstWorld.call("fork-persist", session.id, "the_dubspace", message(session.actor, "delay_1", "schedule_restart_mark", ["ok"]));
       expect(scheduled.op).toBe("applied");
       expect(firstWorld.parkedTasks.size).toBe(1);
       firstRepo.close();
@@ -257,7 +257,7 @@ describe("sqlite persistence", () => {
       const secondRepo = new LocalSQLiteRepository(path);
       const secondWorld = createWorld({ repository: secondRepo });
       expect(secondWorld.parkedTasks.size).toBe(1);
-      const ran = secondWorld.runDueTasks(Date.now() + 1);
+      const ran = await secondWorld.runDueTasks(Date.now() + 1);
       expect(ran).toHaveLength(1);
       expect(ran[0].frame?.op).toBe("applied");
       if (ran[0].frame?.op === "applied") expect(ran[0].frame.seq).toBe(2);
@@ -270,14 +270,14 @@ describe("sqlite persistence", () => {
     }
   });
 
-  it("persists suspended VM continuations and resumes them after restart", () => {
+  it("persists suspended VM continuations and resumes them after restart", async () => {
     const { dir, path } = tempDb();
     try {
       const firstRepo = new LocalSQLiteRepository(path);
       const firstWorld = createWorld({ repository: firstRepo });
       installSuspendFixture(firstWorld);
       const session = firstWorld.auth("guest:suspend-persist");
-      const suspended = firstWorld.call("suspend-persist", session.id, "the_dubspace", message(session.actor, "delay_1", "suspend_after_restart", ["ok"]));
+      const suspended = await firstWorld.call("suspend-persist", session.id, "the_dubspace", message(session.actor, "delay_1", "suspend_after_restart", ["ok"]));
       expect(suspended.op).toBe("applied");
       expect(firstWorld.parkedTasks.size).toBe(1);
       firstRepo.close();
@@ -285,7 +285,7 @@ describe("sqlite persistence", () => {
       const secondRepo = new LocalSQLiteRepository(path);
       const secondWorld = createWorld({ repository: secondRepo });
       expect(secondWorld.parkedTasks.size).toBe(1);
-      const ran = secondWorld.runDueTasks(Date.now() + 1);
+      const ran = await secondWorld.runDueTasks(Date.now() + 1);
       expect(ran).toHaveLength(1);
       expect(ran[0].frame?.op).toBe("applied");
       if (ran[0].frame?.op === "applied") expect(ran[0].frame.message.verb).toBe("$resume");
@@ -297,14 +297,14 @@ describe("sqlite persistence", () => {
     }
   });
 
-  it("persists READ continuations and resumes them from input after restart", () => {
+  it("persists READ continuations and resumes them from input after restart", async () => {
     const { dir, path } = tempDb();
     try {
       const firstRepo = new LocalSQLiteRepository(path);
       const firstWorld = createWorld({ repository: firstRepo });
       installReadFixture(firstWorld);
       const session = firstWorld.auth("guest:read-persist");
-      const waiting = firstWorld.call("read-persist", session.id, "the_dubspace", message(session.actor, "delay_1", "read_after_restart", []));
+      const waiting = await firstWorld.call("read-persist", session.id, "the_dubspace", message(session.actor, "delay_1", "read_after_restart", []));
       expect(waiting.op).toBe("applied");
       expect(firstWorld.parkedTasks.size).toBe(1);
       firstRepo.close();
@@ -312,7 +312,7 @@ describe("sqlite persistence", () => {
       const secondRepo = new LocalSQLiteRepository(path);
       const secondWorld = createWorld({ repository: secondRepo });
       expect(secondWorld.parkedTasks.size).toBe(1);
-      const ran = secondWorld.deliverInput(session.actor, "after reboot");
+      const ran = await secondWorld.deliverInput(session.actor, "after reboot");
       expect(ran?.frame?.op).toBe("applied");
       if (ran?.frame?.op === "applied") {
         expect(ran.frame.message.verb).toBe("$resume");
@@ -328,13 +328,13 @@ describe("sqlite persistence", () => {
 });
 
 describe("json folder persistence", () => {
-  it("round-trips a full world through a JSON folder repository", () => {
+  it("round-trips a full world through a JSON folder repository", async () => {
     const { dir, path } = tempDb();
     try {
       const firstRepo = new JsonFolderWorldRepository(path);
       const firstWorld = createWorld({ repository: firstRepo });
       const session = firstWorld.auth("guest:json");
-      firstWorld.call("json-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "send", 0.66]));
+      await firstWorld.call("json-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "send", 0.66]));
       firstWorld.saveSnapshot("the_dubspace");
 
       const secondRepo = new JsonFolderWorldRepository(path);
@@ -349,7 +349,7 @@ describe("json folder persistence", () => {
     }
   });
 
-  it("dumps selected objects as a partial JSON folder", () => {
+  it("dumps selected objects as a partial JSON folder", async () => {
     const { dir, path } = tempDb();
     try {
       const world = createWorld();

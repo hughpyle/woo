@@ -106,33 +106,33 @@ const DEFAULT_WALL_MS = 10_000;
 const MAX_VM_FRAMES = 128;
 const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "move", "chparent", "has_flag", "random", "contents", "task_perms", "caller_perms", "set_task_perms"];
 
-export function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): WooValue {
-  return runVmFrames([makeFrame(ctx, bytecode, args)]).result;
+export async function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): Promise<WooValue> {
+  return (await runVmFrames([makeFrame(ctx, bytecode, args)])).result;
 }
 
 export function createSerializedTinyVmTask(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): SerializedVmTask {
   return serializeVmFrames([makeFrame(ctx, bytecode, args)]);
 }
 
-export function runSerializedTinyVmTask(world: CallContext["world"], task: SerializedVmTask, observations: Observation[] = []): VmRunResult {
+export async function runSerializedTinyVmTask(world: CallContext["world"], task: SerializedVmTask, observations: Observation[] = []): Promise<VmRunResult> {
   if (task.version !== 1) throw wooError("E_VERSION", "unsupported serialized VM task version", task.version);
-  return runVmFrames(task.frames.map((item) => hydrateVmFrame(world, item, observations)));
+  return await runVmFrames(task.frames.map((item) => hydrateVmFrame(world, item, observations)));
 }
 
-export function runSerializedTinyVmTaskWithInput(
+export async function runSerializedTinyVmTaskWithInput(
   world: CallContext["world"],
   task: SerializedVmTask,
   input: WooValue,
   observations: Observation[] = []
-): VmRunResult {
+): Promise<VmRunResult> {
   const resumed = structuredClone(task);
   const top = resumed.frames[resumed.frames.length - 1];
   if (!top) throw wooError("E_INTERNAL", "serialized VM task has no frames");
   top.stack.push(cloneValue(input));
-  return runSerializedTinyVmTask(world, resumed, observations);
+  return await runSerializedTinyVmTask(world, resumed, observations);
 }
 
-function runVmFrames(frames: VmFrame[]): VmRunResult {
+async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
   const observations = frames[0]?.ctx.observations ?? [];
   let result: WooValue = null;
 
@@ -193,8 +193,13 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
     }
     push(value);
   };
-  const callVerb = (obj: string, name: string, callArgs: WooValue[], startAt?: string | null): void => {
+  const callVerb = async (obj: string, name: string, callArgs: WooValue[], startAt?: string | null): Promise<void> => {
     const caller = frame();
+    if (await caller.ctx.world.isRemoteObject(obj) || (startAt ? await caller.ctx.world.isRemoteObject(startAt) : false)) {
+      const value = await caller.ctx.world.dispatch({ ...caller.ctx, caller: caller.ctx.thisObj, callerPerms: caller.ctx.progr }, obj, name, callArgs, startAt);
+      push(value);
+      return;
+    }
     const { definer, verb } = startAt === undefined ? caller.ctx.world.resolveVerb(obj, name) : caller.ctx.world.resolveVerbFrom(startAt, name);
     caller.ctx.world.assertCanExecuteVerb(caller.ctx.progr, obj, name, verb);
     const callCtx: CallContext = {
@@ -208,7 +213,7 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
       callerPerms: caller.ctx.progr
     };
     if (verb.kind === "native") {
-      const value = caller.ctx.world.dispatch({ ...caller.ctx, caller: caller.ctx.thisObj, callerPerms: caller.ctx.progr }, obj, name, callArgs, startAt);
+      const value = await caller.ctx.world.dispatch({ ...caller.ctx, caller: caller.ctx.thisObj, callerPerms: caller.ctx.progr }, obj, name, callArgs, startAt);
       push(value);
       return;
     }
@@ -429,14 +434,14 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
         case "GET_PROP": {
           const name = assertString(pop());
           const obj = assertObj(pop());
-          push(current.ctx.world.getPropChecked(current.ctx.progr, obj, name));
+          push(await current.ctx.world.getPropChecked(current.ctx.progr, obj, name));
           break;
         }
         case "SET_PROP": {
           const value = pop();
           const name = assertString(pop());
           const obj = assertObj(pop());
-          current.ctx.world.setPropChecked(current.ctx.progr, obj, name, value);
+          await current.ctx.world.setPropChecked(current.ctx.progr, obj, name, value);
           break;
         }
         case "HAS_PROP": {
@@ -450,13 +455,13 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
           const defaultValue = pop();
           const name = assertString(pop());
           const obj = assertObj(pop());
-          current.ctx.world.definePropertyChecked(current.ctx.progr, obj, { name, defaultValue, perms, owner: current.ctx.progr });
+          await current.ctx.world.definePropertyChecked(current.ctx.progr, obj, { name, defaultValue, perms, owner: current.ctx.progr });
           break;
         }
         case "UNDEFINE_PROP": {
           const name = assertString(pop());
           const obj = assertObj(pop());
-          current.ctx.world.undefinePropertyChecked(current.ctx.progr, obj, name);
+          await current.ctx.world.undefinePropertyChecked(current.ctx.progr, obj, name);
           break;
         }
         case "PROP_INFO": {
@@ -469,7 +474,7 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
           const info = assertMap(pop());
           const name = assertString(pop());
           const obj = assertObj(pop());
-          current.ctx.world.setPropertyInfoChecked(current.ctx.progr, obj, name, info);
+          await current.ctx.world.setPropertyInfoChecked(current.ctx.progr, obj, name, info);
           break;
         }
 
@@ -477,14 +482,14 @@ function runVmFrames(frames: VmFrame[]): VmRunResult {
           const callArgs = popArgs(numeric(operand, "argc"));
           const name = assertString(pop());
           const obj = assertObj(pop());
-          callVerb(obj, name, callArgs);
+          await callVerb(obj, name, callArgs);
           break;
         }
         case "PASS": {
           const callArgs = popArgs(numeric(operand, "argc"));
           const parent = current.ctx.world.object(current.ctx.definer).parent;
           if (!parent) throw wooError("E_VERBNF", `no parent verb for ${current.ctx.verbName}`);
-          callVerb(current.ctx.thisObj, current.ctx.verbName, callArgs, parent);
+          await callVerb(current.ctx.thisObj, current.ctx.verbName, callArgs, parent);
           break;
         }
         case "RETURN": {

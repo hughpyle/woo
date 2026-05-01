@@ -121,7 +121,7 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
         const inner = Array.isArray(body.args) ? body.args[0] : null;
         if (!inner || typeof inner !== "object" || Array.isArray(inner)) throw wooError("E_INVARG", "$space:call expects args[0] to be a message map");
         const message = messageFromRestMap(host, request, inner as Record<string, WooValue>, actor, session);
-        const result = world.call(id, session.id, target, message);
+        const result = await world.call(id, session.id, target, message);
         if (result.op === "error") return errorProtocol(result.error);
         await host.broadcastApplied(result);
         return jsonProtocol(result);
@@ -136,14 +136,14 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
           args,
           body: body.body && typeof body.body === "object" && !Array.isArray(body.body) ? body.body as Record<string, WooValue> : undefined
         };
-        const result = world.call(id, session.id, space, message);
+        const result = await world.call(id, session.id, space, message);
         if (result.op === "error") return errorProtocol(result.error);
         await host.broadcastApplied(result);
         return jsonProtocol(result);
       }
 
       const forceDirect = request.header("x-woo-force-direct") === "1";
-      const result = world.directCall(id, actor, target, verb, args, { forceDirect, forceReason: "REST X-Woo-Force-Direct" });
+      const result = await world.directCall(id, actor, target, verb, args, { forceDirect, forceReason: "REST X-Woo-Force-Direct" });
       if (result.op === "error") return errorProtocol(result.error);
       await host.broadcastLiveEvents(result);
       return jsonProtocol({ result: result.result, observations: result.observations });

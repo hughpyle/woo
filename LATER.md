@@ -8,6 +8,12 @@ The sections below distinguish three flavors of pending item:
 - **Not in v1, deliberately**: design choices the spec consciously declines, recorded so future readers see why the absence is intentional.
 - **Decisions still open**: judgments deferred pending more information; the current leaning is documented but not locked.
 
+## random stuff to do
+
+- multiple rooms, and furniture and exits
+- migrate `the_dubspace`, `the_taskspace`, and `the_chatroom` manifests to declare `instances_self_host: true` on `$dubspace` / `$taskspace` / `$chatroom` (or `$room`) at the class, instead of stamping `host_placement: "self"` on each instance. Wire `create()` to compute `host_placement` from the parent chain. Keep `host_placement` as the runtime projection. Manifest-migration story per `spec/semantics/objects.md §4.2`.
+- mid-RPC origin-host crash drops the awaiting task: the v1 `awaiting_call` removal trades a real durability story for simplicity (`spec/semantics/tasks.md §16.3`). If a verb does many cross-host RPCs and the origin host evicts mid-flight, the in-memory task is lost. Revisit if the workload makes this hurt.
+
 ## structure
 
 - spec/README.md, spec/vision.md, spec/dubspace-demo.md, spec/taskspace-demo.md exist alongside the layered spec — decide whether they roll into the spec layers or stay as author working docs.
@@ -49,6 +55,7 @@ The sections below distinguish three flavors of pending item:
 ## not in v1, deliberately
 
 - **re-anchoring** (`reanchor(obj, new_anchor)`). Anchor is set at create time and immutable. Atomicity scope changes are deliberate and rare; if someone needs the effect, they can create-copy-recycle. Re-anchoring as a runtime operation would require recursive subtree migration with task drain and routing redirects — too much machinery for the value at v1.
+- **durable `awaiting_call` continuations for cross-host RPC**. v1 keeps one async path but does not park an in-flight remote call in storage. If an origin host crashes or evicts while a verb is awaiting remote work, that in-memory task is lost and the caller retries. Durable remote-call continuations would improve robustness for chatty cross-host verbs, but they bring back callback/continuation machinery that v1 is explicitly avoiding.
 - **object-defined UI components** (e.g., a `$ui_renderable` feature class with a `:ui_hint()` verb returning A2UI-shaped payloads). The object model can absorb this whenever it earns its keep — `:describe()`, declared event schemas, and verb metadata already give an agent ~70% of what it needs to generate a useful UI. The missing piece is layout/archetype intent ("control surface" vs. "feed" vs. "form"), which is one optional verb on one feature class away. Not building yet because (a) the chat surface hasn't yet proven what hint shape carries weight, and (b) A2UI itself isn't a stable target. Worth keeping the option open and revisiting when either of those unblocks.
 
 ## decisions still open

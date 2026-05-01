@@ -89,7 +89,7 @@ target.
 ```
 this.location.name           // chained property access; each `.` may yield
 target.(name)                // dynamic property access; name expression yields str
-this:verb(arg1, arg2)        // verb call; may migrate task
+this:verb(arg1, arg2)        // verb call; may yield for host RPC
 $wiz:announce("hello")       // corename; resolves through $system
 pass(arg1, arg2)             // call this verb's parent-chain version
 [1, 2, 3]                    // list literal
