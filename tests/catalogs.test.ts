@@ -187,18 +187,37 @@ describe("local catalogs", () => {
 
   it("installs dubspace from source without trusted implementation hints", async () => {
     const world = createWorld({ catalogs: false });
+    installCatalogManifest(world, readManifest("chat") as unknown as RuntimeCatalogManifest, {
+      tap: "github:hugh/woo",
+      alias: "chat",
+      allowImplementationHints: false
+    });
     installCatalogManifest(world, readManifest("dubspace") as unknown as RuntimeCatalogManifest, {
       tap: "github:hugh/woo",
       alias: "dubspace",
       allowImplementationHints: false
     });
 
+    expect(world.object("the_dubspace").location).toBe("the_chatroom");
+    expect(world.object("the_chatroom").contents.has("the_dubspace")).toBe(true);
     expect(world.object("$dubspace").verbs.get("set_control")?.kind).toBe("bytecode");
     expect(world.object("$dubspace").verbs.get("set_drum_step")?.kind).toBe("bytecode");
     expect(world.object("$dubspace").verbs.get("save_scene")?.kind).toBe("bytecode");
+    expect(world.object("$dubspace").verbs.get("enter")?.kind).toBe("bytecode");
 
     const session = world.auth("guest:catalog-dubspace");
     const actor = session.actor;
+    const actorName = String(world.getProp(actor, "name"));
+    const entered = await world.directCall("dubspace-enter", actor, "the_dubspace", "enter", []);
+    expect(entered.op).toBe("result");
+    if (entered.op === "result") {
+      expect(entered.result).toEqual([actor]);
+      expect(entered.observations.map((obs) => obs.type)).toEqual(["dubspace_entered", "dubspace_activity"]);
+      expect(entered.observations[0]).toMatchObject({ text: `${actorName} steps up to Dubspace.` });
+      expect(entered.observations[1]).toMatchObject({ source: "the_chatroom", space: "the_dubspace", actor });
+    }
+    expect(world.getProp("the_dubspace", "operators")).toEqual([actor]);
+
     const applied = await world.call("set-control", session.id, "the_dubspace", {
       actor,
       target: "the_dubspace",
@@ -226,6 +245,14 @@ describe("local catalogs", () => {
     expect(world.getProp("delay_1", "feedback")).toBe(0.11);
     await world.call("recall", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "recall_scene", args: ["default_scene"] });
     expect(world.getProp("delay_1", "feedback")).toBe(0.44);
+
+    const left = await world.directCall("dubspace-leave", actor, "the_dubspace", "leave", []);
+    expect(left.op).toBe("result");
+    if (left.op === "result") {
+      expect(left.result).toEqual([]);
+      expect(left.observations[0]).toMatchObject({ text: `${actorName} steps away from Dubspace.` });
+    }
+    expect(world.getProp("the_dubspace", "operators")).toEqual([]);
   });
 
   it("installs pinboard from source and keeps notes as board-local records", async () => {
@@ -785,6 +812,8 @@ describe("local catalogs", () => {
     expect(state.spaces).toHaveProperty("the_taskspace");
     expect(state.spaces).toHaveProperty("the_chatroom");
     expect((state.objects.the_dubspace as any).props.auto_presence).toBe(true);
+    expect((state.objects.the_dubspace as any).location).toBe("the_chatroom");
+    expect((state.objects.the_dubspace as any).props.operators).toEqual([]);
     expect((state.objects.slot_1 as any).props.gain).toBe(0.75);
     expect(state.object_routes).toEqual(expect.arrayContaining([
       { id: "the_dubspace", host: "the_dubspace", anchor: null },

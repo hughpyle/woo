@@ -83,6 +83,7 @@ type InstalledCatalogRecord = {
 const DYNAMIC_SEED_PROPERTIES = new Set([
   "next_seq",
   "subscribers",
+  "operators",
   "last_snapshot_seq"
 ]);
 

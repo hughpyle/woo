@@ -24,7 +24,7 @@ type AppState = {
 };
 
 type ChatLine = {
-  kind: "said" | "said_to" | "said_as" | "emoted" | "posed" | "quoted" | "self_pointed" | "told" | "entered" | "left" | "looked" | "who" | "blocked_exit" | "taken" | "dropped" | "huh" | "pinboard_activity" | "pinboard_entered" | "pinboard_left" | "system" | "error";
+  kind: "said" | "said_to" | "said_as" | "emoted" | "posed" | "quoted" | "self_pointed" | "told" | "entered" | "left" | "looked" | "who" | "blocked_exit" | "taken" | "dropped" | "huh" | "dubspace_activity" | "dubspace_entered" | "dubspace_left" | "pinboard_activity" | "pinboard_entered" | "pinboard_left" | "system" | "error";
   actor?: string;
   from?: string;
   to?: string;
@@ -534,6 +534,9 @@ function receiveLiveEvent(observation: any) {
     }
     void refresh();
   }
+  if (isDubspaceObservation(observation)) {
+    void refresh();
+  }
   if (isChatObservation(observation)) {
     receiveChatEvent(observation);
     return;
@@ -749,9 +752,11 @@ function bindCommon() {
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       const next = button.dataset.tab as AppState["tab"];
+      if (state.tab === "dubspace" && next !== "dubspace") leaveDubspace();
       if (state.tab === "pinboard" && next !== "pinboard") leavePinboard();
       state.tab = next;
       render();
+      if (next === "dubspace") enterDubspace();
       if (next === "pinboard") enterPinboard();
     });
   });
@@ -760,42 +765,88 @@ function bindCommon() {
 function renderDubspace() {
   const dub = effectiveDubspace();
   const meta = state.world?.dubspaceMeta ?? {};
+  const space = meta.space ? dub[meta.space] : null;
+  const operators = dubspaceOperators();
+  const inSpace = Boolean(state.actor && operators.includes(state.actor));
   const slots = Array.isArray(meta.slots) ? meta.slots : [];
   const filter = dub[meta.filter]?.props ?? {};
   const delay = dub[meta.delay]?.props ?? {};
   const drum = dub[meta.drum]?.props ?? {};
   const pattern = normalizePattern(drum.pattern);
+  if (!space) {
+    return `
+      <section class="toolbar"><h1>Dubspace</h1></section>
+      <section class="panel"><p class="empty-state">No dubspace catalog instance is installed.</p></section>
+    `;
+  }
+  if (!inSpace) {
+    return `
+      <section class="toolbar">
+        <h1>${escapeHtml(space.name ?? "Dubspace")}</h1>
+        <button data-dubspace-enter ${canSendDirect() ? "" : "disabled"}>Enter</button>
+      </section>
+      <section class="dubspace-layout">
+        <div class="panel">
+          <p>${escapeHtml(String(space.props?.description ?? "Enter the dubspace to work at the controls."))}</p>
+        </div>
+        ${renderDubspacePresence(operators)}
+      </section>
+    `;
+  }
   return `
-    <section class="toolbar">
-      <h1>Dubspace</h1>
+    <section class="toolbar dubspace-toolbar">
+      <h1>${escapeHtml(space.name ?? "Dubspace")}</h1>
+      <button data-dubspace-leave>Leave</button>
       <button class="${state.audioOn ? "active" : ""}" data-audio aria-pressed="${state.audioOn}">Audio ${state.audioOn ? "On" : "Off"}</button>
       <button data-save-scene>Save Scene</button>
       <button data-recall-scene>Recall Scene</button>
     </section>
-    <section class="grid">
-      <article class="panel loop-console-panel">
-        <div class="panel-head"><h2>Loops</h2></div>
-        <div class="loop-console">${slots.map((id: string, index: number) => renderLoopStrip(id, index + 1, dub)).join("")}${renderFilterStrip(filter)}</div>
-      </article>
-      <article class="panel">
-        <h2>Delay</h2>
-        ${slider(meta.delay, "send", delay.send ?? 0.3)}
-        ${slider(meta.delay, "time", delay.time ?? 0.25)}
-        ${slider(meta.delay, "feedback", delay.feedback ?? 0.35)}
-        ${slider(meta.delay, "wet", delay.wet ?? 0.4)}
-      </article>
-      <article class="panel sequencer">
-        <div class="panel-head">
-          <h2>Percussion</h2>
-          <button data-transport="${drum.playing ? "stop" : "start"}">${drum.playing ? "Stop" : "Start"}</button>
+    <section class="dubspace-layout">
+      <div class="dubspace-work">
+        <div class="grid">
+          <article class="panel loop-console-panel">
+            <div class="panel-head"><h2>Loops</h2></div>
+            <div class="loop-console">${slots.map((id: string, index: number) => renderLoopStrip(id, index + 1, dub)).join("")}${renderFilterStrip(filter)}</div>
+          </article>
+          <article class="panel">
+            <h2>Delay</h2>
+            ${slider(meta.delay, "send", delay.send ?? 0.3)}
+            ${slider(meta.delay, "time", delay.time ?? 0.25)}
+            ${slider(meta.delay, "feedback", delay.feedback ?? 0.35)}
+            ${slider(meta.delay, "wet", delay.wet ?? 0.4)}
+          </article>
+          <article class="panel sequencer">
+            <div class="panel-head">
+              <h2>Percussion</h2>
+              <button data-transport="${drum.playing ? "stop" : "start"}">${drum.playing ? "Stop" : "Start"}</button>
+            </div>
+            <label>BPM <input data-tempo type="range" min="60" max="200" step="1" value="${escapeHtml(String(drum.bpm ?? 118))}"><span>${escapeHtml(String(drum.bpm ?? 118))}</span></label>
+            <div class="steps">
+              ${drumVoices.map((voice) => renderStepRow(voice.id, voice.label, pattern[voice.id])).join("")}
+            </div>
+          </article>
         </div>
-        <label>BPM <input data-tempo type="range" min="60" max="200" step="1" value="${escapeHtml(String(drum.bpm ?? 118))}"><span>${escapeHtml(String(drum.bpm ?? 118))}</span></label>
-        <div class="steps">
-          ${drumVoices.map((voice) => renderStepRow(voice.id, voice.label, pattern[voice.id])).join("")}
-        </div>
-      </article>
+      </div>
+      ${renderDubspacePresence(operators)}
     </section>
   `;
+}
+
+function renderDubspacePresence(operators: string[]) {
+  return `
+    <aside class="panel dubspace-presence">
+      <h2>At the controls</h2>
+      <div class="presence-list">
+        ${operators.map((id: string) => `<button disabled>${escapeHtml(actorLabel(id))}<span>${escapeHtml(id)}</span></button>`).join("") || "<p>No one is at the controls.</p>"}
+      </div>
+    </aside>
+  `;
+}
+
+function dubspaceOperators(): string[] {
+  const space = dubspaceSpace();
+  const raw = space ? state.world?.dubspace?.[space]?.props?.operators : [];
+  return Array.isArray(raw) ? raw.map(String) : [];
 }
 
 function renderFilterStrip(filter: any) {
@@ -843,6 +894,8 @@ function slider(obj: string, prop: string, value: number) {
 }
 
 function bindDubspace() {
+  document.querySelector<HTMLButtonElement>("[data-dubspace-enter]")?.addEventListener("click", enterDubspace);
+  document.querySelector<HTMLButtonElement>("[data-dubspace-leave]")?.addEventListener("click", () => leaveDubspace());
   document.querySelector<HTMLButtonElement>("[data-audio]")?.addEventListener("click", async () => {
     audio ??= new DubAudio();
     if (state.audioOn) {
@@ -935,6 +988,39 @@ function bindDubspace() {
     const scene = state.world?.dubspaceMeta?.scene;
     if (space && scene) call(space, space, "recall_scene", [scene]);
   });
+}
+
+function enterDubspace() {
+  const space = dubspaceSpace();
+  if (!space || !canSendDirect()) return;
+  direct(space, "enter", [], (result) => {
+    setDubspaceOperators(result);
+    if (state.tab === "dubspace") render();
+  });
+}
+
+function leaveDubspace(done?: () => void) {
+  const space = dubspaceSpace();
+  if (!space || !canSendDirect()) {
+    done?.();
+    return;
+  }
+  if (!dubspaceOperators().includes(state.actor ?? "")) {
+    done?.();
+    return;
+  }
+  direct(space, "leave", [], (result) => {
+    setDubspaceOperators(result);
+    done?.();
+    if (state.tab === "dubspace") render();
+  });
+}
+
+function setDubspaceOperators(result: any) {
+  const space = dubspaceSpace();
+  if (!Array.isArray(result) || !space || !state.world?.dubspace?.[space]) return;
+  state.world.dubspace[space].props.operators = result.map(String);
+  if (state.world.objects?.[space]?.props) state.world.objects[space].props.operators = state.world.dubspace[space].props.operators;
 }
 
 function bindPitchDial(dial: HTMLElement) {
@@ -1031,6 +1117,9 @@ function isChatObservation(observation: any) {
     "taken",
     "dropped",
     "huh",
+    "dubspace_activity",
+    "dubspace_entered",
+    "dubspace_left",
     "pinboard_activity",
     "pinboard_entered",
     "pinboard_left",
@@ -1042,6 +1131,14 @@ function isChatObservation(observation: any) {
     "cockatoo_fed",
     "cockatoo_pluck",
     "cockatoo_shake"
+  ].includes(String(observation?.type ?? ""));
+}
+
+function isDubspaceObservation(observation: any) {
+  return [
+    "dubspace_entered",
+    "dubspace_left",
+    "dubspace_activity"
   ].includes(String(observation?.type ?? ""));
 }
 
@@ -1091,6 +1188,7 @@ function receiveChatEvent(observation: any, shouldRender = true) {
 function chatLineKind(observation: any): ChatLine["kind"] {
   const type = String(observation?.type ?? "");
   if (type === "cockatoo_squawk" || type === "cockatoo_muffled" || type === "cockatoo_taught" || type === "cockatoo_gagged" || type === "cockatoo_ungagged" || type === "cockatoo_fed" || type === "cockatoo_pluck" || type === "cockatoo_shake") return "system";
+  if (type === "dubspace_activity" || type === "dubspace_entered" || type === "dubspace_left") return "system";
   if (type === "pinboard_activity" || type === "pinboard_entered" || type === "pinboard_left") return "system";
   return type as ChatLine["kind"];
 }
@@ -1103,6 +1201,7 @@ function chatSystemText(observation: any): string | undefined {
   if (type === "cockatoo_fed") return `The cockatoo eats ${String(observation.food ?? "something")}.`;
   if (type === "cockatoo_pluck") return "*EEEEEEK!*";
   if (type === "cockatoo_shake") return `The cockatoo ${String(observation.reaction ?? "reacts")}.`;
+  if (type === "dubspace_activity" || type === "dubspace_entered" || type === "dubspace_left") return String(observation.text ?? "The dubspace changes.");
   if (type === "pinboard_activity" || type === "pinboard_entered" || type === "pinboard_left") return String(observation.text ?? "The pinboard changes.");
   if (type === "blocked_exit") return String(observation.text ?? "You can't go that way.");
   if (type === "taken") return String(observation.text ?? `${actorLabel(String(observation.actor ?? ""))} takes something.`);
@@ -1150,7 +1249,6 @@ function renderChat() {
       <h1>${escapeHtml(room?.name ?? "Room")}</h1>
       <button data-chat-leave>Leave</button>
       <button data-chat-look>Look</button>
-      <button data-chat-who>Who</button>
     </section>
     <section class="chat-layout">
       <div class="panel chat-panel">
@@ -1233,7 +1331,6 @@ function bindChat() {
       if (state.tab === "chat") render();
     });
   });
-  document.querySelector<HTMLButtonElement>("[data-chat-who]")?.addEventListener("click", refreshChatWho);
   document.querySelector<HTMLButtonElement>("[data-chat-look]")?.addEventListener("click", refreshChatLook);
   document.querySelectorAll<HTMLButtonElement>("[data-chat-recipient]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1311,14 +1408,6 @@ function renderChatCommandResult(plan: any, result: any, originalText: string) {
   }
   void originalText;
   void result;
-}
-
-function refreshChatWho() {
-  const room = chatRoom();
-  if (!room) return;
-  direct(room, "who", [], (result) => {
-    setChatPresent(result);
-  });
 }
 
 function refreshChatLook() {

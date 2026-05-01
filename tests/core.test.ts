@@ -559,7 +559,15 @@ describe("woo core", () => {
     expect(ids).toContain("$loop_slot");
     expect(ids).toContain("slot_1");
     expect(ids).not.toContain("the_taskspace");
-    expect(ids).not.toContain("the_chatroom");
+    expect(ids).toContain("the_chatroom");
+
+    const chatScoped = scopeSerializedWorldToHost(full, "the_chatroom");
+    const chatIds = chatScoped.objects.map((obj) => obj.id);
+    const room = chatScoped.objects.find((obj) => obj.id === "the_chatroom");
+    const mountedDubspace = chatScoped.objects.find((obj) => obj.id === "the_dubspace");
+    expect(chatIds).toContain("the_dubspace");
+    expect(mountedDubspace?.contents).toEqual([]);
+    expect(room?.contents).toContain("the_dubspace");
   });
 
   it("merges fresh host seed into a stale host slice without wiping dynamic room state", async () => {
@@ -570,9 +578,11 @@ describe("woo core", () => {
     staleWorld.setProp("the_chatroom", "subscribers", [session.actor]);
     staleWorld.setProp("the_chatroom", "next_seq", 42);
     staleWorld.object("the_chatroom").contents.delete("the_lamp");
+    staleWorld.object("the_chatroom").contents.delete("the_dubspace");
     staleWorld.objects.delete("the_lamp");
     staleWorld.objects.delete("the_towel");
     staleWorld.objects.delete("the_mug");
+    staleWorld.objects.delete("the_dubspace");
     staleWorld.object("the_deck").contents.delete("the_towel");
 
     const fresh = createWorld().exportWorld();
@@ -588,10 +598,12 @@ describe("woo core", () => {
     expect(reloaded.getProp("the_chatroom", "name")).toBe("Lobby");
     expect(reloaded.getProp("the_chatroom", "subscribers")).toEqual([session.actor]);
     expect(reloaded.getProp("the_chatroom", "next_seq")).toBe(42);
-    expect(reloaded.object("the_lamp").location).toBe("the_chatroom");
-    expect(reloaded.object("the_chatroom").contents.has("the_lamp")).toBe(true);
-    expect(reloaded.object("the_mug").location).toBe("the_chatroom");
+    expect(reloaded.objects.has("the_lamp")).toBe(false);
+    expect(reloaded.object("the_chatroom").contents.has("the_lamp")).toBe(false);
+    expect(reloaded.objects.has("the_mug")).toBe(false);
     expect(reloaded.object("the_chatroom").contents.has("the_mug")).toBe(true);
+    expect(reloaded.object("the_dubspace").location).toBe("the_chatroom");
+    expect(reloaded.object("the_chatroom").contents.has("the_dubspace")).toBe(true);
   });
 
   it("merges fresh host seed without overwriting authored host-state properties", () => {
@@ -729,11 +741,15 @@ describe("woo core", () => {
     const session = world.auth("guest:reap");
     const actor = session.actor;
     await world.directCall("enter-chat-before-reap", actor, "the_chatroom", "enter", []);
+    const enterDubspace = await world.directCall("enter-dubspace-before-reap", actor, "the_dubspace", "enter", []);
+    expect(enterDubspace.op).toBe("result");
+    expect(world.getProp("the_dubspace", "operators")).toEqual([actor]);
     const takeLamp = await world.directCall("take-lamp-before-reap", actor, "the_chatroom", "take", ["lamp"]);
     expect(takeLamp.op).toBe("result");
     expect(world.object("the_lamp").location).toBe(actor);
     world.setProp(actor, "description", "temporary guest description");
     world.setProp(actor, "aliases", ["temp"]);
+    world.setProp(actor, "focus_list", ["the_dubspace"]);
     world.attachSocket(session.id, "ws-1");
     world.detachSocket(session.id, "ws-1");
 
@@ -743,15 +759,18 @@ describe("woo core", () => {
     expect(world.hasPresence(actor, "the_dubspace")).toBe(false);
     expect(world.hasPresence(actor, "the_taskspace")).toBe(false);
     expect(world.hasPresence(actor, "the_chatroom")).toBe(false);
+    expect(world.getProp("the_dubspace", "operators")).toEqual([]);
     expect(world.getProp(actor, "session_id")).toBeNull();
     expect(world.getProp(actor, "description")).toBe("");
     expect(world.getProp(actor, "aliases")).toEqual([]);
+    expect(world.getProp(actor, "focus_list")).toEqual([]);
     expect(world.object(actor).location).toBe("$nowhere");
     expect(world.object("the_lamp").location).toBe("the_chatroom");
     expect(world.object("the_chatroom").contents.has("the_lamp")).toBe(true);
 
     const next = world.auth("guest:after-reap");
     expect(next.actor).toBe(actor);
+    expect(world.getProp("the_dubspace", "operators")).toEqual([]);
   });
 
   it("rejects calls from expired sessions", async () => {

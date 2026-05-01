@@ -4,7 +4,7 @@
   "spec_version": "v1",
   "description": "Shared dub-mix sound space demo objects.",
   "license": "MIT",
-  "depends": [],
+  "depends": ["@local:chat"],
   "classes": [
     {
       "local_name": "$control",
@@ -84,8 +84,39 @@
       "local_name": "$dubspace",
       "parent": "$space",
       "description": "Base class for shared dub-mix spaces.",
-      "properties": [],
+      "properties": [
+        { "name": "operators", "type": "list<obj>", "default": [], "perms": "rw" },
+        { "name": "mount_room", "type": "obj|null", "default": null, "perms": "r" }
+      ],
       "verbs": [
+        {
+          "name": "title",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :title() rxd { return this.name; }"
+        },
+        {
+          "name": "enter",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :enter() rxd { if (!(actor in this.operators)) { this.operators = this.operators + [actor]; } let text = actor.name + \" steps up to \" + this.name + \".\"; observe({ type: \"dubspace_entered\", actor: actor, space: this, text: text, ts: now() }); observe({ type: \"dubspace_activity\", source: this.mount_room, actor: actor, space: this, text: text, ts: now() }); return this.operators; }",
+          "implementation": { "kind": "native", "handler": "dubspace_enter" }
+        },
+        {
+          "name": "leave",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :leave() rxd { let next = []; for item in this.operators { if (item != actor) { next = next + [item]; } } this.operators = next; let text = actor.name + \" steps away from \" + this.name + \".\"; observe({ type: \"dubspace_left\", actor: actor, space: this, text: text, ts: now() }); observe({ type: \"dubspace_activity\", source: this.mount_room, actor: actor, space: this, text: text, ts: now() }); return this.operators; }",
+          "implementation": { "kind": "native", "handler": "dubspace_leave" }
+        },
         {
           "name": "set_control",
           "perms": "rx",
@@ -168,6 +199,9 @@
   ],
   "features": [],
   "schemas": [
+    { "on": "$dubspace", "type": "dubspace_entered", "shape": { "source": "obj", "actor": "obj", "space": "obj", "text": "str?" } },
+    { "on": "$dubspace", "type": "dubspace_left", "shape": { "source": "obj", "actor": "obj", "space": "obj", "text": "str?" } },
+    { "on": "$dubspace", "type": "dubspace_activity", "shape": { "source": "obj", "space": "obj", "actor": "obj", "text": "str" } },
     { "on": "$dubspace", "type": "loop_started", "shape": { "slot": "obj", "loop_id": "str" } },
     { "on": "$dubspace", "type": "loop_stopped", "shape": { "slot": "obj" } },
     { "on": "$dubspace", "type": "control_changed", "shape": { "target": "obj", "name": "str", "value": "any" } },
@@ -181,7 +215,7 @@
     { "on": "$dubspace", "type": "cursor", "shape": { "actor": "obj", "x": "float", "y": "float" } }
   ],
   "seed_hooks": [
-    { "kind": "create_instance", "class": "$dubspace", "as": "the_dubspace", "name": "Dubspace", "description": "The first runnable sound-space instance. It owns the sequenced coordination surface for four loop slots, one channel, one filter, one delay, one percussion loop, and one default scene.", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0, "auto_presence": true, "host_placement": "self" } },
+    { "kind": "create_instance", "class": "$dubspace", "as": "the_dubspace", "name": "Dubspace", "description": "The first runnable sound-space instance. It owns the sequenced coordination surface for four loop slots, one channel, one filter, one delay, one percussion loop, and one default scene.", "location": "chat:the_chatroom", "properties": { "next_seq": 1, "subscribers": [], "last_snapshot_seq": 0, "auto_presence": true, "host_placement": "self", "aliases": ["dubspace", "dub", "mix", "controls"], "operators": [], "mount_room": "chat:the_chatroom" } },
     { "kind": "create_instance", "class": "$loop_slot", "as": "slot_1", "name": "Loop 1", "description": "Loop slot 1 in the demo dubspace. It is anchored to the_dubspace and stores loop id, playing state, gain, and oscillator frequency.", "anchor": "the_dubspace", "location": "the_dubspace", "properties": { "loop_id": "loop-1", "playing": false, "gain": 0.75, "freq": 110 } },
     { "kind": "create_instance", "class": "$loop_slot", "as": "slot_2", "name": "Loop 2", "description": "Loop slot 2 in the demo dubspace. It is anchored to the_dubspace and stores loop id, playing state, gain, and oscillator frequency.", "anchor": "the_dubspace", "location": "the_dubspace", "properties": { "loop_id": "loop-2", "playing": false, "gain": 0.75, "freq": 146.83 } },
     { "kind": "create_instance", "class": "$loop_slot", "as": "slot_3", "name": "Loop 3", "description": "Loop slot 3 in the demo dubspace. It is anchored to the_dubspace and stores loop id, playing state, gain, and oscillator frequency.", "anchor": "the_dubspace", "location": "the_dubspace", "properties": { "loop_id": "loop-3", "playing": false, "gain": 0.75, "freq": 196 } },

@@ -29,7 +29,7 @@ test("loads shell and renders nav", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Enter" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Leave" })).toBeHidden();
   await expect(page.getByRole("button", { name: "Look" })).toBeHidden();
-  await expect(page.getByRole("button", { name: "Who" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Who" })).toHaveCount(0);
   await expect(page.locator(".chat-form")).toBeHidden();
 
   // Wait for the websocket session to bind an actor — the actor field
@@ -69,6 +69,8 @@ test("dubspace cue keeps loop controls local", async ({ page, request }) => {
   await page.goto("/");
   await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
   await page.getByRole("button", { name: "Dubspace" }).click();
+  await expect(page.getByRole("button", { name: "Leave" })).toBeVisible();
+  await expect(page.locator(".dubspace-presence")).toContainText("Guest");
   await expect(page.locator("[data-audio]")).toHaveText("Audio Off");
   await page.locator("[data-audio]").click();
   await expect(page.locator("[data-audio]")).toHaveText("Audio On");
@@ -190,7 +192,7 @@ test("chat controls follow room membership", async ({ page }) => {
   await page.getByRole("button", { name: "Enter" }).click();
   await expect(page.getByRole("button", { name: "Leave" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Look" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Who" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Who" })).toHaveCount(0);
   await expect(page.locator(".chat-form")).toBeVisible();
   await expect(page.locator(".presence-list")).toContainText(actor);
   await expect(page.locator("[data-chat-input]")).toBeFocused();
@@ -202,10 +204,6 @@ test("chat controls follow room membership", async ({ page }) => {
   expect(chatFitsViewport).toBe(true);
 
   await page.locator("[data-chat-input]").fill("draft text");
-  await page.getByRole("button", { name: "Who" }).click();
-  await expect(page.locator("[data-chat-input]")).toBeFocused();
-  await expect(page.locator("[data-chat-input]")).toHaveValue("draft text");
-
   await page.getByRole("button", { name: "Look" }).click();
   await expect(page.locator("[data-chat-input]")).toBeFocused();
   await expect(page.locator("[data-chat-input]")).toHaveValue("draft text");
@@ -220,7 +218,7 @@ test("chat controls follow room membership", async ({ page }) => {
   await page.getByRole("button", { name: "Leave" }).click();
   await expect(page.getByRole("button", { name: "Enter" })).toBeVisible();
   await expect(page.locator(".chat-form")).toBeHidden();
-  await expect(page.getByRole("button", { name: "Who" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Who" })).toHaveCount(0);
 });
 
 test("chat room transitions broadcast through source and destination rooms", async ({ browser }) => {
@@ -265,6 +263,36 @@ test("chat room transitions broadcast through source and destination rooms", asy
     await expect(second.locator(".chat-feed")).toContainText(`${firstName} left.`);
     await expect(second.locator(`[data-chat-recipient="${firstActor}"]`)).toHaveCount(0);
     await expect(second.locator(`[data-chat-recipient="${secondActor}"]`)).toBeVisible();
+  } finally {
+    await firstContext.close();
+    await secondContext.close();
+  }
+});
+
+test("dubspace controls advertise operators to the living room", async ({ browser }) => {
+  const firstContext = await browser.newContext();
+  const secondContext = await browser.newContext();
+  try {
+    const first = await firstContext.newPage();
+    const second = await secondContext.newPage();
+
+    await Promise.all([first.goto("/"), second.goto("/")]);
+    await expect(first.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+    await expect(second.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+    const secondActor = (await second.locator(".actor").textContent())?.trim() ?? "";
+    const secondName = secondActor.replace(/^guest_(\d+)$/, "Guest $1");
+
+    await first.getByRole("button", { name: "Enter" }).click();
+    await expect(first.getByRole("button", { name: "Leave" })).toBeVisible();
+    await second.getByRole("button", { name: "Enter" }).click();
+    await expect(second.getByRole("button", { name: "Leave" })).toBeVisible();
+
+    await second.getByRole("button", { name: "Dubspace" }).click();
+    await expect(second.locator(".dubspace-presence")).toContainText(secondActor);
+    await expect(first.locator(".chat-feed")).toContainText(`${secondName} steps up to Dubspace.`);
+
+    await second.getByRole("button", { name: "Chat" }).click();
+    await expect(first.locator(".chat-feed")).toContainText(`${secondName} steps away from Dubspace.`);
   } finally {
     await firstContext.close();
     await secondContext.close();

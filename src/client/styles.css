@@ -728,6 +728,22 @@ input[type="range"] {
   gap: 0.55rem;
 }
 
+.dubspace-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 230px;
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.dubspace-work {
+  min-width: 0;
+}
+
+.dubspace-presence {
+  min-height: 0;
+  overflow: auto;
+}
+
 .pinboard-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 230px;
@@ -998,6 +1014,7 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .dubspace-layout,
   .pinboard-layout {
     grid-template-columns: 1fr;
     height: auto;

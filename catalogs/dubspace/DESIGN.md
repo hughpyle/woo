@@ -8,6 +8,11 @@ live sound gestures.
 Show that Woo can host a mutable, multi-user world whose primary interface is
 UI and sound, not chat.
 
+Dubspace is also a mounted thing in the chat world. In the demo seed it lives
+in the Living Room, can be matched by aliases like "dubspace" and "controls",
+and has its own focused UI. Entering that UI means the actor is at the
+controls; the mounted room observes the enter/exit activity.
+
 ## Core Requirement
 
 The demo runs inside one minimal `$space`. The `$space` does only one thing:
@@ -27,6 +32,8 @@ for fast reload. No world-level clock is required for ordering.
 - One delay.
 - One eight-step percussion loop.
 - One saved scene.
+- A mounted-room relationship to the Living Room.
+- An operator list for actors currently at the controls.
 
 ## Persistent State
 
@@ -37,6 +44,7 @@ for fast reload. No world-level clock is required for ordering.
 - Delay send, time, feedback, and wet level.
 - Percussion transport (`playing`, `started_at`), tempo, and eight-step pattern.
 - Scene name and saved control values.
+- Operators currently at the controls.
 
 ## Live Slider Previews
 
@@ -57,8 +65,9 @@ Each observation the dubspace emits has a defined payload shape. UI and agents c
 
 | Observation | Payload | When emitted |
 |---|---|---|
-| `player_joined` | `{actor: obj}` | Actor binds presence to the dubspace. |
-| `player_left` | `{actor: obj}` | Actor disconnects past the grace period or explicitly leaves. |
+| `dubspace_entered` | `{actor: obj, space: obj, text: str}` | Actor enters the dubspace UI and becomes an operator. |
+| `dubspace_left` | `{actor: obj, space: obj, text: str}` | Actor leaves the dubspace UI and stops being an operator. |
+| `dubspace_activity` | `{actor: obj, space: obj, text: str}` | Room-visible mounted-object activity, sourced from the containing room. |
 | `loop_started` | `{slot: obj, loop_id: str}` | `:start_loop` applied. |
 | `loop_stopped` | `{slot: obj}` | `:stop_loop` applied. |
 | `control_changed` | `{target: obj, name: str, value: any}` | `:set_control` applied. |
@@ -71,11 +80,11 @@ Each observation the dubspace emits has a defined payload shape. UI and agents c
 | `gesture_progress` | `{actor: obj, target: obj, name: str, value: any}` | Direct call: in-flight slider drag preview. Live-only. |
 | `cursor` | `{actor: obj, x: float, y: float}` | Direct call: pointer position. Live-only. |
 
-All observations include `type` (the table key) and `source` (the dubspace itself, unless noted otherwise). Observations from sequenced verbs (`:set_control`, `:start_loop`, etc.) become part of the resulting applied frame and are replayable. Observations from direct verbs (`:preview_control`, `:cursor`) are live-only — see [events.md §12.6](../../spec/semantics/events.md#126-observation-durability-follows-invocation-route).
+All observations include `type` (the table key) and `source` (the dubspace itself, unless noted otherwise). `dubspace_activity` is sourced from the mounted room so actors present in the room see the operator step up/away messages. Observations from sequenced verbs (`:set_control`, `:start_loop`, etc.) become part of the resulting applied frame and are replayable. Observations from direct verbs (`:enter`, `:leave`, `:preview_control`, `:cursor`) are live-only — see [events.md §12.6](../../spec/semantics/events.md#126-observation-durability-follows-invocation-route).
 
 ## Live Events
 
-- Player joined or left.
+- Operator entered or left the controls.
 - Loop started or stopped.
 - Control changed.
 - Percussion step, tempo, and transport changed.
@@ -94,8 +103,8 @@ Gesture previews go through direct calls (live-only); gesture commits that affec
 
 ## Not In This Demo
 
-- Chat interface.
-- Rooms, inventory, or spatial navigation.
+- Chat as the primary interface.
+- Inventory or spatial navigation inside the dubspace UI.
 - User-authored code.
 - Sample upload.
 - Audio recording.

@@ -1387,7 +1387,7 @@ export class WooWorld {
       sessionCounter: this.sessionCounter,
       objects: Array.from(scope.objects)
         .sort()
-        .map((id) => this.serializeScopedObject(this.object(id), scope.objects)),
+        .map((id) => this.serializeScopedObject(this.object(id), scope.objects, scope.hostedObjects)),
       sessions: [],
       logs: Array.from(this.logs.entries())
         .filter(([space]) => scope.hostedSpaces.has(space))
@@ -1473,24 +1473,26 @@ export class WooWorld {
     };
   }
 
-  private serializeScopedObject(obj: WooObject, scope: Set<ObjRef>): SerializedObject {
+  private serializeScopedObject(obj: WooObject, scope: Set<ObjRef>, hostedObjects: Set<ObjRef>): SerializedObject {
     const serialized = this.serializeObject(obj);
     serialized.children = serialized.children.filter((id) => scope.has(id));
-    serialized.contents = serialized.contents.filter((id) => scope.has(id));
+    if (!hostedObjects.has(obj.id)) serialized.contents = serialized.contents.filter((id) => scope.has(id));
     return serialized;
   }
 
-  private hostScope(host: ObjRef): { objects: Set<ObjRef>; hostedSpaces: Set<ObjRef> } {
-    const routes = this.objectRoutes().filter((route) => route.host === host);
+  private hostScope(host: ObjRef): { objects: Set<ObjRef>; hostedObjects: Set<ObjRef>; hostedSpaces: Set<ObjRef> } {
+    const allRoutes = this.objectRoutes();
+    const routeByObject = new Map(allRoutes.map((route) => [route.id, route] as const));
+    const routes = allRoutes.filter((route) => route.host === host);
     const hosted = new Set(routes.map((route) => route.id));
     const hostedSpaces = new Set<ObjRef>();
     const objects = new Set<ObjRef>();
-    const queue: Array<{ id: ObjRef; scanRefs: boolean }> = [];
+    const queue: Array<{ id: ObjRef; scanRefs: boolean; includeLineage: boolean }> = [];
 
-    const add = (id: ObjRef | null | undefined, scanRefs = true): void => {
+    const add = (id: ObjRef | null | undefined, scanRefs = true, includeLineage = true): void => {
       if (!id || !this.objects.has(id) || objects.has(id)) return;
       objects.add(id);
-      queue.push({ id, scanRefs });
+      queue.push({ id, scanRefs, includeLineage });
     };
 
     const addCatalogSupportFor = (ids: Set<ObjRef>): void => {
@@ -1511,14 +1513,19 @@ export class WooWorld {
     addCatalogSupportFor(hosted);
 
     for (let i = 0; i < queue.length; i++) {
-      const { id, scanRefs } = queue[i];
+      const { id, scanRefs, includeLineage } = queue[i];
       const obj = this.object(id);
-      add(obj.parent);
-      add(obj.owner, false);
+      if (includeLineage) {
+        add(obj.parent, scanRefs);
+        add(obj.owner, false);
+      }
       if (hosted.has(id)) {
         add(obj.anchor);
         add(obj.location);
-        for (const item of obj.contents) add(item);
+        for (const item of obj.contents) {
+          const route = routeByObject.get(item);
+          if (route && route.host !== host) add(item, false, false);
+        }
       }
       if (this.canCarryFeaturesIfKnown(id)) {
         const rawFeatures = obj.properties.get("features");
@@ -1535,7 +1542,7 @@ export class WooWorld {
       if (scanRefs) this.scanObjectRefs(obj, add);
     }
 
-    return { objects, hostedSpaces };
+    return { objects, hostedObjects: hosted, hostedSpaces };
   }
 
   private canCarryFeaturesIfKnown(objRef: ObjRef): boolean {
@@ -1907,6 +1914,18 @@ export class WooWorld {
     }
     const remaining = this.propOrNull(actor, "presence_in");
     if (this.objects.has(actor) && Array.isArray(remaining) && remaining.length > 0) this.setProp(actor, "presence_in", []);
+    this.removeActorActiveLists(actor);
+  }
+
+  private removeActorActiveLists(actor: ObjRef): void {
+    for (const obj of this.objects.values()) {
+      const raw = obj.properties.get("operators");
+      if (!Array.isArray(raw) || !raw.includes(actor)) continue;
+      this.setProp(obj.id, "operators", raw.filter((item) => item !== actor) as WooValue[]);
+    }
+    if (!this.objects.has(actor)) return;
+    const focusList = this.propOrNull(actor, "focus_list");
+    if (Array.isArray(focusList) && focusList.length > 0) this.setProp(actor, "focus_list", []);
   }
 
   private moveObject(objRef: ObjRef, targetRef: ObjRef): void {
@@ -2767,6 +2786,8 @@ export class WooWorld {
     this.nativeHandlers.set("room_go", (ctx, args) => this.roomExit(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("room_take", (ctx, args) => this.roomTake(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("room_drop", (ctx, args) => this.roomDrop(ctx, assertString(args[0] ?? "")));
+    this.nativeHandlers.set("dubspace_enter", (ctx) => this.dubspaceEnter(ctx));
+    this.nativeHandlers.set("dubspace_leave", (ctx) => this.dubspaceLeave(ctx));
     this.nativeHandlers.set("pinboard_enter", (ctx) => this.pinboardEnter(ctx));
     this.nativeHandlers.set("pinboard_leave", (ctx) => this.pinboardLeave(ctx));
     this.nativeHandlers.set("chat_command_plan", (ctx, args) => this.chatCommandPlan(ctx, assertString(args[0] ?? "")));
@@ -2984,7 +3005,7 @@ export class WooWorld {
   }
 
   private async observePinboardRoomActivity(ctx: CallContext, text: string, ts: number): Promise<void> {
-    const room = await this.pinboardMountRoom(ctx);
+    const room = await this.mountedRoomFor(ctx);
     if (!room) return;
     const observation: Observation = { type: "pinboard_activity", source: room, board: ctx.thisObj, actor: ctx.actor, text, ts };
     if (await this.remoteHostForObject(room)) {
@@ -3000,12 +3021,62 @@ export class WooWorld {
     ctx.observe(observation);
   }
 
-  private async pinboardMountRoom(ctx: CallContext): Promise<ObjRef | null> {
+  private async mountedRoomFor(ctx: CallContext): Promise<ObjRef | null> {
     const explicit = await this.propOrNullForActorAsync(ctx.progr, ctx.thisObj, "mount_room");
     if (typeof explicit === "string") return explicit;
     if (!this.objects.has(ctx.thisObj)) return null;
     const location = this.object(ctx.thisObj).location;
     return location && this.objects.has(location) && this.inheritsFrom(location, "$space") ? location : null;
+  }
+
+  private async dubspaceEnter(ctx: CallContext): Promise<WooValue> {
+    const space = ctx.thisObj;
+    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor);
+    const spaceName = await this.objectDisplayNameAsync(ctx.progr, space);
+    const ts = Date.now();
+    const operators = this.operatorList(space);
+    await this.updatePresenceChecked(ctx.actor, space, true);
+    if (!operators.includes(ctx.actor)) this.setProp(space, "operators", [...operators, ctx.actor]);
+    const text = `${actorName} steps up to ${spaceName}.`;
+    ctx.observe({ type: "dubspace_entered", source: space, actor: ctx.actor, space, text, ts });
+    await this.observeMountedRoomActivity(ctx, "dubspace_activity", "space", text, ts);
+    return this.operatorList(space);
+  }
+
+  private async dubspaceLeave(ctx: CallContext): Promise<WooValue> {
+    const space = ctx.thisObj;
+    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor);
+    const spaceName = await this.objectDisplayNameAsync(ctx.progr, space);
+    const ts = Date.now();
+    const operators = this.operatorList(space).filter((item) => item !== ctx.actor);
+    await this.updatePresenceChecked(ctx.actor, space, false);
+    this.setProp(space, "operators", operators);
+    const text = `${actorName} steps away from ${spaceName}.`;
+    ctx.observe({ type: "dubspace_left", source: space, actor: ctx.actor, space, text, ts });
+    await this.observeMountedRoomActivity(ctx, "dubspace_activity", "space", text, ts);
+    return operators;
+  }
+
+  private operatorList(space: ObjRef): ObjRef[] {
+    const raw = this.propOrNull(space, "operators");
+    return Array.isArray(raw) ? raw.filter((item): item is ObjRef => typeof item === "string") : [];
+  }
+
+  private async observeMountedRoomActivity(ctx: CallContext, type: string, refKey: string, text: string, ts: number): Promise<void> {
+    const room = await this.mountedRoomFor(ctx);
+    if (!room) return;
+    const observation: Observation = { type, source: room, actor: ctx.actor, text, ts, [refKey]: ctx.thisObj };
+    if (await this.remoteHostForObject(room)) {
+      try {
+        const subscribers = await this.getPropChecked(ctx.progr, room, "subscribers");
+        if (Array.isArray(subscribers)) {
+          (observation as Record<string, WooValue>)._audience_override = subscribers.filter((item): item is ObjRef => typeof item === "string");
+        }
+      } catch {
+        (observation as Record<string, WooValue>)._audience_override = [];
+      }
+    }
+    ctx.observe(observation);
   }
 
   private async roomExit(ctx: CallContext, rawExit: string): Promise<WooValue> {

@@ -93,6 +93,7 @@ export function bootstrap(world: WooWorld, options: BootstrapOptions = {}): WooW
 const DYNAMIC_HOST_SEED_PROPERTIES = new Set([
   "next_seq",
   "subscribers",
+  "operators",
   "last_snapshot_seq",
   "presence_in",
   "session_id",
