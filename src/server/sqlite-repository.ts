@@ -676,7 +676,8 @@ function verbFromRow(row: Row): VerbDef {
     version: Number(row.version),
     line_map: parseValue(row.line_map) as Record<string, WooValue>,
     direct_callable: flags.direct_callable === true ? true : undefined,
-    skip_presence_check: flags.skip_presence_check === true ? true : undefined
+    skip_presence_check: flags.skip_presence_check === true ? true : undefined,
+    tool_exposed: flags.tool_exposed === true ? true : undefined
   };
   if (row.kind === "native") return { ...base, kind: "native", native: row.native };
   return { ...base, kind: "bytecode", bytecode: parseValue(row.bytecode) as any };
@@ -686,6 +687,7 @@ function verbFlagsJson(verb: VerbDef): string {
   const flags: Record<string, true> = {};
   if (verb.direct_callable === true) flags.direct_callable = true;
   if (verb.skip_presence_check === true) flags.skip_presence_check = true;
+  if (verb.tool_exposed === true) flags.tool_exposed = true;
   return JSON.stringify(flags);
 }
 

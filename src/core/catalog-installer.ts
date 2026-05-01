@@ -222,9 +222,15 @@ function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner
         ...existing,
         perms: parsedPerms.perms,
         direct_callable: parsedPerms.directCallable,
-        skip_presence_check: existing.skip_presence_check || def.skip_presence_check === true
+        skip_presence_check: existing.skip_presence_check || def.skip_presence_check === true,
+        tool_exposed: existing.tool_exposed || def.tool_exposed === true
       };
-      if (next.perms !== existing.perms || next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
+      if (
+        next.perms !== existing.perms ||
+        next.direct_callable !== existing.direct_callable ||
+        next.skip_presence_check !== existing.skip_presence_check ||
+        next.tool_exposed !== existing.tool_exposed
+      ) world.addVerb(obj, next);
       return;
     }
     const repaired = compileCatalogVerbDef(obj, def, owner, existing.version + 1, allowImplementationHints);
@@ -238,6 +244,7 @@ function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner
       JSON.stringify(existing.arg_spec ?? {}) !== JSON.stringify(repaired.arg_spec ?? {}) ||
       existing.direct_callable !== repaired.direct_callable ||
       existing.skip_presence_check !== repaired.skip_presence_check ||
+      existing.tool_exposed !== repaired.tool_exposed ||
       Object.keys(existing.line_map ?? {}).length === 0;
     if (changed) world.addVerb(obj, repaired);
     return;
@@ -259,7 +266,8 @@ function compileCatalogVerbDef(obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, 
     version,
     line_map: {},
     direct_callable: parsedPerms.directCallable,
-    skip_presence_check: def.skip_presence_check === true
+    skip_presence_check: def.skip_presence_check === true,
+    tool_exposed: def.tool_exposed === true
   };
 
   if (allowImplementationHints && def.implementation?.kind === "native") {
@@ -296,7 +304,8 @@ function compileCatalogVerb(obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, ver
     bytecode: { ...compiled.bytecode, version },
     line_map: compiled.line_map ?? {},
     direct_callable: parsedPerms.directCallable,
-    skip_presence_check: def.skip_presence_check === true
+    skip_presence_check: def.skip_presence_check === true,
+    tool_exposed: def.tool_exposed === true
   };
 }
 

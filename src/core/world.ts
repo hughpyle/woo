@@ -533,6 +533,7 @@ export class WooWorld {
       arg_spec: verb.arg_spec,
       version: verb.version,
       direct_callable: verb.direct_callable === true,
+      tool_exposed: verb.tool_exposed === true,
       readable: verb.perms.includes("r")
     };
     if (verb.perms.includes("r")) {

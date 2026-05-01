@@ -19,14 +19,14 @@ agent ──(MCP)──► woo MCP gateway ──(internal)──► gateway DO 
 One MCP connection binds to one woo session, which binds to one actor. The session is established the same way a REST or WS session is ([../identity/auth.md](../identity/auth.md)): the agent presents a token (`bearer:<...>`, `apikey:<...>`, or — for development — `wizard:<bootstrap-token>`), the gateway resolves it to a session and an actor, and that pair is the trust boundary for the duration of the connection.
 
 - One actor per connection. Multi-actor multiplexing is not in v1-ops.
-- The actor's `progr` is the permission identity for every tool call. MCP does not elevate authority; an agent connected as `$guest_42` can do exactly what a browser-attached `$guest_42` can do.
-- Disconnect drops the connection. Whether the session survives follows the standard session-grace rule from [identity.md §I3](../semantics/identity.md#i3-session-lifecycle).
+- The connection's **caller authority** is the actor's identity. Inside the VM, a verb's `progr` ([../semantics/permissions.md](../semantics/permissions.md)) is the verb owner — set at compile time and carried in every frame. The MCP gateway does not invent `progr`; it dispatches calls under the actor's identity, and verb dispatch then derives `progr` from the verb being called per the standard rule. MCP does not elevate authority; an agent connected as `$guest_42` can do exactly what a browser-attached `$guest_42` can do.
+- Disconnect drops the connection. Whether the session survives follows the standard session-grace rule from [identity.md §I6](../semantics/identity.md#i6-disconnect-and-reap-lifecycle).
 
 ---
 
 ## M2. Tool surface
 
-**There is no universal tool layer.** Every tool the agent sees is a verb on some object in its reachable scope. Common-feeling tools (`command`, `plan`, `look`, `wait`, `describe`) feel common because they come from common ancestors — `$space`, `$conversational`, `$actor` — and those ancestors are in scope from any catalog. New ancestors (a `$dubspace` the actor enters, a `$cockatoo` in the room) bring new verb-tools as their classes define them. The protocol does not curate a baseline; the world's class hierarchy does.
+**There is no universal tool layer.** Every tool the agent sees is a verb on some object in its reachable scope. Common-feeling tools (`command`, `look`, `say`, `wait`, `describe`) feel common because they come from common ancestors — `$space`, `$conversational`, `$actor` — and those ancestors are in scope from any catalog. New ancestors (a `$dubspace` the actor enters, a `$cockatoo` in the room) bring new verb-tools as their classes define them. The protocol does not curate a baseline; the world's class hierarchy does.
 
 This means the MCP gateway is, mechanically, a thin shell around verb dispatch: enumerate reachable objects, filter their verbs, hand the list to the client.
 
@@ -34,46 +34,74 @@ This means the MCP gateway is, mechanically, a thin shell around verb dispatch: 
 
 For each object reachable from the actor (§M3), the gateway enumerates that object's verbs and exposes a tool for each verb satisfying **all** of:
 
-- `direct_callable: true` ([../semantics/space.md](../semantics/space.md))
-- `tool_exposed: true` (the per-verb opt-in flag — verbs without this are still callable via the room's parser if a parser verb routes there, but they don't get a dedicated tool)
-- The actor passes `assertCanExecuteVerb` against the verb's perms ([../semantics/permissions.md](../semantics/permissions.md))
+- `tool_exposed: true` — the per-verb opt-in flag declaring "this verb is suitable as an agent affordance." A required runtime field on every verb (default `false`); it must round-trip through catalog install, persistent storage, and `verbInfo()`. Verbs without it are still callable via the room's parser if a parser verb routes there, but they don't get a dedicated tool.
+- The actor passes `assertCanExecuteVerb` against the verb's perms ([../semantics/permissions.md](../semantics/permissions.md)).
 
 The tool's shape:
 
 | MCP field | Source |
 |---|---|
-| `name` | `<object_handle>__<verb_name>` — see §M2.3 |
+| `name` | Server-assigned; unique within the current tool list. See §M2.4. |
 | `description` | The verb's docstring (first paragraph of `source` block comment, or empty). Followed by the canonical call form `<object>:<verb>(args)` and the alias list. |
 | `inputSchema` | JSON Schema generated from the verb's `arg_spec`. Optional args become optional schema properties. Type hints from `arg_spec.types` map to JSON Schema types when available; otherwise `unknown`. |
 
-The tool's behavior is: invoke the verb as a **direct call** with the actor's authority. Returns `{ result, observations }`. Errors map per §M6.
+### M2.2 Invocation route — direct vs sequenced
 
-### M2.2 Common verbs ride on common ancestors
+**Tools are not direct-only.** The gateway picks the invocation route per call from the verb's metadata:
 
-The "always-there" feeling of certain tools comes entirely from class inheritance:
+- If `verb.direct_callable === true`: the gateway invokes the verb as a **direct call** under the actor's authority. Live observations (per [events.md §12.6](../semantics/events.md#126-observation-durability-follows-invocation-route)) are returned in the result; no log row is written. Dubspace `set_control`, chat `say`/`look`, room `take`/`drop` are direct.
+- If `verb.direct_callable !== true` (the verb is `tool_exposed` but mutating-through-a-log): the gateway invokes the verb as a **sequenced call** through the verb's enclosing space. The log entry's `applied` frame becomes the tool result. Taskspace `create_task`, `claim`, `set_status` are sequenced.
 
-| Tool the agent sees | Where it actually lives |
-|---|---|
-| `command(text)`, `command_plan(text)` | On the actor's current `$space` or attached `$conversational` feature. Every chatroom inherits these; agents in non-conversational spaces (e.g. dubspace) won't see `command` unless that space's catalog defines it. |
-| `look()`, `who()`, `say(text)` | Same — `$conversational` feature verbs. They show up wherever that feature is attached. |
-| `describe()` | On the actor itself (and on every reachable object) by virtue of `$root_object`. Always available because the actor is always in scope. |
-| `wait(timeout_ms?, limit?)` | On `$actor` (§M4). Always available for the same reason. |
-| `enter(target)`, `go(exit)`, `take(item)`, `drop(item)` | On `$chatroom` or whichever room class defines them. Available when the actor is *in* such a room. |
-| `set_control`, `save_scene`, `recall_scene` | On `$dubspace`. Available when the actor has presence in a dubspace. |
-| `create_task`, `claim`, `set_status` | On `$taskspace` or `$task`. Available when the actor has presence in a taskspace, plus per-task verbs become available as the agent reads them into scope (e.g., focuses on a specific task). |
+The "enclosing space" is resolved by the runtime at dispatch time: the nearest ancestor of the verb's target that is `$space`-descended. For target `the_taskspace`, that's `the_taskspace` itself; for a task `t-7` whose anchor resolves to `the_taskspace`, that's `the_taskspace`. If no enclosing space is found, the tool errors with `E_INVARG` rather than silently routing direct.
+
+**Common verbs by class hierarchy.** The "always-there" feeling of certain tools comes entirely from inheritance:
+
+| Tool the agent sees | Where it lives | Route |
+|---|---|---|
+| `command(text)`, `command_plan(text)` | `$space` / `$conversational` | direct |
+| `look()`, `who()`, `say(text)` | `$conversational` | direct |
+| `describe()` | `$root_object` | direct |
+| `wait(timeout_ms?, limit?)` | `$actor` (§M4) | direct |
+| `enter(target)`, `go(exit)`, `take(item)`, `drop(item)` | `$chatroom` | direct |
+| `set_control`, `save_scene`, `recall_scene` | `$dubspace` | direct |
+| `create_task`, `claim`, `set_status`, `add_subtask` | `$taskspace` / `$task` | **sequenced** |
 
 The gateway does not construct any of these; it reads the verb tables.
 
-### M2.3 Tool naming
+### M2.3 Result shape
 
-Tool names use the form `<object_handle>__<verb_name>`:
+Tool results map to the standard MCP `tools/call` response:
 
-- `object_handle` is the object's ULID for `#`-objects, or the corename without the `$` sigil for corename objects (`cockatoo__squawk`), or the local id for catalog-installed instances (`the_chatroom__say`, `the_lamp__take`).
-- `verb_name` is the verb name verbatim (verbs cannot contain `__` by convention).
+```
+{
+  "content": [{ "type": "text", "text": "<one-line summary>" }],
+  "structuredContent": {
+    "result": <verb return value>,
+    "observations": [<observation>, ...],
+    "applied": { "space": <obj>, "seq": <int>, "ts": <ms> }    // sequenced only
+  },
+  "isError": false
+}
+```
 
-The canonical `<object>:<verb>` form (with sigils) is in the tool's `description`, so the agent always has the full handle for parser-mediated calls. Clients with stricter naming rules may sanitize further; the canonical handle in the description is authoritative.
+- `content` is a human-readable summary the client may display directly. Default summary is the rendered `text` field of the first observation, or a stringified form of `result`.
+- `structuredContent` carries the machine-readable payload. `result` is the verb return; `observations` is the verb's emit list (filtered for the actor by §M5 audience rules); `applied` is present for sequenced calls and gives the seq/ts the caller can use for replay or gap recovery.
+- `isError: true` for tool failures — see §M6.
 
-### M2.4 Aliases
+The agent that prefers structure reads `structuredContent`; the agent that prefers prose reads `content`. Both are always present.
+
+### M2.4 Tool naming and collisions
+
+Tool names are server-assigned and **must be unique within the current tool list**. The recommended encoding is `<sanitized_object_id>__<verb_name>` where:
+
+- `sanitized_object_id` is the object's id with `$` stripped from corenames (`cockatoo` for `$cockatoo`), unchanged for `the_*` ids, and ULIDs collapsed to their canonical 26-char base32 form.
+- `verb_name` is the verb name verbatim.
+
+When two reachable objects sanitize to the same name (e.g. a corename `$lamp` and a runtime instance also called `lamp` in scope), the server resolves with a numeric suffix (`lamp__take`, `lamp_2__take`) and emits stable suffixes within a session. Servers that want different encodings are free to choose — the canonical contract is that names are unique and stable for the life of the tool list.
+
+The canonical `<object>:<verb>` form (with sigils) is in the tool's `description`, so the agent always has the full handle for parser-mediated calls.
+
+### M2.5 Aliases
 
 A verb's `aliases` list ([../semantics/space.md](../semantics/space.md)) is **not** rendered as separate tools — that would explode the tool list with duplicates. Aliases are documented in the tool description so agents that want to use them via the room's parser know what's available.
 
@@ -83,16 +111,33 @@ A verb's `aliases` list ([../semantics/space.md](../semantics/space.md)) is **no
 
 The dynamic tool set at any moment is computed against the actor's **reachable scope**, the union of:
 
-1. **Self.** The actor object — for actor-owned verbs (`@quit`, `@home`, `wait`, etc.).
+1. **Self.** The actor object — for actor-owned verbs (`@quit`, `@home`, `wait`, `focus`, etc.).
 2. **Current location.** `actor.location` and the verbs defined on it. In a chat room, this is where `:say`/`:look`/`:enter` come from.
 3. **Location contents.** Objects in `actor.location.contents` for which the actor has read access. In `the_chatroom` this surfaces `the_cockatoo:squawk`, `the_lamp:take`, etc.
 4. **Inventory.** Objects in `actor.contents`. After `take lamp`, the lamp's verbs follow the actor between rooms.
 5. **Presence spaces.** Spaces the actor is subscribed to via `actor.presence_in`. This is how `the_dubspace` and `the_taskspace` show up in the tool list when the actor is "in" them — even when the actor is *physically* located in a chatroom that frames them. Presence is the woo notion of "I'm in this space" and it's what governs the tool list more than physical location does.
-6. **Universal corenames.** A small fixed set: `$wiz` (read-only `:describe`), `$system` (read-only `:describe`). Excluded by default unless the actor is wizard.
+6. **Working set.** Objects the actor has explicitly added to its scope via `$actor:focus(target)` (§M3.1). This is how task refs returned from `the_taskspace:list_tasks()` become callable: the agent calls `focus(t-7)` and `t-7`'s verbs (`claim`, `set_status`, `add_subtask`) join the tool list. Bounded; capped per implementation policy (default 32 entries).
+7. **Catalog-visible singletons.** Objects the catalog registry advertises as visible to this actor's class/role (per [discovery/catalogs.md](../discovery/catalogs.md)). v1-ops typically surfaces nothing here for ordinary actors; wizard actors get whatever wizard-discoverable singletons the catalog declares. There is no hardcoded list of "universal corenames" in the protocol — visibility is data-driven from the catalog registry, not from the MCP spec.
 
 The reachability set is recomputed after every tool call. If it differs from the previous set, the gateway sends `notifications/tools/list_changed`. Clients that tolerate stale tool lists for one turn can ignore the notification; clients that don't should re-list before their next decision.
 
-Containment cycles and re-entrant rooms (a room as the contents of another room — see the chat catalog's hot tub) are walked once; the algorithm is a BFS bounded by the reachability set's natural boundary (objects not in any of the six categories above).
+Containment cycles and re-entrant rooms (a room as the contents of another room — see the chat catalog's hot tub) are walked once; the algorithm is a BFS bounded by the reachability set's natural boundary (objects not in any of the seven categories above).
+
+### M3.1 Working set: `$actor:focus`
+
+The working-set primitive lives on `$actor` (so it's always reachable via §M3.1):
+
+```
+$actor:focus(target: obj) -> { focus_list: [obj, ...] }
+$actor:unfocus(target: obj) -> { focus_list: [obj, ...] }
+$actor:focus_list() -> [obj, ...]
+```
+
+`focus(t)` adds `t` to the actor's `focus_list` property if the actor passes basic visibility checks (the target exists and the actor can `:describe` it). `unfocus(t)` removes. `focus_list()` reads. The list is capped server-side; on overflow, oldest entry is evicted.
+
+The list persists with the actor across connections (it's a property on the actor object). Reconnect retains scope. `focus_list` is also visible via `actor:describe()` for agents that want to introspect their own context.
+
+This is the explicit primitive the spec promises in §M2.2 — when an agent calls `the_taskspace:list_tasks()` and gets back ten task refs, it focuses the ones it cares about and their per-task verbs join the tool list. Tools alone do not implicitly grow the scope.
 
 ---
 
@@ -100,7 +145,7 @@ Containment cycles and re-entrant rooms (a room as the contents of another room 
 
 External events (other actors moving, the cockatoo squawking on a fork, applied frames in subscribed spaces) reach the agent the same way they reach a browser — except agents act in turns, so push doesn't apply. The agent pulls.
 
-`wait` is a verb on `$actor`. Because the actor is always in reachable scope (§M3.1), the tool is always available. Its shape:
+`wait` is a verb on `$actor`, defined in core bootstrap so every actor inherits it. Because the actor is always in reachable scope (§M3.1), the tool is always available. Its shape:
 
 ```
 $actor:wait(timeout_ms?: int, limit?: int)
@@ -118,24 +163,38 @@ $actor:wait(timeout_ms?: int, limit?: int)
 - `more`: `true` if the queue has additional observations waiting after this batch. The agent calls `wait` again (with `timeout_ms: 0`) to drain the next batch.
 - `queue_depth`: number of observations remaining after this batch — informational, useful for the agent to size its next call.
 
-### M4.1 The queue
+The verb is defined on `$actor` with a native handler (`actor_wait`) that consults the per-actor queue maintained by the host. The bytecode form is a stub that raises `E_UNSUPPORTED` so editing it via the IDE doesn't accidentally clobber the host primitive.
 
-The MCP gateway maintains a per-actor FIFO observation queue, populated by the same fan-out path that pushes `op:applied` and `op:event` to attached WebSockets ([wire.md §17.3](wire.md#173-server--client)).
+### M4.1 The queue: session-scoped
 
-- Bounded server-side at an implementation hard cap (default 4096). On overflow, the gateway inserts a single `{type: "observation_overflow", lost: N, since: <ts>}` marker in front of the queue and resumes appending. The agent treats this as a gap and may follow up with the appropriate space's `:replay(from, limit)` for true gap recovery on sequenced spaces.
-- Persists for the connection lifetime. On reconnect, the agent resumes by calling `wait`.
+The observation queue is **session-scoped**, not connection-scoped. It survives:
+
+- Connection drops within the session-grace window (per [identity.md §I6](../semantics/identity.md#i6-disconnect-and-reap-lifecycle)).
+- Reconnects: the agent reauthenticates with the same session token and resumes draining where it left off.
+
+The queue is reaped when:
+
+- The session expires (token TTL or explicit logout).
+- The session is killed by an operator.
+- The implementation's hard cap is exceeded for a session that has not drained in a long time (see overflow below).
+
+Queue retention is bounded by both depth (default cap 4096 observations) and age (default TTL 1 hour per observation; older entries are evicted). The agent that wants stronger durability uses sequenced gap recovery via the affected space's `:replay` — live observations are explicitly best-effort ([events.md §12.6](../semantics/events.md#126-observation-durability-follows-invocation-route)).
 
 ### M4.2 What goes in the queue
 
 The queue receives:
 
 - **Applied frames** for spaces the actor has presence in — same fan-out as WS subscribers.
-- **Direct events** addressed to the actor (`tell`, `told`, etc.).
-- **Self-observations** the actor's own calls emit are returned in the **call's own response**, not queued. (The verb's body emits to `ctx.observations`; that array travels with the result.)
+- **Direct events** addressed to the actor per the audience model ([events.md §12.7](../semantics/events.md#127-observation-audience-and-direct-message-routing)): `told`, `looked` to the actor, etc.
+- **Self-observations** the actor's own calls emit are returned in the **call's own response**, not queued. The verb's body emits to `ctx.observations`; that array travels with the result.
 
 This means the agent never sees its own actions twice (once in the call result, again in `wait`). It only sees external events via `wait`.
 
-### M4.3 Drain discipline
+### M4.3 Overflow
+
+If the queue exceeds its hard cap, the gateway inserts a single `{type: "observation_overflow", lost: N, since: <ts>}` observation in front of the queue and resumes appending. The agent treats this as a gap and may follow up with the appropriate space's `:replay(from, limit)` for true recovery on sequenced spaces. Live observations dropped to overflow are unrecoverable (consistent with [events.md §12.6](../semantics/events.md#126-observation-durability-follows-invocation-route) "live is best-effort").
+
+### M4.4 Drain discipline
 
 The agent decides when to drain:
 
@@ -149,10 +208,10 @@ There is no implicit drain on other tool calls. Every observation the agent sees
 
 ## M5. Trust and permissions
 
-The MCP gateway is part of the woo deployment. Same-deployment trust ([../protocol/hosts.md §3.3](hosts.md#33-trust-model-across-hosts)) applies: the gateway has been authenticated to the cluster and forwards calls under the actor's `progr`.
+The MCP gateway is part of the woo deployment. Same-deployment trust ([../protocol/hosts.md §3.3](hosts.md#33-trust-model-across-hosts)) applies: the gateway has been authenticated to the cluster and forwards calls under the actor's identity.
 
 - **Authentication.** Token-based, identical to wire and REST. v1-ops typically uses `apikey:<...>` for long-lived agents and `bearer:<...>` for short-lived OAuth flows.
-- **Authorization.** Per-tool: `assertCanExecuteVerb(actor.progr, target, verb)` runs on every tool invocation. Failure is `E_PERM` per §M6.
+- **Authorization.** Per-tool: `assertCanExecuteVerb(actor, target, verb)` runs on every tool invocation. Failure is `E_PERM` per §M6.
 - **`tool_exposed` is an opt-in, not authority.** A verb with `tool_exposed: true` is *advertised* to MCP; the actual call still goes through verb-x perms. A verb with `tool_exposed: false` is hidden from the tool list but reachable via the room's parser if a parser verb (e.g. `:command_plan`) routes there — same as a human typing the command. The flag is a discoverability filter, not a permission.
 
 Wizard-only tools (e.g., `set_verb_code`) are exposed to MCP only when the actor is wizard. There is no separate "wizard MCP namespace"; wizard verbs simply pass the same perm check that runs everywhere else.
@@ -163,8 +222,9 @@ Wizard-only tools (e.g., `set_verb_code`) are exposed to MCP only when the actor
 
 woo's failure model ([../semantics/failures.md](../semantics/failures.md)) is preserved on the MCP wire:
 
-- A tool that raises a woo error returns an MCP `isError: true` content block whose JSON body is `{ code, message, value, trace }` — the same shape as the WS `op:error` frame.
+- A tool that raises a woo error returns `isError: true` with `content: [{type: "text", text: "<error code>: <message>"}]` and `structuredContent: { error: { code, message, value, trace } }` — the same error shape as the WS `op:error` frame.
 - Common codes the agent should expect: `E_PERM` (verb-x denied), `E_INVARG` (bad args), `E_VERBNF` (verb gone — the world changed mid-turn), `E_OBJNF` (object recycled), `E_QUOTA`, `E_TIMEOUT`.
+- For sequenced calls that succeed-with-behavior-failure ([events.md §12.6](../semantics/events.md#126-observation-durability-follows-invocation-route)), the response is **not** `isError: true`. The applied frame committed at a real seq; `structuredContent.applied` carries the seq, and `structuredContent.observations` includes the `$error` observation. The tool succeeded; the verb body failed.
 - Routing/transport errors (gateway unreachable, session expired) use MCP's standard error envelope with woo codes in `data` (`E_NOSESSION`, `E_GATEWAY`).
 
 The agent's robustness contract: any tool may fail, including tools the agent saw seconds ago. The world is live; objects can be recycled and verbs rewritten between turns. The `tools/list_changed` notification is best-effort; the agent should treat `E_VERBNF` from a tool call as "re-list and try again" rather than as a fatal error.
@@ -182,18 +242,18 @@ client → server: notifications/initialized
 client → server: tools/list
 client ← server: tools/list result (verbs reachable from current location)
 client → server: tools/call { name: "the_chatroom__say", arguments: { text: "hi" } }
-client ← server: tools/call result { content: [...] }
+client ← server: tools/call result { content, structuredContent }
 
-(when actor moves)
+(when actor moves or working set changes)
 client ← server: notifications/tools/list_changed
 client → server: tools/list (refresh)
 
 (idle listening)
 client → server: tools/call { name: "actor__wait", arguments: { timeout_ms: 10000 } }
-client ← server: tools/call result { observations: [...], more: false, queue_depth: 0 }
+client ← server: tools/call result { structuredContent: { result: { observations, more, queue_depth } } }
 ```
 
-Disconnect: the MCP transport closes; the woo session may persist per session-grace rules. Reconnect re-authenticates and re-reads tool list, then drains `wait` to resync.
+Disconnect: the MCP transport closes; the woo session may persist per session-grace rules ([identity.md §I6](../semantics/identity.md#i6-disconnect-and-reap-lifecycle)). Reconnect re-authenticates with the same token, refreshes `tools/list`, and drains `wait` to resync — the queue is session-scoped (§M4.1), so observations enqueued during the disconnect window are still there on reconnect within the grace period.
 
 ---
 

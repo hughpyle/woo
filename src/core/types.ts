@@ -102,6 +102,7 @@ export type VerbDef =
       line_map: Record<string, WooValue>;
       direct_callable?: boolean;
       skip_presence_check?: boolean;
+      tool_exposed?: boolean;
     }
   | {
       kind: "native";
@@ -117,6 +118,7 @@ export type VerbDef =
       native: string;
       direct_callable?: boolean;
       skip_presence_check?: boolean;
+      tool_exposed?: boolean;
     };
 
 export type PropertyDef = {
