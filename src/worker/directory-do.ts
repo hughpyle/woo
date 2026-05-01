@@ -1,4 +1,5 @@
-import type { ObjRef, Session } from "../core/types";
+import { wooError, type ObjRef, type Session } from "../core/types";
+import { verifyInternalRequest, type InternalAuthEnv } from "./internal-auth";
 
 type ObjectRoute = {
   id: ObjRef;
@@ -16,18 +17,23 @@ type SessionRoute = {
 };
 
 const WORLD_HOST = "world";
+const MAX_JSON_BODY_BYTES = 1 * 1024 * 1024;
 
 export class DirectoryDO {
   private state: DurableObjectState;
+  private env: InternalAuthEnv;
 
-  constructor(state: DurableObjectState) {
+  constructor(state: DurableObjectState, env: InternalAuthEnv) {
     this.state = state;
+    this.env = env;
   }
 
   async fetch(request: Request): Promise<Response> {
     this.ensureSchema();
     const url = new URL(request.url);
     try {
+      await verifyInternalRequest(this.env, request);
+
       if (request.method === "GET" && url.pathname === "/healthz") {
         return json({ ok: true, routes: this.countRows("object_route"), sessions: this.countRows("session_route") });
       }
@@ -188,9 +194,18 @@ function json(body: unknown, status = 200): Response {
 
 async function readJson(request: Request): Promise<Record<string, unknown>> {
   try {
-    const parsed = await request.json();
+    const parsed = JSON.parse(new TextDecoder().decode(await readLimitedBody(request)));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-  } catch {
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err) throw err;
     return {};
   }
+}
+
+async function readLimitedBody(request: Request): Promise<ArrayBuffer> {
+  const declared = Number(request.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declared) && declared > MAX_JSON_BODY_BYTES) throw wooError("E_RATE", `request body exceeds ${MAX_JSON_BODY_BYTES} bytes`);
+  const body = await request.arrayBuffer();
+  if (body.byteLength > MAX_JSON_BODY_BYTES) throw wooError("E_RATE", `request body exceeds ${MAX_JSON_BODY_BYTES} bytes`);
+  return body;
 }

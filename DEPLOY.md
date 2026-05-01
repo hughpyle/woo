@@ -17,8 +17,9 @@ npm install
 # 2. Authenticate with Cloudflare
 npx wrangler login
 
-# 3. Set the required bootstrap secret (see "Required configuration" below)
+# 3. Set the required secrets (see "Required configuration" below)
 npx wrangler secret put WOO_INITIAL_WIZARD_TOKEN
+npx wrangler secret put WOO_INTERNAL_SECRET
 
 # 4. Deploy (runs preflight, build, deploy, postflight checks)
 npm run deploy
@@ -49,7 +50,7 @@ If you skip Workers Paid, the deploy succeeds but every request returns `503 E_D
 
 ## Required configuration
 
-One secret is required via `wrangler secret put` (never the `[vars]` block in `wrangler.toml`):
+Two secrets are required via `wrangler secret put` (never the `[vars]` block in `wrangler.toml`):
 
 ### `WOO_INITIAL_WIZARD_TOKEN`
 
@@ -67,6 +68,17 @@ npx wrangler secret put WOO_INITIAL_WIZARD_TOKEN
 ```
 
 The token is **single-use**. Once consumed, subsequent presentations return `401 E_TOKEN_CONSUMED`. To rotate the bootstrap token after first use (e.g., for disaster recovery), call `wiz:rotate_bootstrap_token(new_token)` once you have wizard authority.
+
+### `WOO_INTERNAL_SECRET`
+
+A random string used to sign gateway, Directory, and cluster-host internal requests. Generate and set it the same way:
+
+```sh
+openssl rand -hex 32
+npx wrangler secret put WOO_INTERNAL_SECRET
+```
+
+Unsigned or tampered internal requests are rejected before forwarded actor, session, or `progr` fields are trusted.
 
 ### Future deterministic ID seed
 
@@ -178,7 +190,7 @@ If your fork diverges from upstream's migration history, you cannot cleanly merg
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `503 E_BOOTSTRAP_TOKEN_MISSING` | `WOO_INITIAL_WIZARD_TOKEN` not set | `wrangler secret put WOO_INITIAL_WIZARD_TOKEN` |
+| `503 E_BOOTSTRAP_TOKEN_MISSING` | `WOO_INITIAL_WIZARD_TOKEN` or `WOO_INTERNAL_SECRET` not set | `wrangler secret put WOO_INITIAL_WIZARD_TOKEN`; `wrangler secret put WOO_INTERNAL_SECRET` |
 | `503 E_DO_UNAVAILABLE` | Account on Workers Free | Upgrade to Workers Paid |
 | `401 E_TOKEN_CONSUMED` on first auth | The bootstrap token was already used | Use the `Authorization: Session <id>` from the original response, or call `wiz:rotate_bootstrap_token` if you have wizard via another path |
 | Worker deploys but requests time out | DO migration mismatch with prior deploy | Check `wrangler tail` for migration errors; reconcile with the upstream migration history |

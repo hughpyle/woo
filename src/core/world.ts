@@ -82,6 +82,9 @@ export type HostBridge = {
   hostForObject(id: ObjRef): string | null | Promise<string | null>;
   getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue>;
   dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue>;
+  moveObject(objRef: ObjRef, targetRef: ObjRef): Promise<void>;
+  mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void>;
+  contents(objRef: ObjRef): Promise<ObjRef[]>;
 };
 
 export type WorldSnapshot = {
@@ -782,6 +785,7 @@ export class WooWorld {
       let mutated = false;
       await this.withPersistencePaused(async () => {
         const before = this.snapshotProps();
+        const beforePlacement = this.snapshotPlacement();
         const beforeParkedTasks = new Map(this.parkedTasks);
         const beforeParkedTaskCounter = this.parkedTaskCounter;
         const beforeObjectCount = this.objects.size;
@@ -808,16 +812,18 @@ export class WooWorld {
           mutated =
             beforeObjectCount !== this.objects.size ||
             this.propsChanged(before) ||
+            this.placementChanged(beforePlacement) ||
             beforeParkedTasks.size !== this.parkedTasks.size ||
             beforeParkedTaskCounter !== this.parkedTaskCounter;
         } catch (err) {
           this.restoreProps(before);
+          this.restorePlacement(beforePlacement);
           this.parkedTasks = new Map(beforeParkedTasks);
           this.parkedTaskCounter = beforeParkedTaskCounter;
           throw err;
         }
       });
-      if (mutated) this.persist(true);
+      if (mutated || this.persistenceDirty) this.persist(true);
       const liveAudiences = this.directLiveAudiences(audience, observations);
       return {
         op: "result",
@@ -1133,6 +1139,42 @@ export class WooWorld {
     this.assertCanAuthorObject(actor, objRef);
     this.object(targetRef);
     this.moveObject(objRef, targetRef);
+  }
+
+  async moveAuthoredObjectChecked(actor: ObjRef, objRef: ObjRef, targetRef: ObjRef): Promise<void> {
+    this.assertCanAuthorObject(actor, objRef);
+    if (!await this.remoteHostForObject(targetRef)) this.object(targetRef);
+    await this.moveObjectChecked(objRef, targetRef);
+  }
+
+  async moveObjectChecked(objRef: ObjRef, targetRef: ObjRef): Promise<void> {
+    if (await this.remoteHostForObject(objRef)) {
+      if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      await this.hostBridge.moveObject(objRef, targetRef);
+      return;
+    }
+    await this.moveObjectOwned(objRef, targetRef);
+  }
+
+  contentsOf(objRef: ObjRef): ObjRef[] {
+    return Array.from(this.object(objRef).contents);
+  }
+
+  /**
+   * Update a container's contents mirror only.
+   *
+   * This is not the source-of-truth move operation: the moved object's owning
+   * host must update `obj.location` through moveObjectOwned/moveObjectChecked.
+   * Remote hosts call this to keep room/player contents caches coherent after
+   * the owner-location write has already happened elsewhere.
+   */
+  mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): void {
+    const container = this.object(containerRef);
+    if (present) container.contents.add(objRef);
+    else container.contents.delete(objRef);
+    container.modified = Date.now();
+    this.persistObject(containerRef);
+    this.persist();
   }
 
   chparentAuthoredObject(actor: ObjRef, objRef: ObjRef, parentRef: ObjRef): void {
@@ -1823,6 +1865,28 @@ export class WooWorld {
     this.persistObject(targetRef);
   }
 
+  private async moveObjectOwned(objRef: ObjRef, targetRef: ObjRef): Promise<void> {
+    const obj = this.object(objRef);
+    const targetRemote = await this.remoteHostForObject(targetRef);
+    if (!targetRemote) this.object(targetRef);
+    const oldLocation = obj.location;
+    obj.location = targetRef;
+    obj.modified = Date.now();
+    this.persistObject(objRef);
+    if (oldLocation && oldLocation !== targetRef) await this.mirrorContainerContents(oldLocation, objRef, false);
+    await this.mirrorContainerContents(targetRef, objRef, true);
+  }
+
+  private async mirrorContainerContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void> {
+    const remote = await this.remoteHostForObject(containerRef);
+    if (remote) {
+      if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      await this.hostBridge.mirrorContents(containerRef, objRef, present);
+      return;
+    }
+    if (this.objects.has(containerRef)) this.mirrorContents(containerRef, objRef, present);
+  }
+
   private returnGuest(actor: ObjRef): void {
     if (!this.inheritsFrom(actor, "$guest")) return;
     if (Array.from(this.sessions.values()).some((session) => session.actor === actor)) return;
@@ -2403,6 +2467,30 @@ export class WooWorld {
     return false;
   }
 
+  private snapshotPlacement(): Map<ObjRef, { location: ObjRef | null; contents: ObjRef[] }> {
+    return new Map(Array.from(this.objects.entries()).map(([id, obj]) => [id, { location: obj.location, contents: Array.from(obj.contents).sort() }]));
+  }
+
+  private restorePlacement(snapshot: Map<ObjRef, { location: ObjRef | null; contents: ObjRef[] }>): void {
+    for (const [id, placement] of snapshot) {
+      const obj = this.objects.get(id);
+      if (!obj) continue;
+      obj.location = placement.location;
+      obj.contents = new Set(placement.contents);
+    }
+  }
+
+  private placementChanged(snapshot: Map<ObjRef, { location: ObjRef | null; contents: ObjRef[] }>): boolean {
+    for (const [id, placement] of snapshot) {
+      const obj = this.objects.get(id);
+      if (!obj || obj.location !== placement.location) return true;
+      const contents = Array.from(obj.contents).sort();
+      if (contents.length !== placement.contents.length) return true;
+      for (let i = 0; i < contents.length; i++) if (contents[i] !== placement.contents[i]) return true;
+    }
+    return false;
+  }
+
   private withBehaviorSavepoint<T>(fn: () => Promise<T>): Promise<T>;
   private withBehaviorSavepoint<T>(fn: () => T): T;
   private withBehaviorSavepoint<T>(fn: () => T | Promise<T>): T | Promise<T> {
@@ -2479,21 +2567,21 @@ export class WooWorld {
     });
     this.nativeHandlers.set("default_look_self", (ctx) => this.defaultLookSelf(ctx));
     this.nativeHandlers.set("player_on_disfunc", () => true);
-    this.nativeHandlers.set("player_moveto", (ctx, args) => {
+    this.nativeHandlers.set("player_moveto", async (ctx, args) => {
       if (ctx.thisObj !== ctx.actor && !this.isWizard(ctx.actor)) throw wooError("E_PERM", "players may only move themselves", { actor: ctx.actor, target: ctx.thisObj });
       const target = assertObj(args[0] ?? "$nowhere");
-      this.moveObject(ctx.thisObj, target);
+      await this.moveObjectChecked(ctx.thisObj, target);
       return true;
     });
-    this.nativeHandlers.set("guest_on_disfunc", (ctx) => {
+    this.nativeHandlers.set("guest_on_disfunc", async (ctx) => {
       const homeValue = this.propOrNull(ctx.thisObj, "home");
       const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
-      this.moveObject(ctx.thisObj, home);
+      await this.moveObjectChecked(ctx.thisObj, home);
       this.setProp(ctx.thisObj, "description", "");
       this.setProp(ctx.thisObj, "aliases", []);
       this.setProp(ctx.thisObj, "features", []);
       this.setProp(ctx.thisObj, "features_version", Number(this.propOrNull(ctx.thisObj, "features_version") ?? 0) + 1);
-      for (const item of Array.from(this.object(ctx.thisObj).contents)) this.moveObject(item, home);
+      for (const item of await this.objectContents(ctx.thisObj)) await this.moveObjectChecked(item, home);
       this.returnGuest(ctx.thisObj);
       return true;
     });
@@ -2585,18 +2673,40 @@ export class WooWorld {
   }
 
   private async composeRoomLook(ctx: CallContext, room: ObjRef): Promise<Record<string, WooValue>> {
-    const contents = await Promise.all(Array.from(this.object(room).contents).filter((item) => this.objects.has(item) && !this.inheritsFrom(item, "$actor")).map(async (item) => ({
+    const present = this.chatPresent(room);
+    const contents = await Promise.all((await this.objectContents(room)).filter((item) => !this.isActorForLook(item, present)).map(async (item) => ({
       id: item,
       title: await this.titleForLook(ctx, room, item),
-      description: this.propOrNullForActor(ctx.actor, item, "description")
+      description: await this.propOrNullForActorAsync(ctx.actor, item, "description")
     })));
     return {
       id: room,
       title: await this.titleForLook(ctx, ctx.caller, room),
       description: this.propOrNullForActor(ctx.actor, room, "description"),
-      present_actors: this.chatPresent(room),
+      present_actors: present,
       contents
     } as unknown as Record<string, WooValue>;
+  }
+
+  private async objectContents(objRef: ObjRef): Promise<ObjRef[]> {
+    if (await this.remoteHostForObject(objRef)) {
+      if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      return await this.hostBridge.contents(objRef);
+    }
+    return Array.from(this.object(objRef).contents);
+  }
+
+  private isActorForLook(item: ObjRef, present: ObjRef[]): boolean {
+    if (present.includes(item)) return true;
+    return this.objects.has(item) && this.inheritsFrom(item, "$actor");
+  }
+
+  private async propOrNullForActorAsync(actor: ObjRef, objRef: ObjRef, name: string): Promise<WooValue> {
+    try {
+      return await this.getPropChecked(actor, objRef, name);
+    } catch {
+      return null;
+    }
   }
 
   private observeRoomLook(ctx: CallContext, room: ObjRef, look: Record<string, WooValue>): void {
@@ -2652,7 +2762,7 @@ export class WooWorld {
     } catch (err) {
       const error = normalizeError(err);
       if (error.code !== "E_VERBNF") throw err;
-      return this.object(item).name;
+      return this.objects.has(item) ? this.object(item).name : item;
     }
   }
 
@@ -2675,21 +2785,21 @@ export class WooWorld {
       });
     }
     this.updatePresence(actor, room, true);
-    if (this.object(actor).location !== room) this.moveObject(actor, room);
+    if (!this.objects.has(actor) || this.object(actor).location !== room) await this.moveObjectChecked(actor, room);
     ctx.observe({ type: "entered", source: room, actor, room, text: `${actorName} entered.`, ts });
     const look = await this.composeRoomLook({ ...ctx, thisObj: room }, room);
     this.observeRoomLook(ctx, room, look);
     return this.chatPresent(room);
   }
 
-  private roomLeave(ctx: CallContext): WooValue {
+  private async roomLeave(ctx: CallContext): Promise<WooValue> {
     const actor = ctx.actor;
     const room = ctx.thisObj;
     const actorName = this.objectDisplayName(actor);
     this.updatePresence(actor, room, false);
     const homeValue = this.propOrNull(actor, "home");
     const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
-    if (this.object(actor).location === room && this.objects.has(home)) this.moveObject(actor, home);
+    if (this.objects.has(actor) && this.object(actor).location === room && this.objects.has(home)) await this.moveObjectChecked(actor, home);
     ctx.observe({ type: "left", source: room, actor, room, text: `${actorName} left.`, ts: Date.now() });
     return this.chatPresent(room);
   }
@@ -2707,7 +2817,7 @@ export class WooWorld {
     const actorName = this.objectDisplayName(ctx.actor);
     this.updatePresence(ctx.actor, ctx.thisObj, false);
     this.updatePresence(ctx.actor, target, true);
-    this.moveObject(ctx.actor, target);
+    await this.moveObjectChecked(ctx.actor, target);
     const title = await this.titleForLook(ctx, ctx.thisObj, target);
     const ts = Date.now();
     ctx.observe({
@@ -2749,12 +2859,12 @@ export class WooWorld {
     const room = ctx.thisObj;
     const name = rawName.trim();
     if (!name) throw wooError("E_INVARG", "take requires an object name");
-    const match = this.matchObjectInCandidates(name, Array.from(this.object(room).contents));
+    const match = await this.matchObjectInCandidatesAsync(ctx, name, await this.objectContents(room));
     if (match.status !== "ok") throw wooError("E_INVARG", `I don't see "${name}" here.`, name);
     const item = match.value;
-    if (item === ctx.actor || this.inheritsFrom(item, "$actor")) throw wooError("E_PERM", "actors are not carryable", item);
-    if (!this.isPortable(item)) throw wooError("E_PERM", `${this.object(item).name} is not carryable`, item);
-    this.moveObject(item, ctx.actor);
+    if (item === ctx.actor || (this.objects.has(item) && this.inheritsFrom(item, "$actor"))) throw wooError("E_PERM", "actors are not carryable", item);
+    if (!await this.isPortableFor(ctx, item)) throw wooError("E_PERM", `${await this.titleForLook(ctx, room, item)} is not carryable`, item);
+    await this.moveObjectChecked(item, ctx.actor);
     const title = await this.titleForLook(ctx, room, item);
     ctx.observe({ type: "taken", actor: ctx.actor, item, text: `You take ${title}.`, ts: Date.now() });
     return { item, title };
@@ -2764,10 +2874,10 @@ export class WooWorld {
     const room = ctx.thisObj;
     const name = rawName.trim();
     if (!name) throw wooError("E_INVARG", "drop requires an object name");
-    const match = this.matchObjectInCandidates(name, Array.from(this.object(ctx.actor).contents));
+    const match = await this.matchObjectInCandidatesAsync(ctx, name, await this.objectContents(ctx.actor));
     if (match.status !== "ok") throw wooError("E_INVARG", `You are not carrying "${name}".`, name);
     const item = match.value;
-    this.moveObject(item, room);
+    await this.moveObjectChecked(item, room);
     const title = await this.titleForLook(ctx, room, item);
     ctx.observe({ type: "dropped", actor: ctx.actor, item, room, text: `You drop ${title}.`, ts: Date.now() });
     return { item, title, room };
@@ -2799,6 +2909,16 @@ export class WooWorld {
   private isPortable(objRef: ObjRef): boolean {
     try {
       return this.getProp(objRef, "portable") === true;
+    } catch (err) {
+      if (normalizeError(err).code !== "E_PROPNF") throw err;
+      return false;
+    }
+  }
+
+  private async isPortableFor(ctx: CallContext, objRef: ObjRef): Promise<boolean> {
+    if (!await this.remoteHostForObject(objRef)) return this.isPortable(objRef);
+    try {
+      return await this.getPropChecked(ctx.progr, objRef, "portable") === true;
     } catch (err) {
       if (normalizeError(err).code !== "E_PROPNF") throw err;
       return false;
@@ -2985,6 +3105,43 @@ export class WooWorld {
       if (names.includes(lower)) exact.push(id);
       else if (aliasValues.includes(lower)) alias.push(id);
       else if (wanted.length >= 2 && [...names, ...aliasValues].some((item) => item.startsWith(lower))) prefix.push(id);
+    }
+    return this.resolveObjectMatch(exact.length > 0 ? exact : alias.length > 0 ? alias : prefix);
+  }
+
+  private async matchObjectInCandidatesAsync(ctx: CallContext, name: string, candidates: ObjRef[]): Promise<ObjectMatch> {
+    const wanted = name.trim();
+    if (!wanted) return this.matchSentinel("failed");
+    const lower = wanted.toLowerCase();
+    const exact: ObjRef[] = [];
+    const alias: ObjRef[] = [];
+    const prefix: ObjRef[] = [];
+    for (const id of candidates) {
+      const names = [id];
+      const aliases: string[] = [];
+      if (this.objects.has(id)) {
+        const obj = this.object(id);
+        names.push(obj.name);
+        const localAliases = this.propOrNull(id, "aliases");
+        if (Array.isArray(localAliases)) aliases.push(...localAliases.map((item) => String(item)));
+      } else {
+        try {
+          names.push(await this.titleForLook(ctx, ctx.thisObj, id));
+        } catch {
+          // A stale contents cache entry should not make matching fail.
+        }
+        try {
+          const remoteAliases = await this.getPropChecked(ctx.progr, id, "aliases");
+          if (Array.isArray(remoteAliases)) aliases.push(...remoteAliases.map((item) => String(item)));
+        } catch {
+          // Aliases are optional for matching.
+        }
+      }
+      const nameValues = names.filter(Boolean).map((item) => String(item).toLowerCase());
+      const aliasValues = aliases.map((item) => item.toLowerCase());
+      if (nameValues.includes(lower)) exact.push(id);
+      else if (aliasValues.includes(lower)) alias.push(id);
+      else if (wanted.length >= 2 && [...nameValues, ...aliasValues].some((item) => item.startsWith(lower))) prefix.push(id);
     }
     return this.resolveObjectMatch(exact.length > 0 ? exact : alias.length > 0 ? alias : prefix);
   }

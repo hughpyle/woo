@@ -99,7 +99,7 @@ ok "cf token present"
 # required secrets
 secret_list=$(npx wrangler secret list 2>&1) \
   || fail "wrangler secret list failed:\n$secret_list"
-for required in WOO_INITIAL_WIZARD_TOKEN; do
+for required in WOO_INITIAL_WIZARD_TOKEN WOO_INTERNAL_SECRET; do
   echo "$secret_list" | grep -q "\"$required\"" \
     || fail "wrangler secret '$required' not set — run: npx wrangler secret put $required"
   ok "secret: $required set"
@@ -152,6 +152,16 @@ healthz=$(curl -sS --max-time 10 "$WORKER_URL/healthz") \
   || fail "healthz request failed"
 echo "$healthz" | grep -q '"ok":true' || fail "healthz body unhealthy: $healthz"
 ok "healthz: $healthz"
+
+# Unsigned public access to the reserved internal namespace must fail before
+# any DO handler trusts forwarded authority. Signed internal calls are
+# exercised below by /api/state aggregation when routed hosts are present.
+internal_status=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+  "$WORKER_URL/__internal/state") \
+  || fail "unsigned internal route probe failed"
+[[ "$internal_status" == "401" ]] \
+  || fail "unsigned internal route returned $internal_status (expected 401)"
+ok "unsigned internal route rejected: 401"
 
 # guest auth
 auth_out=$(curl -sS --max-time 10 -X POST "$WORKER_URL/api/auth" \

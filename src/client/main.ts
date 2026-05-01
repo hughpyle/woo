@@ -59,6 +59,13 @@ const drumVoices = [
   { id: "hat", label: "Hat" },
   { id: "tone", label: "Tone" }
 ] as const;
+const PITCH_ROOT_FREQ = 110;
+const PITCH_ROOT_MIDI = 45;
+const PITCH_MIN_SEMITONE = -12;
+const PITCH_MAX_SEMITONE = 36;
+const LOOP_DEFAULT_SEMITONES = [0, 5, 10, 15];
+const TONE_TRACK_SEMITONES = [19, 22, 24, 27];
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const taskStatuses = ["open", "claimed", "in_progress", "blocked", "done"] as const;
 const directThrottle = new Map<string, number>();
 const pendingDirect = new Map<string, (result: any) => void>();
@@ -461,7 +468,7 @@ function commitCueControls(target: string) {
   document.querySelectorAll<HTMLInputElement>("[data-control]").forEach((input) => {
     const { target: obj, name } = controlBinding(input);
     if (obj !== target) return;
-    const value = Number(input.value);
+    const value = controlInputValue(input);
     if (Number.isFinite(value)) values.set(name, value);
   });
   for (const [key, value] of Object.entries(state.cueControls)) {
@@ -492,7 +499,7 @@ function receiveLiveControl(observation: any) {
   const key = liveKey(observation.target, observation.name);
   state.liveControls[key] = { value: observation.value, actor: observation.actor, at: Date.now() };
   const input = findControlInput(String(observation.target), String(observation.name));
-  if (input && document.activeElement !== input) input.value = String(observation.value);
+  if (input && document.activeElement !== input) setControlInputValue(input, observation.value);
   audio?.sync(effectiveDubspace(), state.clockOffset);
 }
 
@@ -510,6 +517,35 @@ function controlBinding(input: HTMLInputElement): { target: string; name: string
   if (target && name) return { target, name };
   const [legacyTarget = "", legacyName = ""] = (input.dataset.control ?? "").split(":");
   return { target: legacyTarget, name: legacyName };
+}
+
+function isPitchInput(input: HTMLInputElement) {
+  return input.dataset.pitchInput !== undefined;
+}
+
+function controlInputValue(input: HTMLInputElement) {
+  if (isPitchInput(input)) return frequencyForSemitone(Number(input.value));
+  return Number(input.value);
+}
+
+function setControlInputValue(input: HTMLInputElement, value: any) {
+  if (isPitchInput(input)) {
+    input.value = String(semitoneForFrequency(Number(value)));
+    syncPitchInput(input);
+    return;
+  }
+  input.value = String(value);
+}
+
+function syncPitchInput(input: HTMLInputElement) {
+  if (!isPitchInput(input)) return;
+  const pitch = pitchForSemitone(Number(input.value));
+  const switchEl = input.closest<HTMLElement>(".pitch-switch");
+  switchEl?.style.setProperty("--pitch-angle", `${pitch.angle}deg`);
+  const note = switchEl?.querySelector<HTMLElement>("[data-pitch-note]");
+  const hz = switchEl?.querySelector<HTMLElement>("[data-pitch-hz]");
+  if (note) note.textContent = pitch.note;
+  if (hz) hz.textContent = `${Math.round(pitch.freq)} Hz`;
 }
 
 function forgetLiveControls(observations: any[]) {
@@ -660,6 +696,7 @@ function renderLoopStrip(id: string, index: number, dub: any) {
   const serverPlaying = state.world?.dubspace?.[id]?.props?.playing === true;
   const buttonPlaying = cue ? state.cuePlaying[id] === true : serverPlaying;
   const freq = slot.freq ?? defaultLoopFreq(index);
+  const pitch = loopPitch(freq);
   return `
     <div class="loop-strip ${slot.playing ? "playing" : ""} ${cue ? "cue-active" : ""}">
       <div class="loop-strip-head">
@@ -668,10 +705,11 @@ function renderLoopStrip(id: string, index: number, dub: any) {
       </div>
       <button data-loop="${escapeHtml(id)}" data-playing="${buttonPlaying ? "true" : "false"}">${buttonPlaying ? "Stop" : "Start"}</button>
       <input class="vertical-fader" aria-label="Loop ${index} gain" data-control data-target="${escapeHtml(id)}" data-name="gain" type="range" min="0" max="1" step="0.01" value="${escapeHtml(String(slot.gain ?? 0.75))}">
-      <label class="freq-field">
-        <span>Freq</span>
-        <input aria-label="Loop ${index} frequency" data-control data-target="${escapeHtml(id)}" data-name="freq" type="number" min="40" max="1200" step="0.01" value="${escapeHtml(String(freq))}">
-      </label>
+      <div class="pitch-switch" style="--pitch-angle: ${pitch.angle}deg">
+        <div class="pitch-dial" data-pitch-dial aria-hidden="true"><span class="pitch-pointer"></span></div>
+        <input class="pitch-switch-input" aria-label="Loop ${index} pitch" data-control data-pitch-input data-target="${escapeHtml(id)}" data-name="freq" type="range" min="${PITCH_MIN_SEMITONE}" max="${PITCH_MAX_SEMITONE}" step="1" value="${pitch.semitone}">
+        <div class="pitch-readout"><strong data-pitch-note>${escapeHtml(pitch.note)}</strong><span data-pitch-hz>${escapeHtml(String(Math.round(pitch.freq)))} Hz</span></div>
+      </div>
       <button class="cue-button ${cue ? "active" : ""}" data-cue-slot="${escapeHtml(id)}" aria-pressed="${cue}">CUE</button>
     </div>
   `;
@@ -728,22 +766,27 @@ function bindDubspace() {
   document.querySelectorAll<HTMLInputElement>("[data-control]").forEach((input) => {
     input.addEventListener("input", () => {
       const { target, name } = controlBinding(input);
+      syncPitchInput(input);
+      const value = controlInputValue(input);
       if (state.cueSlots[target]) {
-        setCueControl(target, name, Number(input.value));
+        setCueControl(target, name, value);
         return;
       }
-      sendPreviewControl(target, name, Number(input.value));
+      sendPreviewControl(target, name, value);
     });
     input.addEventListener("change", () => {
       const { target, name } = controlBinding(input);
+      syncPitchInput(input);
+      const value = controlInputValue(input);
       if (state.cueSlots[target]) {
-        setCueControl(target, name, Number(input.value));
+        setCueControl(target, name, value);
         return;
       }
       const space = dubspaceSpace();
-      if (space) call(space, space, "set_control", [target, name, Number(input.value)]);
+      if (space) call(space, space, "set_control", [target, name, value]);
     });
   });
+  document.querySelectorAll<HTMLElement>("[data-pitch-dial]").forEach((dial) => bindPitchDial(dial));
   document.querySelector<HTMLButtonElement>("[data-transport]")?.addEventListener("click", (event) => {
     const mode = (event.currentTarget as HTMLButtonElement).dataset.transport;
     const space = dubspaceSpace();
@@ -769,6 +812,49 @@ function bindDubspace() {
     const scene = state.world?.dubspaceMeta?.scene;
     if (space && scene) call(space, space, "recall_scene", [scene]);
   });
+}
+
+function bindPitchDial(dial: HTMLElement) {
+  const input = dial.parentElement?.querySelector<HTMLInputElement>("[data-pitch-input]");
+  if (!input) return;
+  const update = (event: PointerEvent, commit = false) => {
+    const rect = dial.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const dx = event.clientX - cx;
+    const dy = event.clientY - cy;
+    const angle = clamp(Math.atan2(dx, -dy) * 180 / Math.PI, -135, 135);
+    const normalized = (angle + 135) / 270;
+    const semitone = Math.round(PITCH_MIN_SEMITONE + normalized * (PITCH_MAX_SEMITONE - PITCH_MIN_SEMITONE));
+    input.value = String(clamp(semitone, PITCH_MIN_SEMITONE, PITCH_MAX_SEMITONE));
+    syncPitchInput(input);
+    input.dispatchEvent(new Event(commit ? "change" : "input", { bubbles: true }));
+  };
+  let active = false;
+  dial.addEventListener("pointerdown", (event) => {
+    active = true;
+    dial.setPointerCapture(event.pointerId);
+    update(event);
+  });
+  dial.addEventListener("pointermove", (event) => {
+    if (active) update(event);
+  });
+  dial.addEventListener("pointerup", (event) => {
+    if (!active) return;
+    active = false;
+    update(event, true);
+  });
+  dial.addEventListener("pointercancel", () => {
+    active = false;
+  });
+  dial.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const direction = event.deltaY > 0 ? -1 : 1;
+    input.value = String(clamp(Number(input.value) + direction, PITCH_MIN_SEMITONE, PITCH_MAX_SEMITONE));
+    syncPitchInput(input);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }, { passive: false });
 }
 
 function normalizePattern(raw: any): Record<string, boolean[]> {
@@ -1009,6 +1095,13 @@ function bindChat() {
       input.focus();
     });
   });
+  scrollChatFeedToEnd();
+}
+
+function scrollChatFeedToEnd() {
+  const feed = document.querySelector<HTMLElement>(".chat-feed");
+  if (!feed) return;
+  feed.scrollTop = feed.scrollHeight;
 }
 
 function focusChatInput() {
@@ -1463,8 +1556,36 @@ function clamp(value: number, min: number, max: number) {
 }
 
 function defaultLoopFreq(index: number) {
-  const freqs = [110, 146.83, 196, 261.63];
-  return freqs[index - 1] ?? 220;
+  return frequencyForSemitone(LOOP_DEFAULT_SEMITONES[index - 1] ?? 12);
+}
+
+function frequencyForSemitone(rawSemitone: number) {
+  const semitone = clamp(Math.round(rawSemitone), PITCH_MIN_SEMITONE, PITCH_MAX_SEMITONE);
+  return Number((PITCH_ROOT_FREQ * Math.pow(2, semitone / 12)).toFixed(2));
+}
+
+function semitoneForFrequency(rawFreq: number) {
+  const minFreq = frequencyForSemitone(PITCH_MIN_SEMITONE);
+  const maxFreq = frequencyForSemitone(PITCH_MAX_SEMITONE);
+  const freq = clamp(rawFreq, minFreq, maxFreq);
+  return clamp(Math.round(12 * Math.log2(freq / PITCH_ROOT_FREQ)), PITCH_MIN_SEMITONE, PITCH_MAX_SEMITONE);
+}
+
+function pitchForSemitone(rawSemitone: number) {
+  const semitone = clamp(Math.round(rawSemitone), PITCH_MIN_SEMITONE, PITCH_MAX_SEMITONE);
+  const freq = frequencyForSemitone(semitone);
+  const midi = PITCH_ROOT_MIDI + semitone;
+  const note = `${NOTE_NAMES[((midi % 12) + 12) % 12]}${Math.floor(midi / 12) - 1}`;
+  const angle = -135 + ((semitone - PITCH_MIN_SEMITONE) / (PITCH_MAX_SEMITONE - PITCH_MIN_SEMITONE)) * 270;
+  return { semitone, freq, note, angle: Math.round(angle) };
+}
+
+function loopPitch(rawFreq: number) {
+  return pitchForSemitone(semitoneForFrequency(rawFreq));
+}
+
+function toneTrackFreq(step: number) {
+  return frequencyForSemitone(TONE_TRACK_SEMITONES[step % TONE_TRACK_SEMITONES.length] ?? 24);
 }
 
 function makeSilentLoopElement(): HTMLAudioElement {
@@ -1556,7 +1677,7 @@ class DubAudio {
     const slots = Array.isArray(state.world?.dubspaceMeta?.slots) ? state.world.dubspaceMeta.slots : [];
     for (const [index, id] of slots.entries()) {
       const props = dubspace[id]?.props ?? {};
-      const freq = clamp(Number(props.freq ?? defaultLoopFreq(index + 1)), 40, 1200);
+      const freq = loopPitch(Number(props.freq ?? defaultLoopFreq(index + 1))).freq;
       if (props.playing && !this.oscillators.has(id)) {
         const osc = this.context.createOscillator();
         const gain = this.context.createGain();
@@ -1628,7 +1749,7 @@ class DubAudio {
     if (voice === "kick") this.kick();
     if (voice === "snare") this.noiseHit(0.18, 900, 0.08);
     if (voice === "hat") this.noiseHit(0.05, 7000, 0.035);
-    if (voice === "tone") this.tone(330 + (step % 4) * 55);
+    if (voice === "tone") this.tone(toneTrackFreq(step));
   }
 
   private kick() {

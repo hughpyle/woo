@@ -9,6 +9,11 @@
 # `wrangler secret put WOO_INITIAL_WIZARD_TOKEN`.
 WOO_INITIAL_WIZARD_TOKEN=local-dev-wizard-token
 
+# HMAC key for Worker/Directory/Durable Object internal requests.
+# Local default is fine for dev; production must set a high-entropy value via
+# `wrangler secret put WOO_INTERNAL_SECRET`.
+WOO_INTERNAL_SECRET=local-dev-internal-secret
+
 # Local SQLite database path. Created on first run.
 WOO_DB=.woo/dev.sqlite
 

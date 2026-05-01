@@ -76,7 +76,8 @@ test("dubspace cue keeps loop controls local", async ({ page, request }) => {
   const headers = await authHeaders(request);
   const before = await request.get("/api/state", { headers }).then((response) => response.json());
   const beforeSlot = before.objects.slot_1.props;
-  const localFreq = Number(beforeSlot.freq ?? 110) === 432.5 ? 433.5 : 432.5;
+  const localSemitone = Number(beforeSlot.freq ?? 110) === 440 ? 25 : 24;
+  const localFreq = Number((110 * Math.pow(2, localSemitone / 12)).toFixed(2));
   const localGain = Number(beforeSlot.gain ?? 0.75) === 0.11 ? 0.22 : 0.11;
 
   await page.locator('[data-cue-slot="slot_1"]').click();
@@ -88,7 +89,12 @@ test("dubspace cue keeps loop controls local", async ({ page, request }) => {
   await expect(page.locator('[data-loop="slot_1"]')).toHaveText("Start");
   expect(sentFrames.some((frame) => frame.includes("start_loop") || frame.includes("stop_loop"))).toBe(false);
 
-  await page.locator('[data-control][data-target="slot_1"][data-name="freq"]').fill(String(localFreq));
+  await page.locator('[data-control][data-target="slot_1"][data-name="freq"]').evaluate((element, value) => {
+    const input = element as HTMLInputElement;
+    input.value = String(value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }, localSemitone);
   await page.locator('[data-control][data-target="slot_1"][data-name="gain"]').evaluate((element, value) => {
     const input = element as HTMLInputElement;
     input.value = String(value);

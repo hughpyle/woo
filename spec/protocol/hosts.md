@@ -33,7 +33,7 @@ The opcode shape is symmetric across all three host classes. A verb call from a 
 
 ### 3.3 Trust model across hosts
 
-- Persistent hosts within the same deployment trust one another at the protocol layer. RPC payloads are not cryptographically signed; deployment-internal trust is sufficient.
+- Persistent hosts within the same deployment trust one another only after the transport adapter authenticates the internal envelope. The Cloudflare reference signs gateway/Directory/cluster-host requests with `WOO_INTERNAL_SECRET`; other deployments need an equivalent same-deployment authentication layer before accepting forwarded `actor`, `session`, `progr`, or mutation data. v1 uses timestamp freshness for this envelope, not nonce replay protection; the threat model assumes same-deployment internal traffic is not observable. If that assumption changes, reuse the `correlation_id`/recent-replies cache pattern from §3.4.
 - Persistent hosts do **not** trust transient hosts. Any call into a transient host must have its return value validated at the trust boundary. State stored in transient objects is not authoritative.
 - A task's effective permission is the verb owner's permission (`progr`), set at compile time and carried in every frame. A transient host cannot elevate `progr`; the originating persistent host retains the canonical task identity and treats browser output as untrusted return data.
 

@@ -599,6 +599,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
     this.ensureColumn("session", "last_detach_at", "INTEGER");
     this.ensureColumn("session", "token_class", "TEXT NOT NULL DEFAULT 'guest'");
     this.ensureColumn("space_message", "observations", "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureNullableSpaceMessageOutcome();
     this.ensureColumn("verb", "flags", "TEXT NOT NULL DEFAULT '{}'");
     this.db.exec("DROP TABLE IF EXISTS session_socket");
   }
@@ -611,6 +612,35 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
   private tableColumns(table: string): Set<string> {
     const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[];
     return new Set(rows.map((row) => String(row.name)));
+  }
+
+  private ensureNullableSpaceMessageOutcome(): void {
+    const rows = this.db.prepare("PRAGMA table_info(space_message)").all() as Row[];
+    const appliedOk = rows.find((row) => String(row.name) === "applied_ok");
+    if (!appliedOk || Number(appliedOk.notnull ?? 0) === 0) return;
+    // Current sequenced-call storage inserts a pending log row before behavior
+    // outcome is known, then records applied_ok in the same outer transaction.
+    // Older demo DBs used NOT NULL here, which rejects that pending state.
+    this.db.exec(`
+      DROP INDEX IF EXISTS space_message_ts;
+      ALTER TABLE space_message RENAME TO space_message_old_notnull;
+      CREATE TABLE space_message (
+        space_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        ts INTEGER NOT NULL,
+        actor TEXT NOT NULL,
+        message TEXT NOT NULL,
+        observations TEXT NOT NULL DEFAULT '[]',
+        applied_ok INTEGER,
+        error TEXT,
+        PRIMARY KEY (space_id, seq)
+      );
+      INSERT INTO space_message(space_id, seq, ts, actor, message, observations, applied_ok, error)
+        SELECT space_id, seq, ts, actor, message, COALESCE(observations, '[]'), applied_ok, error
+        FROM space_message_old_notnull;
+      DROP TABLE space_message_old_notnull;
+      CREATE INDEX IF NOT EXISTS space_message_ts ON space_message(space_id, ts);
+    `);
   }
 
   private ensureHostedObject(id: ObjRef): void {

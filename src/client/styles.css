@@ -216,19 +216,63 @@ textarea {
   direction: rtl;
 }
 
-.freq-field {
+.pitch-switch {
   width: 100%;
-  margin: 0;
-  gap: 0.2rem;
-  font-size: 0.74rem;
+  display: grid;
+  gap: 0.25rem;
+  justify-items: center;
+}
+
+.pitch-dial {
+  width: 2.7rem;
+  aspect-ratio: 1;
+  position: relative;
+  border: 1px solid #778171;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 52%, #f7f8f5 0 38%, transparent 39%),
+    conic-gradient(from -135deg, #8ca497 0deg, #d4d0a8 135deg, #b96d56 270deg, #d9ddd6 270deg 360deg);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.12);
+  cursor: grab;
+  touch-action: none;
+}
+
+.pitch-dial:active {
+  cursor: grabbing;
+}
+
+.pitch-pointer {
+  position: absolute;
+  left: calc(50% - 0.085rem);
+  top: 0.3rem;
+  width: 0.17rem;
+  height: 1.05rem;
+  border-radius: 999px;
+  background: #2f3a35;
+  transform-origin: 50% 1.05rem;
+  transform: rotate(var(--pitch-angle));
+}
+
+.pitch-switch-input {
+  width: 100%;
+  min-width: 0;
+  height: 0.75rem;
+}
+
+.pitch-readout {
+  min-height: 2rem;
+  display: grid;
+  gap: 0.05rem;
+  justify-items: center;
+  color: #647060;
+  font-size: 0.7rem;
+  line-height: 1.15;
   text-align: center;
 }
 
-.freq-field input {
-  width: 100%;
-  min-width: 0;
-  padding: 0.3rem 0.25rem;
-  text-align: center;
+.pitch-readout strong {
+  color: #2f3a35;
+  font-size: 0.82rem;
 }
 
 .fader-readout {
@@ -835,7 +879,15 @@ textarea {
     font-size: 0.72rem;
   }
 
-  .freq-field input {
-    font-size: 0.72rem;
+  .pitch-dial {
+    width: 2.25rem;
+  }
+
+  .pitch-readout {
+    font-size: 0.64rem;
+  }
+
+  .pitch-readout strong {
+    font-size: 0.74rem;
   }
 }

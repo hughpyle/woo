@@ -104,6 +104,18 @@ class LocalHostBridge implements HostBridge {
     return await remote.hostDispatch({ ...ctx, world: remote }, target, verbName, args, startAt);
   }
 
+  async moveObject(objRef: ObjRef, targetRef: ObjRef): Promise<void> {
+    await this.worldFor(objRef).moveObjectChecked(objRef, targetRef);
+  }
+
+  async mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void> {
+    this.worldFor(containerRef).mirrorContents(containerRef, objRef, present);
+  }
+
+  async contents(objRef: ObjRef): Promise<ObjRef[]> {
+    return this.worldFor(objRef).contentsOf(objRef);
+  }
+
   private worldFor(id: ObjRef): WooWorld {
     const host = this.routes.get(id);
     if (!host) throw new Error(`no route for ${id}`);
@@ -343,6 +355,52 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       expect(remote.getProp("conf_remote_box", "value")).toBe("from remote");
     } finally {
       remoteHarness.cleanup();
+      homeHarness.cleanup();
+    }
+  });
+
+  it("moves objects across hosts by updating owner location and container mirrors", async () => {
+    const homeHarness = make();
+    const roomAHarness = make();
+    const roomBHarness = make();
+    try {
+      const home = homeHarness.world;
+      const roomA = roomAHarness.world;
+      const roomB = roomBHarness.world;
+      const session = home.auth("guest:conf-cross-host-move");
+      const actor = session.actor;
+      const worlds = new Map<string, WooWorld>([
+        ["home", home],
+        ["room-a", roomA],
+        ["room-b", roomB]
+      ]);
+      const routes = new Map<ObjRef, string>([
+        [actor, "home"],
+        ["conf_satchel", "home"],
+        ["conf_room_a", "room-a"],
+        ["conf_room_b", "room-b"]
+      ]);
+      home.setHostBridge(new LocalHostBridge("home", worlds, routes));
+      roomA.setHostBridge(new LocalHostBridge("room-a", worlds, routes));
+      roomB.setHostBridge(new LocalHostBridge("room-b", worlds, routes));
+
+      roomA.createObject({ id: "conf_room_a", name: "Room A", parent: "$space", owner: "$wiz" });
+      roomB.createObject({ id: "conf_room_b", name: "Room B", parent: "$space", owner: "$wiz" });
+      home.createObject({ id: "conf_satchel", name: "Satchel", parent: "$thing", owner: "$wiz", location: "conf_room_a" });
+      roomA.mirrorContents("conf_room_a", "conf_satchel", true);
+
+      await roomA.moveObjectChecked("conf_satchel", actor);
+      expect(home.object("conf_satchel").location).toBe(actor);
+      expect(roomA.object("conf_room_a").contents.has("conf_satchel")).toBe(false);
+      expect(home.object(actor).contents.has("conf_satchel")).toBe(true);
+
+      await roomB.moveObjectChecked("conf_satchel", "conf_room_b");
+      expect(home.object("conf_satchel").location).toBe("conf_room_b");
+      expect(home.object(actor).contents.has("conf_satchel")).toBe(false);
+      expect(roomB.object("conf_room_b").contents.has("conf_satchel")).toBe(true);
+    } finally {
+      roomBHarness.cleanup();
+      roomAHarness.cleanup();
       homeHarness.cleanup();
     }
   });

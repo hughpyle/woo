@@ -67,6 +67,18 @@ class LocalHostBridge implements HostBridge {
     return await remote.hostDispatch({ ...ctx, world: remote }, target, verbName, args, startAt);
   }
 
+  async moveObject(objRef: ObjRef, targetRef: ObjRef): Promise<void> {
+    await this.worldFor(objRef).moveObjectChecked(objRef, targetRef);
+  }
+
+  async mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void> {
+    this.worldFor(containerRef).mirrorContents(containerRef, objRef, present);
+  }
+
+  async contents(objRef: ObjRef): Promise<ObjRef[]> {
+    return this.worldFor(objRef).contentsOf(objRef);
+  }
+
   private worldFor(id: ObjRef): WooWorld {
     const host = this.routes.get(id);
     if (!host) throw new Error(`no route for ${id}`);
@@ -1227,6 +1239,19 @@ describe("authoring", () => {
     expect(() => definePropertyVersioned(world, "delay_1", "note", "", "rw", null, "str")).toThrow();
     const updated = definePropertyVersioned(world, "delay_1", "note", "x", "rw", 1, "str");
     expect(updated.version).toBe(2);
+  });
+
+  it("rejects raw JSON bytecode with excessive resource budgets", async () => {
+    const base = {
+      ops: [["PUSH_INT", 1], ["RETURN"]],
+      literals: [],
+      num_locals: 0,
+      max_stack: 1,
+      version: 1
+    };
+    expect(compileVerb(JSON.stringify({ ...base, max_ticks: 1_000_001 }), { format: "t0-json-bytecode" })).toMatchObject({ ok: false });
+    expect(compileVerb(JSON.stringify({ ...base, num_locals: 1_025 }), { format: "t0-json-bytecode" })).toMatchObject({ ok: false });
+    expect(compileVerb(JSON.stringify({ ...base, literals: ["x".repeat(512 * 1024)] }), { format: "t0-json-bytecode" })).toMatchObject({ ok: false });
   });
 
   it("uses structural map equality in T0 EQ", async () => {

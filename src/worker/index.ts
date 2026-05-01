@@ -5,6 +5,8 @@
 // Everything else           → env.ASSETS.fetch (the bundled SPA from ./dist).
 
 import type { Env } from "./persistent-object-do";
+import { signInternalRequest } from "./internal-auth";
+import { wooError } from "../core/types";
 
 export { PersistentObjectDO } from "./persistent-object-do";
 export { DirectoryDO } from "./directory-do";
@@ -12,6 +14,7 @@ export { DirectoryDO } from "./directory-do";
 const WORLD_HOST = "world";
 const DIRECTORY_HOST = "directory";
 const INTERNAL_ORIGIN = "https://woo.internal";
+const MAX_JSON_BODY_BYTES = 1 * 1024 * 1024;
 
 function isApiPath(pathname: string): boolean {
   return (
@@ -29,6 +32,10 @@ export default {
     // Strip any x-woo-internal-* / x-woo-host-key the public client tried to
     // inject; those headers are reserved for trusted gateway → DO forwarding.
     request = sanitizePublicHeaders(request);
+
+    if (url.pathname.startsWith("/__internal/")) {
+      return jsonResponse({ error: wooError("E_NOSESSION", "internal routes require a signed internal request") }, 401);
+    }
 
     if (request.method === "POST" && url.pathname === "/api/auth") {
       const response = await forwardToHost(env, WORLD_HOST, request);
@@ -101,7 +108,7 @@ async function forwardToHost(env: Env, host: string, request: Request): Promise<
   // gateway entry by sanitizePublicHeaders.
   const headers = new Headers(request.headers);
   headers.set("x-woo-host-key", host);
-  const routed = new Request(request, { headers });
+  const routed = await signInternalRequest(env, new Request(request, { headers }));
   const id = env.WOO.idFromName(host);
   try {
     return await env.WOO.get(id).fetch(routed);
@@ -131,6 +138,9 @@ async function registerAuthResponse(env: Env, response: Response): Promise<void>
       actor: body.actor,
       expires_at: Number(body.expires_at ?? Date.now() + 5 * 60_000),
       token_class: body.token_class === "guest" || body.token_class === "apikey" ? body.token_class : "bearer"
+    });
+    await directoryPost(env, "/register-objects", {
+      routes: [{ id: body.actor, host: WORLD_HOST, anchor: null }]
     });
   } catch {
     // Auth succeeded; Directory registration is best-effort for this response.
@@ -172,7 +182,7 @@ async function broadcastRoutedCall(env: Env, response: Response, host: string): 
 
 async function registerObjectsFromApplied(env: Env, _frame: Record<string, unknown>, host: string): Promise<void> {
   const id = env.WOO.idFromName(host);
-  const response = await env.WOO.get(id).fetch(new Request(`${INTERNAL_ORIGIN}/__internal/object-routes`, {
+  const request = await signInternalRequest(env, new Request(`${INTERNAL_ORIGIN}/__internal/object-routes`, {
     method: "POST",
     headers: {
       "content-type": "application/json; charset=utf-8",
@@ -180,6 +190,7 @@ async function registerObjectsFromApplied(env: Env, _frame: Record<string, unkno
     },
     body: "{}"
   }));
+  const response = await env.WOO.get(id).fetch(request);
   if (!response.ok) return;
   const parsed = await response.json();
   const routes = Array.isArray(parsed)
@@ -220,11 +231,12 @@ async function resolveDirectoryObject(env: Env, id: string, fallbackHost: string
 
 async function directoryPost(env: Env, path: string, body: Record<string, unknown>): Promise<unknown> {
   const id = env.DIRECTORY.idFromName(DIRECTORY_HOST);
-  const response = await env.DIRECTORY.get(id).fetch(new Request(`${INTERNAL_ORIGIN}${path}`, {
+  const request = await signInternalRequest(env, new Request(`${INTERNAL_ORIGIN}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify(body)
   }));
+  const response = await env.DIRECTORY.get(id).fetch(request);
   const parsed = await response.json();
   if (!response.ok) throw new Error(JSON.stringify(parsed));
   return parsed;
@@ -256,11 +268,20 @@ function parseObjectRoute(pathname: string): { id: string; rest: string[] } | nu
 
 async function readJson(request: Request): Promise<Record<string, unknown>> {
   try {
-    const parsed = await request.json();
+    const parsed = JSON.parse(new TextDecoder().decode(await readLimitedBody(request)));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-  } catch {
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err) throw err;
     return {};
   }
+}
+
+async function readLimitedBody(request: Request): Promise<ArrayBuffer> {
+  const declared = Number(request.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declared) && declared > MAX_JSON_BODY_BYTES) throw wooError("E_RATE", `request body exceeds ${MAX_JSON_BODY_BYTES} bytes`);
+  const body = await request.arrayBuffer();
+  if (body.byteLength > MAX_JSON_BODY_BYTES) throw wooError("E_RATE", `request body exceeds ${MAX_JSON_BODY_BYTES} bytes`);
+  return body;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

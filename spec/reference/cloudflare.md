@@ -596,13 +596,14 @@ That is the entire required surface. Optional bindings (Workers Analytics Engine
 
 ### R14.2 Required configuration
 
-One secret must be set before first deploy. It is a single-string value and goes through `wrangler secret put` (never the `[vars]` block in `wrangler.toml`).
+Two secrets must be set before first deploy. They are single-string values and go through `wrangler secret put` (never the `[vars]` block in `wrangler.toml`).
 
 | Secret | Purpose |
 |---|---|
 | `WOO_INITIAL_WIZARD_TOKEN` | One-time token presented at first auth to claim the `$wiz` binding. Consumed on use; subsequent auths cannot present the same value. See §R14.4. |
+| `WOO_INTERNAL_SECRET` | HMAC key for gateway/Directory/cluster-host internal requests. Unsigned or tampered internal requests are rejected before forwarded session, actor, or `progr` fields are trusted. |
 
-The Worker checks this at startup. A missing token is a `503` with a clear remediation message — see §R14.7.
+The Worker checks these at startup. A missing required secret is a `503` with a clear remediation message — see §R14.7.
 
 For local development, the value lives in `.dev.vars` (gitignored) with a sane default. A `.dev.vars.example` file in the repo root shows the shape; operators copy it to `.dev.vars` and edit.
 
@@ -684,6 +685,7 @@ A misconfigured deploy must fail loudly, not silently. The Worker's startup chec
 | Condition | Response |
 |---|---|
 | `WOO_INITIAL_WIZARD_TOKEN` unset on a fresh world (no `bootstrap_token_used`) | Every request returns `503` with body `{ error: { code: "E_BOOTSTRAP_TOKEN_MISSING", message: "set WOO_INITIAL_WIZARD_TOKEN via wrangler secret put" } }` |
+| `WOO_INTERNAL_SECRET` unset | Every request returns `503` with body `{ error: { code: "E_BOOTSTRAP_TOKEN_MISSING", message: "set WOO_INTERNAL_SECRET via wrangler secret put" } }` |
 | Workers Free plan (no DO support) | `503` with body `{ error: { code: "E_DO_UNAVAILABLE", message: "Durable Objects require Workers Paid plan" } }` |
 
 A working deploy never returns `503` for these reasons. Operators see them only if they skipped a setup step.

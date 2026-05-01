@@ -9,6 +9,17 @@ type AuthoringOptions = {
   format?: "t0-source" | "woo-source" | "t0-json-bytecode";
 };
 
+const BYTECODE_LIMITS = {
+  ops: 10_000,
+  literals: 4_096,
+  literalBytes: 512 * 1024,
+  locals: 1_024,
+  stack: 4_096,
+  ticks: 1_000_000,
+  memory: 16 * 1024 * 1024,
+  wallMs: 10_000
+};
+
 export function compileVerb(source: string, options: AuthoringOptions = {}): CompileResult {
   const format = options.format ?? inferFormat(source);
   if (format === "t0-json-bytecode") {
@@ -125,9 +136,25 @@ function verifyBytecode(bytecode: TinyBytecode): void {
   if (!bytecode || !Array.isArray(bytecode.ops) || !Array.isArray(bytecode.literals)) {
     throw wooError("E_COMPILE", "invalid TinyBytecode shape");
   }
-  for (const [op] of bytecode.ops) {
+  if (!isIntegerInRange(bytecode.version, 0, Number.MAX_SAFE_INTEGER)) throw wooError("E_COMPILE", "bytecode version must be a non-negative integer");
+  if (!isIntegerInRange(bytecode.num_locals, 0, BYTECODE_LIMITS.locals)) throw wooError("E_COMPILE", `bytecode num_locals exceeds limit ${BYTECODE_LIMITS.locals}`);
+  if (!isIntegerInRange(bytecode.max_stack, 0, BYTECODE_LIMITS.stack)) throw wooError("E_COMPILE", `bytecode max_stack exceeds limit ${BYTECODE_LIMITS.stack}`);
+  if (bytecode.ops.length > BYTECODE_LIMITS.ops) throw wooError("E_COMPILE", `bytecode op count exceeds limit ${BYTECODE_LIMITS.ops}`);
+  if (bytecode.literals.length > BYTECODE_LIMITS.literals) throw wooError("E_COMPILE", `bytecode literal count exceeds limit ${BYTECODE_LIMITS.literals}`);
+  if (bytecode.max_ticks !== undefined && !isIntegerInRange(bytecode.max_ticks, 1, BYTECODE_LIMITS.ticks)) throw wooError("E_COMPILE", `bytecode max_ticks exceeds limit ${BYTECODE_LIMITS.ticks}`);
+  if (bytecode.max_memory !== undefined && !isIntegerInRange(bytecode.max_memory, 1, BYTECODE_LIMITS.memory)) throw wooError("E_COMPILE", `bytecode max_memory exceeds limit ${BYTECODE_LIMITS.memory}`);
+  if (bytecode.max_wall_ms !== undefined && !isIntegerInRange(bytecode.max_wall_ms, 1, BYTECODE_LIMITS.wallMs)) throw wooError("E_COMPILE", `bytecode max_wall_ms exceeds limit ${BYTECODE_LIMITS.wallMs}`);
+  const literalBytes = new TextEncoder().encode(JSON.stringify(bytecode.literals)).byteLength;
+  if (literalBytes > BYTECODE_LIMITS.literalBytes) throw wooError("E_COMPILE", `bytecode literals exceed ${BYTECODE_LIMITS.literalBytes} bytes`);
+  for (const item of bytecode.ops) {
+    if (!Array.isArray(item) || typeof item[0] !== "string") throw wooError("E_COMPILE", "invalid opcode shape");
+    const [op] = item;
     if (!VALID_OPS.has(op)) throw wooError("E_COMPILE", `unknown opcode ${op}`);
   }
+}
+
+function isIntegerInRange(value: unknown, min: number, max: number): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
 }
 
 function compileDiagnostic(err: unknown): CompileResult["diagnostics"][number] {

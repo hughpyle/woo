@@ -46,6 +46,7 @@ import type { SerializedWorld } from "../core/repository";
 import { normalizeError, type ParkedTaskRun } from "../core/world";
 import { CFObjectRepository } from "./cf-repository";
 import { McpGateway } from "../mcp/gateway";
+import { signInternalRequest, verifyInternalRequest } from "./internal-auth";
 
 // Re-import WooWorld type. Note `import type` must reach the world module
 // without dragging Node-only deps into the Worker bundle.
@@ -56,12 +57,14 @@ export interface Env {
   DIRECTORY: DurableObjectNamespace;
   ASSETS?: Fetcher;
   WOO_INITIAL_WIZARD_TOKEN?: string;
+  WOO_INTERNAL_SECRET?: string;
   WOO_AUTO_INSTALL_CATALOGS?: string;
 }
 
 const WORLD_HOST = "world";
 const DIRECTORY_HOST = "directory";
 const INTERNAL_ORIGIN = "https://woo.internal";
+const MAX_JSON_BODY_BYTES = 1 * 1024 * 1024;
 
 export class PersistentObjectDO {
   private state: DurableObjectState;
@@ -86,11 +89,20 @@ export class PersistentObjectDO {
         503
       );
     }
+    if (!this.env.WOO_INTERNAL_SECRET) {
+      return jsonResponse(
+        { error: { code: "E_BOOTSTRAP_TOKEN_MISSING", message: "set WOO_INTERNAL_SECRET via wrangler secret put" } },
+        503
+      );
+    }
 
     const url = new URL(request.url);
     const pathname = url.pathname;
     const hostKey = request.headers.get("x-woo-host-key") || this.durableHostKey();
     const gatewayHost = hostKey === WORLD_HOST;
+    const internalRequest = pathname.startsWith("/__internal/");
+
+    if (internalRequest) await verifyInternalRequest(this.env, request);
 
     if (!gatewayHost && (pathname === "/api/auth" || pathname === "/ws")) {
       return jsonResponse({ error: { code: "E_NOTAPPLICABLE", message: `${pathname} is only available on the world gateway host` } }, 404);
@@ -99,7 +111,7 @@ export class PersistentObjectDO {
     try {
       const world = await this.getWorld(hostKey);
 
-      if (pathname.startsWith("/__internal/")) {
+      if (internalRequest) {
         return await this.handleInternal(request, world, pathname);
       }
 
@@ -231,7 +243,7 @@ export class PersistentObjectDO {
 
   private async fetchHostSeed(hostKey: ObjRef): Promise<SerializedWorld> {
     const id = this.env.WOO.idFromName(WORLD_HOST);
-    const response = await this.env.WOO.get(id).fetch(new Request(`${INTERNAL_ORIGIN}/__internal/host-seed`, {
+    const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}/__internal/host-seed`, {
       method: "POST",
       headers: {
         "content-type": "application/json; charset=utf-8",
@@ -239,6 +251,7 @@ export class PersistentObjectDO {
       },
       body: JSON.stringify({ host: hostKey })
     }));
+    const response = await this.env.WOO.get(id).fetch(request);
     const body = await response.json();
     if (!response.ok) throw wooError("E_STORAGE", `failed to load host seed for ${hostKey}`, body as WooValue);
     return body as SerializedWorld;
@@ -254,11 +267,12 @@ export class PersistentObjectDO {
     if (routes.length === 0) return;
     try {
       const id = this.env.DIRECTORY.idFromName(DIRECTORY_HOST);
-      await this.env.DIRECTORY.get(id).fetch(new Request(`${INTERNAL_ORIGIN}/register-objects`, {
+      const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}/register-objects`, {
         method: "POST",
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify({ routes })
       }));
+      await this.env.DIRECTORY.get(id).fetch(request);
       for (const route of routes) this.routeCache.set(route.id, route.host);
     } catch {
       // Directory acceleration is best-effort. Fallback routing still sends
@@ -270,8 +284,9 @@ export class PersistentObjectDO {
     const hostForObject = async (id: ObjRef): Promise<string | null> => {
       const cached = this.routeCache.get(id);
       if (cached) return cached;
-      if (world.objects.has(id)) return localHost;
-      return await this.resolveObjectHost(id, localHost);
+      const localRoute = world.objectRoutes().find((route) => route.id === id && route.host === localHost);
+      if (localRoute || (localHost === WORLD_HOST && world.objects.has(id))) return localHost;
+      return await this.resolveObjectHost(id, WORLD_HOST);
     };
     const bridge: HostBridge = {
       localHost,
@@ -296,6 +311,28 @@ export class PersistentObjectDO {
           for (const observation of response.observations) ctx.observations.push(observation);
         }
         return response.result;
+      },
+      moveObject: async (objRef, targetRef) => {
+        const host = await hostForObject(objRef);
+        if (!host || host === localHost) {
+          await world.moveObjectChecked(objRef, targetRef);
+          return;
+        }
+        await this.forwardInternalChecked(host, "/__internal/remote-move-object", { obj: objRef, target: targetRef });
+      },
+      mirrorContents: async (containerRef, objRef, present) => {
+        const host = await hostForObject(containerRef);
+        if (!host || host === localHost) {
+          world.mirrorContents(containerRef, objRef, present);
+          return;
+        }
+        await this.forwardInternalChecked(host, "/__internal/mirror-contents", { container: containerRef, obj: objRef, present });
+      },
+      contents: async (objRef) => {
+        const host = await hostForObject(objRef);
+        if (!host || host === localHost) return world.contentsOf(objRef);
+        const response = await this.forwardInternalChecked<{ contents: ObjRef[] }>(host, "/__internal/contents", { obj: objRef });
+        return response.contents;
       }
     };
     world.setHostBridge(bridge);
@@ -373,9 +410,10 @@ export class PersistentObjectDO {
   private async fetchHostState(host: string, actor: ObjRef): Promise<Record<string, unknown> | null> {
     try {
       const id = this.env.WOO.idFromName(host);
-      const response = await this.env.WOO.get(id).fetch(new Request(`${INTERNAL_ORIGIN}/__internal/state`, {
+      const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}/__internal/state`, {
         headers: { "x-woo-host-key": host, "x-woo-internal-actor": actor }
       }));
+      const response = await this.env.WOO.get(id).fetch(request);
       if (!response.ok) return null;
       const body = await response.json();
       return body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : null;
@@ -535,6 +573,24 @@ export class PersistentObjectDO {
         return jsonResponse({ result, observations });
       }
 
+      if (request.method === "POST" && pathname === "/__internal/remote-move-object") {
+        await world.moveObjectChecked(String(body.obj ?? "") as ObjRef, String(body.target ?? "") as ObjRef);
+        return jsonResponse({ ok: true });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/mirror-contents") {
+        world.mirrorContents(
+          String(body.container ?? "") as ObjRef,
+          String(body.obj ?? "") as ObjRef,
+          body.present === true
+        );
+        return jsonResponse({ ok: true });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/contents") {
+        return jsonResponse({ contents: world.contentsOf(String(body.obj ?? "") as ObjRef) });
+      }
+
       return jsonResponse({ error: { code: "E_OBJNF", message: `no internal route for ${request.method} ${pathname}` } }, 404);
     } catch (err) {
       const error = normalizeError(err);
@@ -577,7 +633,7 @@ export class PersistentObjectDO {
   private async registerSessionRoute(session: Session): Promise<void> {
     try {
       const id = this.env.DIRECTORY.idFromName(DIRECTORY_HOST);
-      await this.env.DIRECTORY.get(id).fetch(new Request(`${INTERNAL_ORIGIN}/register-session`, {
+      const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}/register-session`, {
         method: "POST",
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify({
@@ -587,6 +643,8 @@ export class PersistentObjectDO {
           token_class: session.tokenClass
         })
       }));
+      await this.env.DIRECTORY.get(id).fetch(request);
+      await this.registerRoutes([{ id: session.actor, host: WORLD_HOST, anchor: null }]);
     } catch {
       // Directory registration accelerates cross-DO routing. The local auth
       // result remains authoritative for this host; routed object calls fail
@@ -743,11 +801,12 @@ export class PersistentObjectDO {
     if (cached) return cached;
     try {
       const directoryId = this.env.DIRECTORY.idFromName(DIRECTORY_HOST);
-      const response = await this.env.DIRECTORY.get(directoryId).fetch(new Request(`${INTERNAL_ORIGIN}/resolve-object`, {
+      const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}/resolve-object`, {
         method: "POST",
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify({ id, fallback_host: fallbackHost })
       }));
+      const response = await this.env.DIRECTORY.get(directoryId).fetch(request);
       const body = await response.json() as Record<string, unknown>;
       const host = typeof body.host === "string" ? body.host : fallbackHost;
       this.routeCache.set(id, host);
@@ -797,7 +856,7 @@ export class PersistentObjectDO {
 
   private async forwardInternal<T>(host: string, path: string, body: Record<string, unknown>): Promise<T> {
     const id = this.env.WOO.idFromName(host);
-    const response = await this.env.WOO.get(id).fetch(new Request(`${INTERNAL_ORIGIN}${path}`, {
+    const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}${path}`, {
       method: "POST",
       headers: {
         "content-type": "application/json; charset=utf-8",
@@ -805,6 +864,7 @@ export class PersistentObjectDO {
       },
       body: JSON.stringify(body)
     }));
+    const response = await this.env.WOO.get(id).fetch(request);
     return await response.json() as T;
   }
 
@@ -921,10 +981,15 @@ function jsonResponse(body: unknown, status = 200): Response {
 async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
   if (request.headers.get("content-length") === "0") return {};
   try {
-    const parsed = await request.json();
+    const declared = Number(request.headers.get("content-length") ?? 0);
+    if (Number.isFinite(declared) && declared > MAX_JSON_BODY_BYTES) throw wooError("E_RATE", `request body exceeds ${MAX_JSON_BODY_BYTES} bytes`);
+    const raw = await request.arrayBuffer();
+    if (raw.byteLength > MAX_JSON_BODY_BYTES) throw wooError("E_RATE", `request body exceeds ${MAX_JSON_BODY_BYTES} bytes`);
+    const parsed = raw.byteLength === 0 ? {} : JSON.parse(new TextDecoder().decode(raw));
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
     return {};
-  } catch {
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err) throw err;
     return {};
   }
 }

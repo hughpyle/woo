@@ -104,6 +104,8 @@ const DEFAULT_TICKS = 100_000;
 const DEFAULT_MEMORY = 4 * 1024 * 1024;
 const DEFAULT_WALL_MS = 10_000;
 const MAX_VM_FRAMES = 128;
+const MAX_RUNTIME_LOCALS = 1_024;
+const MAX_RUNTIME_STACK = 4_096;
 const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "move", "chparent", "has_flag", "random", "contents", "task_perms", "caller_perms", "set_task_perms"];
 
 export async function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): Promise<WooValue> {
@@ -128,6 +130,7 @@ export async function runSerializedTinyVmTaskWithInput(
   const resumed = structuredClone(task);
   const top = resumed.frames[resumed.frames.length - 1];
   if (!top) throw wooError("E_INTERNAL", "serialized VM task has no frames");
+  if (top.stack.length >= top.bytecode.max_stack) throw wooError("E_RANGE", "stack overflow");
   top.stack.push(cloneValue(input));
   return await runSerializedTinyVmTask(world, resumed, observations);
 }
@@ -153,7 +156,9 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
     return stack[stack.length - 1];
   };
   const push = (value: WooValue): void => {
-    frame().stack.push(cloneValue(value));
+    const current = frame();
+    if (current.stack.length >= current.bytecode.max_stack) throw wooError("E_RANGE", "stack overflow");
+    current.stack.push(cloneValue(value));
   };
   const jump = (currentPc: number, offset: WooValue): void => {
     frame().pc = currentPc + numeric(offset, "jump offset") + 1;
@@ -173,6 +178,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         const handler = current.handlers.pop()!;
         if (handler.errors.length !== 0 && !handler.errors.includes(error.code)) continue;
         current.stack.length = handler.stackDepth;
+        if (current.stack.length >= current.bytecode.max_stack) return false;
         current.stack.push(cloneValue(error as WooValue));
         current.pc = handler.targetPc;
         return true;
@@ -504,7 +510,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         }
         case "BUILTIN": {
           const builtinArgs = popArgs(numeric(operand2, "builtin argc"));
-          push(callBuiltin(operand, builtinArgs, current));
+          push(await callBuiltin(operand, builtinArgs, current));
           break;
         }
 
@@ -734,7 +740,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
     throw wooError("E_TYPE", "IN requires list or map haystack", haystack);
   }
 
-  function callBuiltin(nameOrIndex: WooValue | undefined, builtinArgs: WooValue[], frame: VmFrame): WooValue {
+  async function callBuiltin(nameOrIndex: WooValue | undefined, builtinArgs: WooValue[], frame: VmFrame): Promise<WooValue> {
     const name = typeof nameOrIndex === "number" ? BUILTIN_NAMES[nameOrIndex] : assertString(nameOrIndex ?? "");
     switch (name) {
       case "length": {
@@ -782,7 +788,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       }
       case "move": {
         if (builtinArgs.length !== 2) throw wooError("E_INVARG", "move expects object and destination");
-        frame.ctx.world.moveAuthoredObject(frame.ctx.progr, assertObj(builtinArgs[0]), assertObj(builtinArgs[1]));
+        await frame.ctx.world.moveAuthoredObjectChecked(frame.ctx.progr, assertObj(builtinArgs[0]), assertObj(builtinArgs[1]));
         return true;
       }
       case "chparent": {
@@ -827,6 +833,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
 }
 
 function makeFrame(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): VmFrame {
+  validateRuntimeBytecode(bytecode);
   const locals = new Array<WooValue>(bytecode.num_locals).fill(null);
   for (let i = 0; i < Math.min(args.length, locals.length); i++) locals[i] = cloneValue(args[i]);
   return {
@@ -842,6 +849,15 @@ function makeFrame(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): 
     activeWallMs: 0,
     memoryUsed: 0
   };
+}
+
+function validateRuntimeBytecode(bytecode: TinyBytecode): void {
+  if (!Number.isInteger(bytecode.num_locals) || bytecode.num_locals < 0 || bytecode.num_locals > MAX_RUNTIME_LOCALS) {
+    throw wooError("E_COMPILE", `bytecode num_locals exceeds limit ${MAX_RUNTIME_LOCALS}`);
+  }
+  if (!Number.isInteger(bytecode.max_stack) || bytecode.max_stack < 0 || bytecode.max_stack > MAX_RUNTIME_STACK) {
+    throw wooError("E_COMPILE", `bytecode max_stack exceeds limit ${MAX_RUNTIME_STACK}`);
+  }
 }
 
 function serializeVmFrames(frames: VmFrame[]): SerializedVmTask {

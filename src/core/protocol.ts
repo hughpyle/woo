@@ -13,6 +13,8 @@ import {
 } from "./types";
 import { normalizeError, type ParkedTaskRun, type WooWorld } from "./world";
 
+const MAX_WS_FRAME_BYTES = 256 * 1024;
+
 export type RestProtocolRequest = {
   method: string;
   pathname: string;
@@ -424,6 +426,9 @@ export async function handleWsProtocolFrame<Connection>(
 
 export function parseWsProtocolFrame(raw: string | ArrayBuffer | ArrayBufferView): Record<string, unknown> | ErrorFrame {
   try {
+    if (rawFrameBytes(raw) > MAX_WS_FRAME_BYTES) {
+      return { op: "error", error: wooError("E_RATE", `websocket frame exceeds ${MAX_WS_FRAME_BYTES} bytes`) };
+    }
     const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
     const parsed = JSON.parse(text);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
@@ -431,6 +436,11 @@ export function parseWsProtocolFrame(raw: string | ArrayBuffer | ArrayBufferView
   } catch {
     return { op: "error", error: wooError("E_INVARG", "invalid JSON frame") };
   }
+}
+
+function rawFrameBytes(raw: string | ArrayBuffer | ArrayBufferView): number {
+  if (typeof raw === "string") return new TextEncoder().encode(raw).byteLength;
+  return raw.byteLength;
 }
 
 function frameId(value: unknown): string | undefined {

@@ -34,6 +34,8 @@ let socketCounter = 1;
 let streamCounter = 1;
 const port = Number(process.env.PORT ?? 5173);
 const hmrPort = Number(process.env.VITE_HMR_PORT ?? port + 10_000);
+const MAX_HTTP_BODY_BYTES = 1 * 1024 * 1024;
+const MAX_WS_FRAME_BYTES = 256 * 1024;
 
 const vite = await createViteServer({
   server: { middlewareMode: true, hmr: { port: hmrPort } },
@@ -150,6 +152,10 @@ const wss = new WebSocketServer({ server, path: "/ws" });
 wss.on("connection", (ws) => {
   const socketId = `ws-${socketCounter++}`;
   ws.on("message", (raw) => {
+    if (rawDataSize(raw) > MAX_WS_FRAME_BYTES) {
+      ws.close(1009, "frame too large");
+      return;
+    }
     const frame = parseWsProtocolFrame(String(raw));
     if (frame.op === "error") {
       ws.send(JSON.stringify(frame));
@@ -375,10 +381,9 @@ function writeSse(stream: RestStream, event: "applied" | "event", data: unknown,
 }
 
 async function readJson(req: http.IncomingMessage): Promise<Record<string, any>> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  if (!chunks.length) return {};
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  const body = await readLimitedBody(req, MAX_HTTP_BODY_BYTES);
+  if (!body.length) return {};
+  return JSON.parse(body.toString("utf8"));
 }
 
 function nodeRestRequest(req: http.IncomingMessage, pathname: string): RestProtocolRequest {
@@ -416,11 +421,37 @@ async function nodeRequestToWeb(req: http.IncomingMessage): Promise<Request> {
   }
   let body: BodyInit | null = null;
   if (req.method && req.method !== "GET" && req.method !== "HEAD") {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    if (chunks.length > 0) body = Buffer.concat(chunks);
+    const buffer = await readLimitedBody(req, MAX_HTTP_BODY_BYTES);
+    if (buffer.length > 0) body = arrayBufferFromBuffer(buffer);
   }
   return new Request(url.toString(), { method: req.method, headers, body, duplex: "half" } as RequestInit);
+}
+
+async function readLimitedBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
+  const declared = Number(req.headers["content-length"] ?? 0);
+  if (Number.isFinite(declared) && declared > maxBytes) throw wooError("E_RATE", `request body exceeds ${maxBytes} bytes`);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.byteLength;
+    if (total > maxBytes) throw wooError("E_RATE", `request body exceeds ${maxBytes} bytes`);
+    chunks.push(buffer);
+  }
+  return chunks.length > 0 ? Buffer.concat(chunks, total) : Buffer.alloc(0);
+}
+
+function rawDataSize(raw: import("ws").RawData): number {
+  if (typeof raw === "string") return Buffer.byteLength(raw, "utf8");
+  if (Buffer.isBuffer(raw)) return raw.byteLength;
+  if (raw instanceof ArrayBuffer) return raw.byteLength;
+  return raw.reduce((sum, item) => sum + item.byteLength, 0);
+}
+
+function arrayBufferFromBuffer(buffer: Buffer): ArrayBuffer {
+  const copy = new Uint8Array(buffer.byteLength);
+  copy.set(buffer);
+  return copy.buffer;
 }
 
 async function writeWebResponseToNode(response: Response, res: http.ServerResponse): Promise<void> {
