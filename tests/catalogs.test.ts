@@ -228,6 +228,49 @@ describe("local catalogs", () => {
     expect(world.getProp("delay_1", "feedback")).toBe(0.44);
   });
 
+  it("installs pinboard from source and keeps notes as board-local records", async () => {
+    const world = createWorld({ catalogs: false });
+    installCatalogManifest(world, readManifest("chat") as unknown as RuntimeCatalogManifest, {
+      tap: "github:hugh/woo",
+      alias: "chat",
+      allowImplementationHints: false
+    });
+    installCatalogManifest(world, readManifest("pinboard") as unknown as RuntimeCatalogManifest, {
+      tap: "github:hugh/woo",
+      alias: "pinboard",
+      allowImplementationHints: false
+    });
+
+    expect(world.object("$pinboard").verbs.get("add_note")?.kind).toBe("bytecode");
+    expect(world.object("$pinboard").verbs.get("enter")?.kind).toBe("bytecode");
+    expect(world.object("the_pinboard").location).toBe("the_deck");
+    expect(world.object("the_deck").contents.has("the_pinboard")).toBe(true);
+
+    const session = world.auth("guest:catalog-pinboard");
+    const entered = await world.directCall("pinboard-enter", session.actor, "the_pinboard", "enter", []);
+    expect(entered.op).toBe("result");
+    expect(world.hasPresence(session.actor, "the_pinboard")).toBe(true);
+
+    const added = await world.call("pinboard-add", session.id, "the_pinboard", {
+      actor: session.actor,
+      target: "the_pinboard",
+      verb: "add_note",
+      args: ["Bring the towel to the hot tub", "blue", 12, 24, 160, 88]
+    });
+    expect(added.op).toBe("applied");
+    if (added.op !== "applied") return;
+    expect(added.observations.map((obs) => obs.type)).toEqual(["note_added", "pinboard_activity"]);
+    const note = added.observations.find((obs) => obs.type === "note_added")?.note as Record<string, unknown>;
+    expect(note).toMatchObject({ id: "n1", color: "blue", x: 12, y: 24, w: 160, h: 88 });
+    expect(world.getProp("the_pinboard", "notes")).toHaveLength(1);
+    expect([...world.objects.keys()].filter((id) => id.includes("note"))).not.toContain("n1");
+
+    await world.call("pinboard-move", session.id, "the_pinboard", { actor: session.actor, target: "the_pinboard", verb: "move_note", args: ["n1", 80, 96] });
+    await world.call("pinboard-edit", session.id, "the_pinboard", { actor: session.actor, target: "the_pinboard", verb: "edit_note", args: ["n1", "Towel is ready"] });
+    const notes = world.getProp("the_pinboard", "notes") as Record<string, unknown>[];
+    expect(notes[0]).toMatchObject({ id: "n1", text: "Towel is ready", x: 80, y: 96, updated_by: session.actor });
+  });
+
   it("seeds the_cockatoo in the chatroom with random-pick squawk", async () => {
     const world = createWorld();
     expect(world.objects.has("$cockatoo")).toBe(true);

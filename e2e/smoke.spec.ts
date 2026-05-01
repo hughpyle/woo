@@ -21,6 +21,7 @@ test("loads shell and renders nav", async ({ page }) => {
 
   await expect(page.locator(".brand")).toHaveText("Woo");
   await expect(page.getByRole("button", { name: "Chat" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Pinboard" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Dubspace" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Taskspace" })).toBeVisible();
   await expect(page.getByRole("button", { name: "IDE" })).toBeVisible();
@@ -44,6 +45,10 @@ test("switches between tabs", async ({ page }) => {
 
   await page.getByRole("button", { name: "Dubspace" }).click();
   await expect(page.getByRole("button", { name: "Dubspace" })).toHaveClass(/active/);
+
+  await page.getByRole("button", { name: "Pinboard" }).click();
+  await expect(page.getByRole("button", { name: "Pinboard" })).toHaveClass(/active/);
+  await expect(page.locator(".pinboard-stage")).toBeVisible();
 
   await page.getByRole("button", { name: "Taskspace" }).click();
   await expect(page.getByRole("button", { name: "Taskspace" })).toHaveClass(/active/);
@@ -127,7 +132,7 @@ test("narrow layout keeps nav tabs on one row", async ({ page }) => {
 
   const nav = page.locator(".nav");
   const tabs = page.locator(".nav-button");
-  await expect(tabs).toHaveCount(4);
+  await expect(tabs).toHaveCount(5);
 
   const metrics = await nav.evaluate((element) => {
     const navRect = element.getBoundingClientRect();
@@ -142,6 +147,26 @@ test("narrow layout keeps nav tabs on one row", async ({ page }) => {
   expect(metrics.sameRow).toBe(true);
   expect(metrics.withinWidth).toBe(true);
   expect(metrics.navHeight).toBeLessThan(56);
+});
+
+test("pinboard supports shared text notes", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+
+  await page.getByRole("button", { name: "Pinboard" }).click();
+  await expect(page.getByRole("button", { name: "Pinboard" })).toHaveClass(/active/);
+  await expect(page.locator(".pinboard-stage")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Leave" })).toBeVisible();
+
+  await page.locator("[data-pinboard-new-text]").fill("Bring the towel to the hot tub");
+  await page.locator("[data-pinboard-new-color]").selectOption("blue");
+  await page.locator("[data-pinboard-create]").getByRole("button", { name: "Add Note" }).click();
+  await expect(page.locator(".pin-note")).toHaveCount(1);
+  await expect(page.locator(".pin-note")).toContainText("Bring the towel to the hot tub");
+
+  await page.locator("[data-pin-note-text]").fill("Towel is ready");
+  await page.locator("[data-pin-note-text]").blur();
+  await expect(page.locator(".pin-note")).toContainText("Towel is ready");
 });
 
 test("chat controls follow room membership", async ({ page }) => {
@@ -209,8 +234,8 @@ test("chat room transitions broadcast through source and destination rooms", asy
     await expect(first.getByRole("button", { name: "Leave" })).toBeVisible();
     await second.getByRole("button", { name: "Enter" }).click();
     await expect(second.getByRole("button", { name: "Leave" })).toBeVisible();
-    await expect(second.locator(".presence-list")).toContainText(firstActor);
-    await expect(second.locator(".presence-list")).toContainText(secondActor);
+    await expect(second.locator(`[data-chat-recipient="${firstActor}"]`)).toBeVisible();
+    await expect(second.locator(`[data-chat-recipient="${secondActor}"]`)).toBeVisible();
 
     await second.locator("[data-chat-input]").fill("se");
     await second.locator("[data-chat-input]").press("Enter");
@@ -218,20 +243,20 @@ test("chat room transitions broadcast through source and destination rooms", asy
     await expect(second.locator(".chat-feed")).toContainText("wooden deck");
     await expect(second.locator(".chat-feed")).not.toContainText("You go to");
     await expect(first.locator(".chat-feed")).toContainText(`${secondName} goes southeast.`);
-    await expect(first.locator(".presence-list")).not.toContainText(secondActor);
+    await expect(first.locator(`[data-chat-recipient="${secondActor}"]`)).toHaveCount(0);
 
     await second.locator("[data-chat-input]").fill("west");
     await second.locator("[data-chat-input]").press("Enter");
     await expect(second.locator(".toolbar h1")).toHaveText("Living Room", { timeout: 5_000 });
     await expect(second.locator(".chat-feed")).toContainText("bright, open living room");
     await expect(first.locator(".chat-feed")).toContainText(`${secondName} has arrived.`);
-    await expect(first.locator(".presence-list")).toContainText(secondActor);
+    await expect(first.locator(`[data-chat-recipient="${secondActor}"]`)).toBeVisible();
 
     await first.getByRole("button", { name: "Leave" }).click();
     await expect(first.getByRole("button", { name: "Enter" })).toBeVisible();
     await expect(second.locator(".chat-feed")).toContainText(`${firstName} left.`);
-    await expect(second.locator(".presence-list")).not.toContainText(firstActor);
-    await expect(second.locator(".presence-list")).toContainText(secondActor);
+    await expect(second.locator(`[data-chat-recipient="${firstActor}"]`)).toHaveCount(0);
+    await expect(second.locator(`[data-chat-recipient="${secondActor}"]`)).toBeVisible();
   } finally {
     await firstContext.close();
     await secondContext.close();

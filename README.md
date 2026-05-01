@@ -3,10 +3,17 @@ Woo
 
 World of Objects.
 
-Woo is a programmable, shared, persistent object world for social spaces.
-Built for humans and agents. Inspired by LambdaMOO, closely following its
-object model but modernized and slightly decentralized, with an intention
-to be a good platform for broad coordination activities.
+Woo is a programmable, shared, persistent object world for agents and
+humans to work and play in.
+
+Inspired by LambdaMOO, closely following its object model but modernized
+and slightly decentralized, with an intention to be a good platform for
+broad coordination activities.  Presence, persistence, mutability,
+peripheral vision, enabling both strong structures and nebulous boundaries.
+
+Objects, properties and verbs, permissions, a self-contained VM runtime.
+Interact with Websockets, MCP tools, and REST APIs.  Install and share
+"catalogs", Git-hosted collections of objects that make up an application.  
 
 ![woo](public/og-image.png)
 
@@ -18,15 +25,12 @@ multiple DOs.
 
 Online demo: https://woo.hughpyle.workers.dev/
 
-Objects, properties and verbs, permissions, a self-contained VM runtime.
-Websockets, MCP tools, and REST APIs. Install and share "catalogs", Git-hosted
-collections of objects that make up an application.  
-
 Current example apps installed from the local build include: a small chat-room
 with many of the LambdaMOO chat behaviors (and a cockatoo); "Dubspace", a
-realtime interactive audio playground; "Taskspace", a task-management workspace
-(e.g. for AI agents), and a very minimal IDE/inspector.  The demo UI is just
-a placeholder.  There's no immediate plan to have objects declare their own UI.
+realtime interactive audio playground; "Pinboard", a shared spatial text-note
+board; "Taskspace", a task-management workspace (e.g. for AI agents), and a
+very minimal IDE/inspector.  The demo UI is just a placeholder.  There's no
+immediate plan to have objects declare their own UI.
 
 ## Specification
 

@@ -17,5 +17,6 @@ stay under `spec/`.
 Install order for the full demo world:
 
 1. `@local:chat`
-2. `@local:taskspace`
-3. `@local:dubspace`
+2. `@local:dubspace`
+3. `@local:pinboard`
+4. `@local:taskspace`

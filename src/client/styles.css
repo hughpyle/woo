@@ -717,6 +717,144 @@ input[type="range"] {
   gap: 0.55rem;
 }
 
+.pinboard-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 230px;
+  gap: 1rem;
+  align-items: stretch;
+  height: calc(100dvh - 5.25rem);
+  min-height: 0;
+}
+
+.pinboard-work {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.8rem;
+}
+
+.pinboard-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 8rem auto;
+  gap: 0.55rem;
+  align-items: stretch;
+  padding: 0.65rem;
+}
+
+.pinboard-create textarea {
+  min-height: 2.45rem;
+  max-height: 5rem;
+  resize: vertical;
+}
+
+.pinboard-stage-panel,
+.pinboard-presence {
+  min-height: 0;
+  overflow: auto;
+}
+
+.pinboard-stage {
+  width: var(--pinboard-w);
+  height: var(--pinboard-h);
+  min-width: 100%;
+  min-height: 100%;
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, rgb(75 84 73 / 0.06) 1px, transparent 1px),
+    linear-gradient(rgb(75 84 73 / 0.06) 1px, transparent 1px),
+    #e5d5b6;
+  background-size: 24px 24px;
+  border: 1px solid #c6b58f;
+  border-radius: 7px;
+}
+
+.pinboard-empty {
+  padding: 1rem;
+  color: #5f685d;
+}
+
+.pin-note {
+  position: absolute;
+  min-width: 100px;
+  min-height: 72px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.3rem;
+  padding: 0.45rem;
+  border: 1px solid rgb(65 58 42 / 0.35);
+  border-radius: 4px;
+  box-shadow: 0 4px 10px rgb(58 48 30 / 0.16);
+}
+
+.pin-note-yellow {
+  background: #fff3a6;
+}
+
+.pin-note-blue {
+  background: #cfe7ff;
+}
+
+.pin-note-green {
+  background: #d8f3c6;
+}
+
+.pin-note-pink {
+  background: #ffd4e2;
+}
+
+.pin-note-white {
+  background: #fbfbf2;
+}
+
+.pin-note-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.pin-note-head button,
+.pin-note-head select {
+  min-width: 0;
+  padding: 0.18rem 0.35rem;
+  font-size: 0.72rem;
+  background: rgb(255 255 255 / 0.55);
+}
+
+.pin-note-drag {
+  cursor: grab;
+  touch-action: none;
+}
+
+.pin-note-drag:active {
+  cursor: grabbing;
+}
+
+.pin-note textarea {
+  width: 100%;
+  min-height: 0;
+  resize: none;
+  border: 0;
+  padding: 0.25rem;
+  background: rgb(255 255 255 / 0.28);
+  color: #2a2a24;
+  line-height: 1.25;
+}
+
+.pin-note-resize {
+  position: absolute;
+  right: 0.18rem;
+  bottom: 0.18rem;
+  width: 0.85rem;
+  height: 0.85rem;
+  padding: 0;
+  border-radius: 2px;
+  background: linear-gradient(135deg, transparent 0 42%, rgb(65 58 42 / 0.45) 44% 54%, transparent 56%);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
 .presence-list {
   display: grid;
   gap: 0.45rem;
@@ -770,7 +908,7 @@ textarea {
 
   .nav {
     display: grid;
-    grid-template-columns: auto minmax(7rem, 1fr) repeat(4, minmax(0, max-content));
+    grid-template-columns: auto minmax(7rem, 1fr) repeat(5, minmax(0, max-content));
     align-items: center;
     gap: 0.45rem;
     padding: 0.55rem;
@@ -842,6 +980,15 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .pinboard-layout {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .pinboard-create {
+    grid-template-columns: 1fr;
+  }
+
   .sequencer {
     grid-column: auto;
   }
@@ -853,7 +1000,7 @@ textarea {
 
 @media (max-width: 520px) {
   .nav {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 
   .brand,

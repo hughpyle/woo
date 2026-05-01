@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 const PORT = Number(process.env.PORT ?? 5173);
 const BASE_URL = `http://localhost:${PORT}`;
+const E2E_DB = process.env.WOO_DB ?? `.woo/e2e-${Date.now()}-${process.pid}.sqlite`;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -26,7 +27,7 @@ export default defineConfig({
     stderr: "pipe",
     env: {
       PORT: String(PORT),
-      WOO_DB: process.env.WOO_DB ?? ".woo/e2e.sqlite",
+      WOO_DB: E2E_DB,
       WOO_INITIAL_WIZARD_TOKEN: process.env.WOO_INITIAL_WIZARD_TOKEN ?? "e2e-wizard",
       VITE_HMR_PORT: process.env.VITE_HMR_PORT ?? String(PORT + 10_000)
     }
