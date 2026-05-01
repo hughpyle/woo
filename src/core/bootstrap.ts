@@ -297,6 +297,20 @@ function seedGuests(world: WooWorld): void {
     seedProp(world, id, "home", "$nowhere");
     removeSeedProperty(world, id, "attached_sockets");
   }
+  // Backfill: any dynamic guest_<N> minted by an older allocateGuest didn't
+  // set the `name` property, so cross-host display falls back to the id.
+  // Mirror the WooObject.name field into the property unconditionally.
+  for (const id of Array.from(world.objects.keys())) {
+    const match = /^guest_(\d+)$/.exec(id);
+    if (!match) continue;
+    if (match[1].length > 0 && Number(match[1]) <= 8) continue;
+    const obj = world.object(id);
+    const fieldName = obj.name;
+    const propValue = world.propOrNull(id, "name");
+    const target = fieldName && fieldName !== id ? fieldName : `Guest ${match[1]}`;
+    if (propValue !== target) world.setProp(id, "name", target);
+    if (!fieldName || fieldName === id) obj.name = target;
+  }
 }
 
 function define(world: WooWorld, obj: ObjRef, name: string, defaultValue: WooValue, typeHint: string, perms = "rw"): void {
