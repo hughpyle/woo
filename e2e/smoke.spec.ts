@@ -1,7 +1,12 @@
-import { test, expect, type APIRequestContext } from "@playwright/test";
+import { test, expect, type APIRequestContext, type Locator } from "@playwright/test";
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function boxKey(locator: Locator): Promise<string> {
+  const box = await locator.boundingBox();
+  return box ? `${Math.round(box.x)}:${Math.round(box.y)}:${Math.round(box.width)}:${Math.round(box.height)}` : "";
 }
 
 async function authHeaders(request: APIRequestContext): Promise<Record<string, string>> {
@@ -158,6 +163,7 @@ test("pinboard supports shared text notes", async ({ page }) => {
   await page.getByRole("button", { name: "Pinboard" }).click();
   await expect(page.getByRole("button", { name: "Pinboard" })).toHaveClass(/active/);
   await expect(page.locator(".pinboard-stage")).toBeVisible();
+  await expect(page.locator("[data-pinboard-map]")).toBeVisible();
   await expect(page.getByRole("button", { name: "Leave" })).toBeVisible();
 
   await page.locator("[data-pinboard-new-text]").fill("Bring the towel to the hot tub");
@@ -177,6 +183,161 @@ test("pinboard supports shared text notes", async ({ page }) => {
   await page.locator("[data-pin-note-text]").first().blur();
   await expect(page.locator(".pinboard-stage")).toContainText("Towel is ready");
   await expect(page.locator(".pinboard-stage")).toContainText("Bring the mug too");
+});
+
+test("pinboard supports local zoom and pan without resetting on updates", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+
+  await page.getByRole("button", { name: "Pinboard" }).click();
+  await expect(page.getByRole("button", { name: "Pinboard" })).toHaveClass(/active/);
+  await expect(page.getByRole("button", { name: "Leave" })).toBeVisible();
+  await expect(page.locator("[data-pinboard-zoom-label]")).toHaveText("100%");
+  const stagePanelGap = await page.locator(".pinboard-stage-panel").evaluate((panel) => {
+    const stage = panel.querySelector(".pinboard-stage");
+    if (!stage) return Number.POSITIVE_INFINITY;
+    const panelRect = panel.getBoundingClientRect();
+    const stageRect = stage.getBoundingClientRect();
+    return Math.abs(panelRect.bottom - stageRect.bottom);
+  });
+  expect(stagePanelGap).toBeLessThan(2);
+  const initialGrid = await page.locator("[data-pinboard-stage]").evaluate((element) => ({
+    size: getComputedStyle(element).backgroundSize,
+    position: getComputedStyle(element).backgroundPosition
+  }));
+
+  await page.getByRole("button", { name: "Zoom in" }).click();
+  await expect(page.locator("[data-pinboard-canvas]")).toHaveClass(/viewport-animating/);
+  await expect(page.locator("[data-pinboard-zoom-label]")).toHaveText("120%");
+  await expect(page.locator("[data-pinboard-canvas]")).not.toHaveClass(/viewport-animating/);
+  const zoomedTransform = await page.locator("[data-pinboard-canvas]").evaluate((element) => getComputedStyle(element).transform);
+  const zoomedGrid = await page.locator("[data-pinboard-stage]").evaluate((element) => ({
+    size: getComputedStyle(element).backgroundSize,
+    position: getComputedStyle(element).backgroundPosition
+  }));
+  expect(zoomedGrid.size).not.toBe(initialGrid.size);
+
+  await page.locator(".pinboard-stage").hover();
+  await page.mouse.wheel(80, 48);
+  const pannedTransform = await page.locator("[data-pinboard-canvas]").evaluate((element) => getComputedStyle(element).transform);
+  const pannedGrid = await page.locator("[data-pinboard-stage]").evaluate((element) => getComputedStyle(element).backgroundPosition);
+  expect(pannedTransform).not.toBe(zoomedTransform);
+  expect(pannedGrid).not.toBe(zoomedGrid.position);
+
+  const mapBox = await page.locator("[data-pinboard-map]").boundingBox();
+  if (!mapBox) throw new Error("pinboard overview missing");
+  await page.mouse.click(mapBox.x + mapBox.width * 0.78, mapBox.y + mapBox.height * 0.22);
+  await expect(page.locator("[data-pinboard-canvas]")).toHaveClass(/viewport-animating/);
+  await expect.poll(async () => page.locator("[data-pinboard-canvas]").evaluate((element) => getComputedStyle(element).transform)).not.toBe(pannedTransform);
+  await expect(page.locator("[data-pinboard-canvas]")).not.toHaveClass(/viewport-animating/);
+  const mapCenteredTransform = await page.locator("[data-pinboard-canvas]").evaluate((element) => getComputedStyle(element).transform);
+
+  const centeredText = `Viewport stable ${Date.now()}`;
+  await page.locator("[data-pinboard-new-text]").fill(centeredText);
+  await page.locator("[data-pinboard-create]").getByRole("button", { name: "Add Note" }).click();
+  await expect(page.locator("[data-pinboard-zoom-label]")).toHaveText("120%");
+  await expect.poll(async () => page.locator("[data-pinboard-canvas]").evaluate((element) => getComputedStyle(element).transform)).toBe(mapCenteredTransform);
+  const centeredNote = page.locator(".pin-note").filter({ hasText: centeredText }).first();
+  await expect(centeredNote).toBeVisible();
+  const centeredDelta = await centeredNote.evaluate((note) => {
+    const stage = note.closest(".pinboard-stage");
+    if (!stage) return Number.POSITIVE_INFINITY;
+    const noteRect = note.getBoundingClientRect();
+    const stageRect = stage.getBoundingClientRect();
+    const dx = Math.abs(noteRect.left + noteRect.width / 2 - (stageRect.left + stageRect.width / 2));
+    const dy = Math.abs(noteRect.top + noteRect.height / 2 - (stageRect.top + stageRect.height / 2));
+    return Math.max(dx, dy);
+  });
+  expect(centeredDelta).toBeLessThan(8);
+
+  const handle = centeredNote.locator("[data-pin-note-drag]");
+  const handleBox = await handle.boundingBox();
+  if (!handleBox) throw new Error("pin note drag handle missing");
+  const beforeX = Number(await centeredNote.getAttribute("data-x"));
+  const beforeY = Number(await centeredNote.getAttribute("data-y"));
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2 - (beforeX + 160) * 1.2, handleBox.y + handleBox.height / 2 - (beforeY + 120) * 1.2, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => Number(await centeredNote.getAttribute("data-x"))).toBeLessThan(0);
+  await expect.poll(async () => Number(await centeredNote.getAttribute("data-y"))).toBeLessThan(0);
+});
+
+test("pinboard animates note movement from another user", async ({ browser }) => {
+  const firstContext = await browser.newContext();
+  const secondContext = await browser.newContext();
+  try {
+    const first = await firstContext.newPage();
+    const second = await secondContext.newPage();
+    await Promise.all([first.goto("/"), second.goto("/")]);
+    await expect(first.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+    await expect(second.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+
+    await first.getByRole("button", { name: "Pinboard" }).click();
+    await second.getByRole("button", { name: "Pinboard" }).click();
+    await expect(first.getByRole("button", { name: "Leave" })).toBeVisible();
+    await expect(second.getByRole("button", { name: "Leave" })).toBeVisible();
+
+    const text = `Slide this note ${Date.now()}`;
+    const beforeCount = await second.locator(".pin-note").count();
+    await first.locator("[data-pinboard-new-text]").fill(text);
+    await first.locator("[data-pinboard-create]").getByRole("button", { name: "Add Note" }).click();
+    await expect(second.locator(".pin-note")).toHaveCount(beforeCount + 1);
+    const firstNote = first.locator(".pin-note").filter({ hasText: text }).first();
+    const secondNote = second.locator(".pin-note").filter({ hasText: text }).first();
+    await expect(secondNote).toBeVisible();
+    const beforeX = Number(await secondNote.getAttribute("data-x"));
+
+    const handle = firstNote.locator("[data-pin-note-drag]");
+    const box = await handle.boundingBox();
+    if (!box) throw new Error("pin note drag handle missing");
+    await first.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await first.mouse.down();
+    await first.mouse.move(box.x + box.width / 2 + 96, box.y + box.height / 2 + 54, { steps: 4 });
+    await first.mouse.up();
+
+    await expect(second.locator(".pin-note-animating").filter({ hasText: text })).toHaveCount(1);
+    await expect.poll(async () => Number(await secondNote.getAttribute("data-x"))).toBeGreaterThan(beforeX);
+  } finally {
+    await firstContext.close();
+    await secondContext.close();
+  }
+});
+
+test("pinboard shares viewport presence overlays", async ({ browser }) => {
+  const firstContext = await browser.newContext();
+  const secondContext = await browser.newContext();
+  try {
+    const first = await firstContext.newPage();
+    const second = await secondContext.newPage();
+    await Promise.all([first.goto("/"), second.goto("/")]);
+    await expect(first.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+    await expect(second.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+    const firstActor = (await first.locator(".actor").textContent())?.trim() ?? "";
+
+    await first.getByRole("button", { name: "Pinboard" }).click();
+    await second.getByRole("button", { name: "Pinboard" }).click();
+    await expect(first.getByRole("button", { name: "Leave" })).toBeVisible();
+    await expect(second.getByRole("button", { name: "Leave" })).toBeVisible();
+
+    await first.getByRole("button", { name: "Zoom in" }).click();
+    const overlay = second.locator(`[data-pinboard-viewport="${firstActor}"]`);
+    await expect(overlay).toBeVisible();
+    await expect(overlay).toHaveAttribute("title", /Guest|guest_/);
+    await expect.poll(async () => boxKey(overlay)).not.toBe("");
+    const before = await boxKey(overlay);
+    await overlay.evaluate((element) => { (element as HTMLElement).dataset.stableMarker = "kept"; });
+
+    await first.getByRole("button", { name: "Zoom in" }).click();
+    await expect.poll(async () => boxKey(overlay)).not.toBe(before);
+    await expect.poll(async () => overlay.evaluate((element) => (element as HTMLElement).dataset.stableMarker ?? "")).toBe("kept");
+
+    await first.getByRole("button", { name: "Leave" }).click();
+    await expect(overlay).toHaveCount(0);
+  } finally {
+    await firstContext.close();
+    await secondContext.close();
+  }
 });
 
 test("chat controls follow room membership", async ({ page }) => {
@@ -297,6 +458,21 @@ test("dubspace controls advertise operators to the living room", async ({ browse
     await firstContext.close();
     await secondContext.close();
   }
+});
+
+test("chat command enters dubspace UI", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+  const actor = (await page.locator(".actor").textContent())?.trim() ?? "";
+
+  await page.getByRole("button", { name: "Enter" }).click();
+  await expect(page.getByRole("button", { name: "Leave" })).toBeVisible();
+  await page.locator("[data-chat-input]").fill("enter dubspace");
+  await page.locator("[data-chat-input]").press("Enter");
+
+  await expect(page.getByRole("button", { name: "Dubspace" })).toHaveClass(/active/);
+  await expect(page.locator(".dubspace-presence")).toContainText(actor);
+  await expect(page.getByRole("button", { name: "Leave" })).toBeVisible();
 });
 
 test("taskspace supports hierarchical task workflow", async ({ page, request }) => {

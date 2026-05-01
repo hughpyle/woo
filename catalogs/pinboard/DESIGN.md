@@ -8,8 +8,8 @@ to coordinate by placing, editing, and moving text notes on a persistent board.
 Show that a Woo object can be both:
 
 - a visible thing in a room; and
-- its own `$space` with an independent UI, presence list, sequenced state, and
-  agent tools.
+- its own `$space` with an independent UI, presence/minimap overview,
+  sequenced state, and agent tools.
 
 This is the next coordination test after chat and taskspace. It should feel less
 procedural than taskspace and more object-like than a global app tab.
@@ -150,7 +150,12 @@ Direct/live pinboard observations:
 |---|---|
 | `pinboard_entered` | `{source, actor}` |
 | `pinboard_left` | `{source, actor}` |
-| `pinboard_cursor` | `{source, actor, x, y}` |
+| `pinboard_viewport` | `{source, actor, board, x, y, w, h, scale}` |
+
+`pinboard_viewport` is transient presence, not durable board state. It reports
+the actor's visible board-space rectangle so the presence overview can show
+where each participant is looking. The overview marker disappears when the
+actor leaves the pinboard.
 
 Room-visible observations are object behavior, not core policy. The first
 pinboard should emit a small live summary to the Deck for visible manipulations:
@@ -168,13 +173,19 @@ Standalone pinboard UI:
 
 - Opens against a target pinboard object.
 - Calls `enter` on mount and `leave` on unmount when possible.
-- Shows active board participants.
+- Shows active board participants through a minimap-style presence overview.
 - Renders note records as draggable/resizable rectangles on a board canvas.
+- Keeps the main board canvas focused on notes; it does not render participant
+  viewport overlays there.
+- Renders the presence overview as a zoomed-out board map: notes are small
+  colored rectangles, participant viewports are translucent rectangles, hovering
+  a viewport identifies the actor, and clicking the overview recenters the main
+  board view with SISO animation.
 - Supports adding plain text notes.
 - Supports editing text, color, position, size, and deletion.
 - Sends drag/resize commits as sequenced calls.
-- May send cursor/drag previews as direct calls, but the durable note position
-  changes only on sequenced commit.
+- Sends viewport previews as direct calls; the durable note position changes
+  only on sequenced commit.
 
 The board should be usable without chat. Chat sees the board as an object;
 pinboard UI sees the board as the primary world.

@@ -780,29 +780,162 @@ input[type="range"] {
   overflow: auto;
 }
 
+.pinboard-presence {
+  display: grid;
+  grid-template-rows: auto minmax(0, auto);
+  gap: 0.6rem;
+}
+
+.pinboard-presence h2 {
+  margin: 0;
+}
+
+.pinboard-stage-panel {
+  display: flex;
+  overflow: hidden;
+  padding: 0;
+  min-height: 420px;
+}
+
 .pinboard-stage {
-  width: var(--pinboard-w);
-  height: var(--pinboard-h);
-  min-width: 100%;
-  min-height: 100%;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   position: relative;
   overflow: hidden;
-  background:
+  background-color: #e5d5b6;
+  background-image:
     linear-gradient(90deg, rgb(75 84 73 / 0.06) 1px, transparent 1px),
-    linear-gradient(rgb(75 84 73 / 0.06) 1px, transparent 1px),
-    #e5d5b6;
-  background-size: 24px 24px;
+    linear-gradient(rgb(75 84 73 / 0.06) 1px, transparent 1px);
+  background-size: var(--pinboard-grid-size, 24px) var(--pinboard-grid-size, 24px);
+  background-position: var(--pinboard-grid-x, 0) var(--pinboard-grid-y, 0);
   border: 1px solid #c6b58f;
   border-radius: 7px;
+  cursor: grab;
+  touch-action: none;
+  overscroll-behavior: contain;
+}
+
+.pinboard-stage.panning {
+  cursor: grabbing;
+}
+
+.pinboard-stage.viewport-animating {
+  transition:
+    background-position 480ms cubic-bezier(0.16, 1, 0.3, 1),
+    background-size 480ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.pinboard-canvas {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: max(var(--pinboard-w), 6000px);
+  height: max(var(--pinboard-h), 4000px);
+  transform-origin: 0 0;
+}
+
+.pinboard-canvas.viewport-animating {
+  transition: transform 480ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+.pinboard-zoom-controls {
+  position: absolute;
+  z-index: 10000;
+  right: 0.75rem;
+  top: 0.75rem;
+  display: inline-grid;
+  grid-template-columns: 2rem 3.25rem 2rem;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border: 1px solid rgb(59 68 56 / 0.22);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 0.88);
+  box-shadow: 0 4px 12px rgb(46 38 23 / 0.14);
+}
+
+.pinboard-zoom-controls button {
+  min-width: 2rem;
+  padding: 0.35rem 0;
+}
+
+.pinboard-zoom-controls span {
+  text-align: center;
+  font-size: 0.78rem;
+  color: #4d594b;
 }
 
 .pinboard-empty {
+  position: absolute;
+  left: 1rem;
+  top: 1rem;
   padding: 1rem;
   color: #5f685d;
 }
 
+.pinboard-map {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1.15;
+  min-height: 11rem;
+  overflow: hidden;
+  border: 1px solid rgb(74 84 71 / 0.28);
+  border-radius: 6px;
+  background: #eadbbc;
+  cursor: crosshair;
+}
+
+.pinboard-map-note {
+  position: absolute;
+  min-width: 3px;
+  min-height: 3px;
+  border: 1px solid rgb(39 39 31 / 0.75);
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.pinboard-map-viewport {
+  position: absolute;
+  min-width: 5px;
+  min-height: 5px;
+  padding: 0;
+  appearance: none;
+  border: 1px solid rgb(25 90 110 / 0.62);
+  border-radius: 2px;
+  background: rgb(55 158 184 / 0.18);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.28);
+  cursor: crosshair;
+  transition:
+    left 360ms cubic-bezier(0.16, 1, 0.3, 1),
+    top 360ms cubic-bezier(0.16, 1, 0.3, 1),
+    width 360ms cubic-bezier(0.16, 1, 0.3, 1),
+    height 360ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.pinboard-map-viewport:hover {
+  background: rgb(55 158 184 / 0.26);
+}
+
+.pinboard-map-viewport.self {
+  border-color: rgb(56 80 56 / 0.82);
+  background: rgb(90 120 72 / 0.14);
+}
+
+.pinboard-map-viewport.self:hover {
+  background: rgb(90 120 72 / 0.2);
+}
+
+.pinboard-map-empty {
+  margin: 0.5rem 0 0;
+  color: #697266;
+  font-size: 0.78rem;
+}
+
 .pin-note {
   position: absolute;
+  cursor: auto;
   min-width: 100px;
   min-height: 72px;
   display: grid;
@@ -812,6 +945,11 @@ input[type="range"] {
   border: 1px solid rgb(65 58 42 / 0.35);
   border-radius: 4px;
   box-shadow: 0 4px 10px rgb(58 48 30 / 0.16);
+}
+
+.pin-note-animating {
+  transition: transform 360ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
 }
 
 .pin-note-yellow {
@@ -1071,5 +1209,14 @@ textarea {
 
   .pitch-readout strong {
     font-size: 0.74rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pin-note-animating,
+  .pinboard-stage.viewport-animating,
+  .pinboard-canvas.viewport-animating,
+  .pinboard-map-viewport {
+    transition: none;
   }
 }

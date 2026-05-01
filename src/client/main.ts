@@ -20,6 +20,8 @@ type AppState = {
   selectedTask?: string;
   taskExpanded: Record<string, boolean>;
   taskStatusFilter: Record<string, boolean>;
+  pinboardView: PinboardView;
+  pinboardViewports: Record<string, PinboardViewportPresence>;
   compileResult?: any;
 };
 
@@ -42,6 +44,37 @@ type RenderFocusSnapshot = {
   selectionEnd?: number;
 };
 
+type PinNoteBox = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+
+type PinNoteAnimation = {
+  id: string;
+  from: PinNoteBox;
+};
+
+type PinboardView = {
+  x: number;
+  y: number;
+  scale: number;
+};
+
+type PinboardViewportPresence = PinNoteBox & {
+  actor: string;
+  scale: number;
+  at: number;
+};
+
+type PinboardMapModel = {
+  minX: number;
+  minY: number;
+  spanX: number;
+  spanY: number;
+};
+
 const state: AppState = {
   tab: "chat",
   audioOn: false,
@@ -56,7 +89,9 @@ const state: AppState = {
   observations: [],
   selectedObject: "",
   taskExpanded: {},
-  taskStatusFilter: { open: true, claimed: true, in_progress: true, blocked: true, done: false }
+  taskStatusFilter: { open: true, claimed: true, in_progress: true, blocked: true, done: false },
+  pinboardView: { x: 0, y: 0, scale: 1 },
+  pinboardViewports: {}
 };
 
 let audio: DubAudio | undefined;
@@ -77,17 +112,29 @@ const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", 
 const taskStatuses = ["open", "claimed", "in_progress", "blocked", "done"] as const;
 const directThrottle = new Map<string, number>();
 const pendingDirect = new Map<string, (result: any) => void>();
+const pendingTaskSelections = new Set<string>();
 const reconnectBaseDelayMs = 500;
 const reconnectMaxDelayMs = 5000;
 const heartbeatIntervalMs = 25_000;
 const observationDisplayLimit = 20;
+const PINBOARD_MIN_ZOOM = 0.35;
+const PINBOARD_MAX_ZOOM = 2.75;
+const PINBOARD_ZOOM_STEP = 1.2;
+const PINBOARD_GRID_SIZE = 24;
+const PINBOARD_VIEW_ANIMATION_MS = 480;
+const PINBOARD_VIEWPORT_MIN_MS = 110;
 let reconnectDelayMs = reconnectBaseDelayMs;
 let reconnectTimer: number | undefined;
 let heartbeatTimer: number | undefined;
 let lastPongAt = 0;
+let pinboardViewportTimer: number | undefined;
+let pinboardViewAnimationTimer: number | undefined;
+let lastPinboardViewportPublishAt = 0;
+let lastPinboardViewportSent: PinNoteBox & { scale: number } | undefined;
 
 connect();
 window.setInterval(pruneLiveControls, 700);
+window.addEventListener("resize", () => schedulePinboardViewportPublish());
 
 function connect() {
   if (state.socket?.readyState === WebSocket.OPEN || state.socket?.readyState === WebSocket.CONNECTING) return;
@@ -114,13 +161,15 @@ function connect() {
       requestReplay(socket);
     }
     if (frame.op === "applied") {
+      const pinboardAnimations = capturePinboardAnimations(frame.observations ?? []);
       forgetLiveControls(frame.observations ?? []);
-      rememberTaskObservations(frame.observations ?? []);
+      rememberTaskObservations(frame.observations ?? [], typeof frame.id === "string" ? frame.id : undefined);
       for (const observation of frame.observations ?? []) if (isChatObservation(observation)) receiveChatEvent(observation, false);
       state.observations.unshift({ seq: frame.seq, space: frame.space, observations: frame.observations, message: frame.message });
       trimObservations();
       rememberSeq(frame.space, frame.seq);
       await refresh();
+      animatePinboardNotes(pinboardAnimations);
     }
     if (frame.op === "event") {
       receiveLiveEvent(frame.observation);
@@ -147,6 +196,7 @@ function connect() {
     }
     if (frame.op === "error") {
       if (typeof frame.id === "string") pendingDirect.delete(frame.id);
+      if (typeof frame.id === "string") pendingTaskSelections.delete(frame.id);
       if (frame.error?.code === "E_NOSESSION") {
         clearSession();
         if (socket.readyState === WebSocket.OPEN) sendSocket(socket, { op: "auth", token: "guest:local" });
@@ -161,6 +211,7 @@ function connect() {
     if (state.socket !== socket) return;
     stopHeartbeat();
     pendingDirect.clear();
+    pendingTaskSelections.clear();
     scheduleReconnect();
   });
   socket.addEventListener("error", () => {
@@ -424,6 +475,7 @@ function chatRoom() {
 function call(space: string, target: string, verb: string, args: any[] = []) {
   const id = crypto.randomUUID();
   sendFrame({ op: "call", id, space, message: { target, verb, args } });
+  return id;
 }
 
 function direct(target: string, verb: string, args: any[] = [], onResult?: (result: any) => void) {
@@ -517,24 +569,47 @@ function commitCueControls(target: string) {
 }
 
 function receiveLiveEvent(observation: any) {
+  if (isPinboardViewportObservation(observation)) {
+    receivePinboardViewport(observation);
+    return;
+  }
   // Pinboard side effects (window auto-open/close + state refresh) must fire
   // before the chat-observation branch, because pinboard_* types appear in
   // both observation lists and the chat branch returns early. The board is a
   // focus surface, not a place you travel to (catalogs/pinboard/DESIGN.md);
   // opening/closing the tab is the chat-side analogue of mounting the board.
   if (isPinboardObservation(observation)) {
+    const pinboardAnimations = capturePinboardAnimations([observation]);
+    if (observation?.type === "pinboard_left") removePinboardViewport(String(observation?.actor ?? ""));
     if (String(observation?.actor ?? "") === state.actor) {
       if (observation?.type === "pinboard_entered" && state.tab !== "pinboard") {
         state.tab = "pinboard";
         render();
       } else if (observation?.type === "pinboard_left" && state.tab === "pinboard") {
+        clearPinboardViewports();
         state.tab = "chat";
         render();
       }
     }
-    void refresh();
+    const refreshed = refresh();
+    void refreshed.then(() => animatePinboardNotes(pinboardAnimations));
   }
   if (isDubspaceObservation(observation)) {
+    if (String(observation?.actor ?? "") === state.actor) {
+      if (observation?.type === "dubspace_entered") {
+        addDubspaceOperator(state.actor);
+        if (state.tab !== "dubspace") {
+          state.tab = "dubspace";
+          render();
+        }
+      } else if (observation?.type === "dubspace_left") {
+        removeDubspaceOperator(state.actor);
+        if (state.tab === "dubspace") {
+          state.tab = "chat";
+          render();
+        }
+      }
+    }
     void refresh();
   }
   if (isChatObservation(observation)) {
@@ -613,10 +688,11 @@ function forgetLiveControls(observations: any[]) {
   }
 }
 
-function rememberTaskObservations(observations: any[]) {
+function rememberTaskObservations(observations: any[], frameId?: string) {
+  const shouldSelectCreatedTask = Boolean(frameId && pendingTaskSelections.delete(frameId));
   for (const obs of observations) {
     if (obs?.type === "task_created" && typeof obs.task === "string") {
-      state.selectedTask = obs.task;
+      if (shouldSelectCreatedTask) state.selectedTask = obs.task;
       state.taskExpanded[obs.task] = true;
       if (typeof obs.parent === "string") state.taskExpanded[obs.parent] = true;
     }
@@ -1023,6 +1099,22 @@ function setDubspaceOperators(result: any) {
   if (state.world.objects?.[space]?.props) state.world.objects[space].props.operators = state.world.dubspace[space].props.operators;
 }
 
+function addDubspaceOperator(actor: string | undefined) {
+  const space = dubspaceSpace();
+  if (!actor || !space || !state.world?.dubspace?.[space]) return;
+  const operators = dubspaceOperators();
+  if (operators.includes(actor)) return;
+  state.world.dubspace[space].props.operators = [...operators, actor];
+  if (state.world.objects?.[space]?.props) state.world.objects[space].props.operators = state.world.dubspace[space].props.operators;
+}
+
+function removeDubspaceOperator(actor: string | undefined) {
+  const space = dubspaceSpace();
+  if (!actor || !space || !state.world?.dubspace?.[space]) return;
+  state.world.dubspace[space].props.operators = dubspaceOperators().filter((item) => item !== actor);
+  if (state.world.objects?.[space]?.props) state.world.objects[space].props.operators = state.world.dubspace[space].props.operators;
+}
+
 function bindPitchDial(dial: HTMLElement) {
   const input = dial.parentElement?.querySelector<HTMLInputElement>("[data-pitch-input]");
   if (!input) return;
@@ -1155,6 +1247,136 @@ function isPinboardObservation(observation: any) {
     "note_deleted",
     "notes_cleared"
   ].includes(String(observation?.type ?? ""));
+}
+
+function isPinboardViewportObservation(observation: any) {
+  return String(observation?.type ?? "") === "pinboard_viewport";
+}
+
+function receivePinboardViewport(observation: any) {
+  const actor = String(observation?.actor ?? "");
+  if (!actor || actor === state.actor) return;
+  const board = pinboardSpace();
+  const source = String(observation?.board ?? observation?.source ?? "");
+  if (board && source && source !== board) return;
+  const next = pinboardViewportFromObservation(actor, observation);
+  if (!next) return;
+  state.pinboardViewports[actor] = next;
+  upsertPinboardViewportElement(next);
+}
+
+function pinboardViewportFromObservation(actor: string, observation: any): PinboardViewportPresence | undefined {
+  const x = Number(observation?.x);
+  const y = Number(observation?.y);
+  const w = Number(observation?.w);
+  const h = Number(observation?.h);
+  const scale = Number(observation?.scale);
+  if (![x, y, w, h, scale].every(Number.isFinite)) return undefined;
+  if (w <= 0 || h <= 0 || scale <= 0) return undefined;
+  return {
+    actor,
+    x,
+    y,
+    w: clamp(w, 24, 10000),
+    h: clamp(h, 24, 10000),
+    scale: clamp(scale, PINBOARD_MIN_ZOOM, PINBOARD_MAX_ZOOM),
+    at: Date.now()
+  };
+}
+
+function capturePinboardAnimations(observations: any[]): PinNoteAnimation[] {
+  if (state.tab !== "pinboard") return [];
+  const animations = new Map<string, PinNoteAnimation>();
+  for (const observation of observations) {
+    const type = String(observation?.type ?? "");
+    if (type !== "note_moved" && type !== "note_resized") continue;
+    if (String(observation?.actor ?? "") === state.actor) continue;
+    const id = String(observation?.id ?? "");
+    if (!id || animations.has(id)) continue;
+    const from = pinNoteBox(id);
+    if (from) animations.set(id, { id, from });
+  }
+  return Array.from(animations.values());
+}
+
+function animatePinboardNotes(animations: PinNoteAnimation[]) {
+  if (state.tab !== "pinboard" || animations.length === 0) return;
+  for (const animation of animations) animatePinboardNote(animation);
+}
+
+function animatePinboardNote(animation: PinNoteAnimation) {
+  const note = pinNoteElement(animation.id);
+  if (!note) return;
+  const to = pinNoteBox(animation.id);
+  if (!to) return;
+  const dx = animation.from.x - to.x;
+  const dy = animation.from.y - to.y;
+  const sx = to.w > 0 ? animation.from.w / to.w : 1;
+  const sy = to.h > 0 ? animation.from.h / to.h : 1;
+  if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(sx - 1) < 0.01 && Math.abs(sy - 1) < 0.01) return;
+
+  note.classList.remove("pin-note-animating");
+  note.style.transition = "none";
+  note.style.transformOrigin = "0 0";
+  note.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+  note.getBoundingClientRect();
+  window.requestAnimationFrame(() => {
+    note.classList.add("pin-note-animating");
+    note.style.transition = "";
+    note.style.transform = "translate(0, 0) scale(1, 1)";
+    const cleanup = () => {
+      note.classList.remove("pin-note-animating");
+      note.style.transform = "";
+      note.style.transformOrigin = "";
+    };
+    note.addEventListener("transitionend", cleanup, { once: true });
+    window.setTimeout(cleanup, 520);
+  });
+}
+
+function pinNoteElement(id: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`[data-pin-note="${cssAttrValue(id)}"]`);
+}
+
+function pinNoteBox(id: string): PinNoteBox | null {
+  const note = pinNoteElement(id);
+  const stage = note?.closest<HTMLElement>(".pinboard-stage");
+  if (!note || !stage) return null;
+  const noteRect = note.getBoundingClientRect();
+  const stageRect = stage.getBoundingClientRect();
+  return {
+    x: noteRect.left - stageRect.left,
+    y: noteRect.top - stageRect.top,
+    w: noteRect.width,
+    h: noteRect.height
+  };
+}
+
+function pinboardViewportElement(actor: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`[data-pinboard-viewport="${cssAttrValue(actor)}"]`);
+}
+
+function upsertPinboardViewportElement(viewport: PinboardViewportPresence) {
+  void viewport;
+  updatePinboardMapViewports();
+}
+
+function removePinboardViewport(actor: string) {
+  if (!actor) return;
+  delete state.pinboardViewports[actor];
+  pinboardViewportElement(actor)?.remove();
+  updatePinboardMapViewports();
+}
+
+function clearPinboardViewports() {
+  state.pinboardViewports = {};
+  if (pinboardViewportTimer !== undefined) {
+    window.clearTimeout(pinboardViewportTimer);
+    pinboardViewportTimer = undefined;
+  }
+  lastPinboardViewportSent = undefined;
+  document.querySelectorAll("[data-pinboard-viewport]").forEach((element) => element.remove());
+  refreshPinboardMap();
 }
 
 function receiveChatEvent(observation: any, shouldRender = true) {
@@ -1383,6 +1605,21 @@ function executeChatPlan(plan: any, originalText: string) {
 
 function renderChatCommandResult(plan: any, result: any, originalText: string) {
   const verb = String(plan?.verb ?? "");
+  const target = String(plan?.target ?? "");
+  if (verb === "enter" && target === dubspaceSpace()) {
+    setDubspaceOperators(result);
+    state.tab = "dubspace";
+    void refresh();
+    render();
+    return;
+  }
+  if (verb === "enter" && target === pinboardSpace()) {
+    setPinboardPresent(result);
+    state.tab = "pinboard";
+    void refresh();
+    render();
+    return;
+  }
   if (verb === "who") {
     setChatPresent(result);
     return;
@@ -1397,7 +1634,7 @@ function renderChatCommandResult(plan: any, result: any, originalText: string) {
     return;
   }
   if (verb === "enter") {
-    if (typeof plan?.target === "string") setCurrentChatRoom(plan.target);
+    if (target) setCurrentChatRoom(target);
     setChatPresent(result);
     void refresh();
     return;
@@ -1435,6 +1672,7 @@ function renderPinboard() {
   const width = pinNoteNumber(viewport.w, 960);
   const height = pinNoteNumber(viewport.h, 560);
   const notes = Array.isArray(pinboard?.notes) ? pinboard.notes : [];
+  const view = normalizedPinboardView();
   if (!board) {
     return `
       <section class="toolbar"><h1>Pinboard</h1></section>
@@ -1450,19 +1688,129 @@ function renderPinboard() {
       <div class="pinboard-work">
         ${inBoard ? renderPinboardCreate(pinboard.palette) : ""}
         <div class="panel pinboard-stage-panel">
-          <div class="pinboard-stage" style="--pinboard-w:${width}px; --pinboard-h:${height}px">
-            ${notes.map((note: any) => renderPinNote(note, inBoard, pinboard.palette)).join("") || `<div class="pinboard-empty">${escapeHtml(inBoard ? "Add a note to start." : "Enter the pinboard to add or move notes.")}</div>`}
+          <div class="pinboard-stage" data-pinboard-stage style="${pinboardStageStyle(width, height, view)}">
+            <div class="pinboard-zoom-controls" aria-label="Pinboard zoom controls">
+              <button data-pinboard-zoom="out" aria-label="Zoom out">-</button>
+              <span data-pinboard-zoom-label>${Math.round(view.scale * 100)}%</span>
+              <button data-pinboard-zoom="in" aria-label="Zoom in">+</button>
+            </div>
+            <div class="pinboard-canvas" data-pinboard-canvas style="${pinboardViewStyle(view)}">
+              ${notes.map((note: any) => renderPinNote(note, inBoard, pinboard.palette)).join("") || `<div class="pinboard-empty">${escapeHtml(inBoard ? "Add a note to start." : "Enter the pinboard to add or move notes.")}</div>`}
+            </div>
           </div>
         </div>
       </div>
       <aside class="panel pinboard-presence">
-        <h2>Present</h2>
-        <div class="presence-list">
-          ${present.map((id: string) => `<button disabled>${escapeHtml(actorLabel(id))}<span>${escapeHtml(id)}</span></button>`).join("") || "<p>No one is here.</p>"}
-        </div>
+        <h2>Presence</h2>
+        <div data-pinboard-map-shell>${renderPinboardMap(notes, present, width, height)}</div>
       </aside>
     </section>
   `;
+}
+
+function renderPinboardMap(notes: any[], present: string[], width: number, height: number) {
+  const model = pinboardMapModel(notes, present, width, height);
+  return `
+    <div class="pinboard-map" data-pinboard-map data-min-x="${roundCss(model.minX)}" data-min-y="${roundCss(model.minY)}" data-span-x="${roundCss(model.spanX)}" data-span-y="${roundCss(model.spanY)}" aria-label="Pinboard overview">
+      ${renderPinboardMapNotes(notes, model)}
+      ${renderPinboardMapViewports(present, model, width, height)}
+    </div>
+    ${present.length === 0 ? `<p class="pinboard-map-empty">No one is here.</p>` : ""}
+  `;
+}
+
+function renderPinboardMapNotes(notes: any[], model: PinboardMapModel) {
+  return notes.map((note: any) => {
+    const id = String(note?.id ?? "");
+    const color = pinboardPalette(state.world?.pinboard?.palette).includes(String(note?.color)) ? String(note.color) : "yellow";
+    return `<div class="pinboard-map-note pin-note-${escapeHtml(color)}" data-pinboard-map-note="${escapeHtml(id)}" style="${pinboardMapBoxStyle(pinNoteRecordBox(note), model)}"></div>`;
+  }).join("");
+}
+
+function renderPinboardMapViewports(present: string[], model: PinboardMapModel, width: number, height: number) {
+  return pinboardMapViewports(present, width, height).map((viewport) => `
+    <button class="pinboard-map-viewport ${viewport.actor === state.actor ? "self" : ""}" data-pinboard-viewport="${escapeHtml(viewport.actor)}" title="${escapeHtml(actorLabel(viewport.actor))}" aria-label="${escapeHtml(actorLabel(viewport.actor))}" style="${pinboardMapBoxStyle(viewport, model)}"></button>
+  `).join("");
+}
+
+function pinboardMapBoxStyle(box: PinNoteBox, model: PinboardMapModel) {
+  const { left, top, width, height } = pinboardMapBoxPercent(box, model);
+  return `left:${roundCss(left)}%; top:${roundCss(top)}%; width:${roundCss(width)}%; height:${roundCss(height)}%;`;
+}
+
+function setPinboardMapBoxStyle(element: HTMLElement, box: PinNoteBox, model: PinboardMapModel) {
+  const { left, top, width, height } = pinboardMapBoxPercent(box, model);
+  element.style.left = `${roundCss(left)}%`;
+  element.style.top = `${roundCss(top)}%`;
+  element.style.width = `${roundCss(width)}%`;
+  element.style.height = `${roundCss(height)}%`;
+}
+
+function pinboardMapBoxPercent(box: PinNoteBox, model: PinboardMapModel) {
+  return {
+    left: ((box.x - model.minX) / model.spanX) * 100,
+    top: ((box.y - model.minY) / model.spanY) * 100,
+    width: (box.w / model.spanX) * 100,
+    height: (box.h / model.spanY) * 100
+  };
+}
+
+function pinboardMapModel(notes: any[], present: string[], width: number, height: number): PinboardMapModel {
+  const boxes: PinNoteBox[] = notes.map(pinNoteRecordBox);
+  boxes.push(...pinboardMapViewports(present, width, height));
+  if (boxes.length === 0) boxes.push({ x: 0, y: 0, w: width, h: height });
+  const minX = Math.min(...boxes.map((box) => box.x));
+  const minY = Math.min(...boxes.map((box) => box.y));
+  const maxX = Math.max(...boxes.map((box) => box.x + box.w));
+  const maxY = Math.max(...boxes.map((box) => box.y + box.h));
+  const padding = Math.max(80, Math.min(240, Math.max(maxX - minX, maxY - minY) * 0.12));
+  const paddedMinX = minX - padding;
+  const paddedMinY = minY - padding;
+  return {
+    minX: paddedMinX,
+    minY: paddedMinY,
+    spanX: Math.max(1, maxX - minX + padding * 2),
+    spanY: Math.max(1, maxY - minY + padding * 2)
+  };
+}
+
+function pinboardMapViewports(present: string[], width: number, height: number): PinboardViewportPresence[] {
+  const presentActors = new Set(present.map(String));
+  const viewports = Object.values(state.pinboardViewports).filter((viewport) => presentActors.has(viewport.actor));
+  if (state.actor && presentActors.has(state.actor)) {
+    const local = currentPinboardViewport() ?? estimatedPinboardViewport(width, height);
+    viewports.push({ actor: state.actor, ...local, at: Date.now() });
+  }
+  return viewports;
+}
+
+function estimatedPinboardViewport(width: number, height: number): PinNoteBox & { scale: number } {
+  const view = normalizedPinboardView();
+  return {
+    x: (0 - view.x) / view.scale,
+    y: (0 - view.y) / view.scale,
+    w: width / view.scale,
+    h: height / view.scale,
+    scale: view.scale
+  };
+}
+
+function pinNoteRecordBox(note: any): PinNoteBox {
+  return {
+    x: pinNoteNumber(note?.x, 40),
+    y: pinNoteNumber(note?.y, 40),
+    w: pinNoteNumber(note?.w, 180),
+    h: pinNoteNumber(note?.h, 110)
+  };
+}
+
+function pinboardStageStyle(width: number, height: number, view = normalizedPinboardView()) {
+  return `--pinboard-w:${width}px; --pinboard-h:${height}px; ${pinboardGridStyle(view)}`;
+}
+
+function pinboardGridStyle(view = normalizedPinboardView()) {
+  const grid = PINBOARD_GRID_SIZE * view.scale;
+  return `--pinboard-grid-size:${roundCss(grid)}px; --pinboard-grid-x:${roundCss(mod(view.x, grid))}px; --pinboard-grid-y:${roundCss(mod(view.y, grid))}px;`;
 }
 
 function renderPinboardCreate(palette: string[]) {
@@ -1511,7 +1859,8 @@ function bindPinboard() {
     const colorInput = document.querySelector<HTMLSelectElement>("[data-pinboard-new-color]");
     const text = textInput?.value.trim() ?? "";
     if (!text) return;
-    pinboardCall("add_note", [text, colorInput?.value ?? "yellow"]);
+    const placement = newPinNotePlacement();
+    pinboardCall("add_note", [text, colorInput?.value ?? "yellow", placement.x, placement.y, placement.w, placement.h]);
     if (textInput) textInput.value = "";
   });
   document.querySelectorAll<HTMLTextAreaElement>("[data-pin-note-text]").forEach((input) => {
@@ -1537,6 +1886,303 @@ function bindPinboard() {
   });
   document.querySelectorAll<HTMLButtonElement>("[data-pin-note-drag]").forEach(bindPinNoteDrag);
   document.querySelectorAll<HTMLButtonElement>("[data-pin-note-resize]").forEach(bindPinNoteResize);
+  bindPinboardMap();
+  bindPinboardViewport();
+}
+
+function bindPinboardMap() {
+  document.querySelector<HTMLElement>("[data-pinboard-map]")?.addEventListener("click", (event) => {
+    const map = event.currentTarget as HTMLElement;
+    const rect = map.getBoundingClientRect();
+    const spanX = pinNoteNumber(map.dataset.spanX, 1);
+    const spanY = pinNoteNumber(map.dataset.spanY, 1);
+    const minX = pinNoteNumber(map.dataset.minX, 0);
+    const minY = pinNoteNumber(map.dataset.minY, 0);
+    const x = minX + ((event.clientX - rect.left) / Math.max(1, rect.width)) * spanX;
+    const y = minY + ((event.clientY - rect.top) / Math.max(1, rect.height)) * spanY;
+    centerPinboardOn(x, y);
+  });
+}
+
+function newPinNotePlacement(): PinNoteBox {
+  const w = 180;
+  const h = 110;
+  const viewport = currentPinboardViewport();
+  if (!viewport) return { x: 48, y: 48, w, h };
+  return {
+    x: Math.round(viewport.x + viewport.w / 2 - w / 2),
+    y: Math.round(viewport.y + viewport.h / 2 - h / 2),
+    w,
+    h
+  };
+}
+
+function refreshPinboardMap() {
+  if (state.tab !== "pinboard") return;
+  const shell = document.querySelector<HTMLElement>("[data-pinboard-map-shell]");
+  const data = pinboardMapData();
+  if (!shell || !data) return;
+  shell.innerHTML = renderPinboardMap(data.notes, data.present, data.width, data.height);
+  bindPinboardMap();
+}
+
+function updatePinboardMapViewports() {
+  if (state.tab !== "pinboard") return;
+  const map = document.querySelector<HTMLElement>("[data-pinboard-map]");
+  const data = pinboardMapData();
+  if (!map || !data) return;
+  const model = pinboardMapModel(data.notes, data.present, data.width, data.height);
+  setPinboardMapData(map, model);
+  document.querySelectorAll<HTMLElement>("[data-pinboard-map-note]").forEach((note) => {
+    const id = note.dataset.pinboardMapNote ?? "";
+    const record = data.notes.find((item: any) => String(item?.id ?? "") === id);
+    if (record) setPinboardMapBoxStyle(note, pinNoteRecordBox(record), model);
+  });
+  const viewports = pinboardMapViewports(data.present, data.width, data.height);
+  const expected = new Set(viewports.map((viewport) => viewport.actor));
+  document.querySelectorAll<HTMLElement>("[data-pinboard-viewport]").forEach((element) => {
+    const actor = element.dataset.pinboardViewport ?? "";
+    if (!expected.has(actor)) element.remove();
+  });
+  for (const viewport of viewports) {
+    let element = pinboardViewportElement(viewport.actor);
+    if (!element) {
+      element = document.createElement("button");
+      element.className = "pinboard-map-viewport";
+      element.dataset.pinboardViewport = viewport.actor;
+      map.append(element);
+    }
+    element.classList.toggle("self", viewport.actor === state.actor);
+    element.setAttribute("title", actorLabel(viewport.actor));
+    element.setAttribute("aria-label", actorLabel(viewport.actor));
+    setPinboardMapBoxStyle(element, viewport, model);
+  }
+}
+
+function pinboardMapData(): { notes: any[]; present: string[]; width: number; height: number } | undefined {
+  const pinboard = state.world?.pinboard;
+  if (!pinboard) return undefined;
+  const viewport = pinboard?.viewport ?? { w: 960, h: 560 };
+  return {
+    width: pinNoteNumber(viewport.w, 960),
+    height: pinNoteNumber(viewport.h, 560),
+    present: Array.isArray(pinboard?.present) ? pinboard.present : [],
+    notes: Array.isArray(pinboard?.notes) ? pinboard.notes : []
+  };
+}
+
+function setPinboardMapData(map: HTMLElement, model: PinboardMapModel) {
+  map.dataset.minX = roundCss(model.minX);
+  map.dataset.minY = roundCss(model.minY);
+  map.dataset.spanX = roundCss(model.spanX);
+  map.dataset.spanY = roundCss(model.spanY);
+}
+
+function bindPinboardViewport() {
+  const stage = document.querySelector<HTMLElement>("[data-pinboard-stage]");
+  if (!stage) return;
+  document.querySelectorAll<HTMLButtonElement>("[data-pinboard-zoom]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const direction = button.dataset.pinboardZoom === "in" ? 1 : -1;
+      zoomPinboardAtStageCenter(direction > 0 ? PINBOARD_ZOOM_STEP : 1 / PINBOARD_ZOOM_STEP, true);
+    });
+  });
+  stage.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    if (event.ctrlKey || event.metaKey) {
+      zoomPinboardAtClient(Math.exp(-event.deltaY * 0.002), event.clientX, event.clientY);
+      return;
+    }
+    panPinboardBy(-event.deltaX, -event.deltaY);
+  }, { passive: false });
+
+  let active = false;
+  let startX = 0;
+  let startY = 0;
+  let baseX = 0;
+  let baseY = 0;
+  stage.addEventListener("pointerdown", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest(".pin-note, .pinboard-zoom-controls, textarea, input, select, button")) return;
+    active = true;
+    startX = event.clientX;
+    startY = event.clientY;
+    baseX = state.pinboardView.x;
+    baseY = state.pinboardView.y;
+    stage.classList.add("panning");
+    stage.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  stage.addEventListener("pointermove", (event) => {
+    if (!active) return;
+    state.pinboardView = {
+      ...state.pinboardView,
+      x: baseX + event.clientX - startX,
+      y: baseY + event.clientY - startY
+    };
+    applyPinboardView();
+  });
+  const stop = () => {
+    active = false;
+    stage.classList.remove("panning");
+  };
+  stage.addEventListener("pointerup", stop);
+  stage.addEventListener("pointercancel", stop);
+  schedulePinboardViewportPublish();
+}
+
+function normalizedPinboardView(): PinboardView {
+  const current = state.pinboardView;
+  const scale = clamp(Number(current.scale), PINBOARD_MIN_ZOOM, PINBOARD_MAX_ZOOM);
+  const x = Number.isFinite(Number(current.x)) ? Number(current.x) : 0;
+  const y = Number.isFinite(Number(current.y)) ? Number(current.y) : 0;
+  if (scale !== current.scale || x !== current.x || y !== current.y) state.pinboardView = { x, y, scale };
+  return state.pinboardView;
+}
+
+function pinboardViewStyle(view = normalizedPinboardView()) {
+  return `transform: translate(${roundCss(view.x)}px, ${roundCss(view.y)}px) scale(${roundCss(view.scale)});`;
+}
+
+function applyPinboardView(options: { animate?: boolean } = {}) {
+  const view = normalizedPinboardView();
+  const canvas = document.querySelector<HTMLElement>("[data-pinboard-canvas]");
+  const stage = document.querySelector<HTMLElement>("[data-pinboard-stage]");
+  if (options.animate) beginPinboardViewAnimation(stage, canvas);
+  if (canvas) canvas.style.transform = `translate(${roundCss(view.x)}px, ${roundCss(view.y)}px) scale(${roundCss(view.scale)})`;
+  if (stage) {
+    stage.style.setProperty("--pinboard-grid-size", `${roundCss(PINBOARD_GRID_SIZE * view.scale)}px`);
+    stage.style.setProperty("--pinboard-grid-x", `${roundCss(mod(view.x, PINBOARD_GRID_SIZE * view.scale))}px`);
+    stage.style.setProperty("--pinboard-grid-y", `${roundCss(mod(view.y, PINBOARD_GRID_SIZE * view.scale))}px`);
+  }
+  const label = document.querySelector<HTMLElement>("[data-pinboard-zoom-label]");
+  if (label) label.textContent = `${Math.round(view.scale * 100)}%`;
+  updatePinboardMapViewports();
+  schedulePinboardViewportPublish();
+}
+
+function beginPinboardViewAnimation(stage: HTMLElement | null, canvas: HTMLElement | null) {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  if (!stage || !canvas) return;
+  if (pinboardViewAnimationTimer !== undefined) window.clearTimeout(pinboardViewAnimationTimer);
+  stage.classList.add("viewport-animating");
+  canvas.classList.add("viewport-animating");
+  canvas.getBoundingClientRect();
+  pinboardViewAnimationTimer = window.setTimeout(() => {
+    stage.classList.remove("viewport-animating");
+    canvas.classList.remove("viewport-animating");
+    pinboardViewAnimationTimer = undefined;
+  }, PINBOARD_VIEW_ANIMATION_MS + 80);
+}
+
+function schedulePinboardViewportPublish() {
+  if (!pinboardActorPresent() || state.tab !== "pinboard" || !canSendDirect()) return;
+  if (pinboardViewportTimer !== undefined) return;
+  const wait = Math.max(0, PINBOARD_VIEWPORT_MIN_MS - (Date.now() - lastPinboardViewportPublishAt));
+  pinboardViewportTimer = window.setTimeout(() => {
+    pinboardViewportTimer = undefined;
+    publishPinboardViewport();
+  }, wait);
+}
+
+function publishPinboardViewport() {
+  if (!pinboardActorPresent() || state.tab !== "pinboard" || !canSendDirect()) return;
+  const viewport = currentPinboardViewport();
+  if (!viewport || !pinboardViewportChanged(viewport, lastPinboardViewportSent)) return;
+  lastPinboardViewportSent = viewport;
+  lastPinboardViewportPublishAt = Date.now();
+  const board = pinboardSpace();
+  if (board) direct(board, "viewport", [viewport.x, viewport.y, viewport.w, viewport.h, viewport.scale]);
+}
+
+function currentPinboardViewport(): (PinNoteBox & { scale: number }) | undefined {
+  const stage = document.querySelector<HTMLElement>("[data-pinboard-stage]");
+  if (!stage) return undefined;
+  const rect = stage.getBoundingClientRect();
+  const view = normalizedPinboardView();
+  if (rect.width <= 0 || rect.height <= 0 || view.scale <= 0) return undefined;
+  return {
+    x: (0 - view.x) / view.scale,
+    y: (0 - view.y) / view.scale,
+    w: rect.width / view.scale,
+    h: rect.height / view.scale,
+    scale: view.scale
+  };
+}
+
+function pinboardViewportChanged(next: PinNoteBox & { scale: number }, prev: (PinNoteBox & { scale: number }) | undefined) {
+  if (!prev) return true;
+  return (
+    Math.abs(next.x - prev.x) > 0.5 ||
+    Math.abs(next.y - prev.y) > 0.5 ||
+    Math.abs(next.w - prev.w) > 0.5 ||
+    Math.abs(next.h - prev.h) > 0.5 ||
+    Math.abs(next.scale - prev.scale) > 0.005
+  );
+}
+
+function pinboardActorPresent() {
+  return Boolean(state.actor && Array.isArray(state.world?.pinboard?.present) && state.world.pinboard.present.includes(state.actor));
+}
+
+function panPinboardBy(dx: number, dy: number) {
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+  state.pinboardView = {
+    ...state.pinboardView,
+    x: state.pinboardView.x + dx,
+    y: state.pinboardView.y + dy
+  };
+  applyPinboardView();
+}
+
+function centerPinboardOn(boardX: number, boardY: number) {
+  if (!Number.isFinite(boardX) || !Number.isFinite(boardY)) return;
+  const stage = document.querySelector<HTMLElement>("[data-pinboard-stage]");
+  if (!stage) return;
+  const rect = stage.getBoundingClientRect();
+  const view = normalizedPinboardView();
+  state.pinboardView = {
+    ...view,
+    x: rect.width / 2 - boardX * view.scale,
+    y: rect.height / 2 - boardY * view.scale
+  };
+  applyPinboardView({ animate: true });
+}
+
+function zoomPinboardAtStageCenter(factor: number, animate = false) {
+  const stage = document.querySelector<HTMLElement>("[data-pinboard-stage]");
+  if (!stage) return;
+  const rect = stage.getBoundingClientRect();
+  zoomPinboardAtClient(factor, rect.left + rect.width / 2, rect.top + rect.height / 2, animate);
+}
+
+function zoomPinboardAtClient(factor: number, clientX: number, clientY: number, animate = false) {
+  if (!Number.isFinite(factor) || factor <= 0) return;
+  const stage = document.querySelector<HTMLElement>("[data-pinboard-stage]");
+  if (!stage) return;
+  const rect = stage.getBoundingClientRect();
+  const pointX = clientX - rect.left;
+  const pointY = clientY - rect.top;
+  const view = normalizedPinboardView();
+  const nextScale = clamp(view.scale * factor, PINBOARD_MIN_ZOOM, PINBOARD_MAX_ZOOM);
+  if (nextScale === view.scale) return;
+  const boardX = (pointX - view.x) / view.scale;
+  const boardY = (pointY - view.y) / view.scale;
+  state.pinboardView = {
+    scale: nextScale,
+    x: pointX - boardX * nextScale,
+    y: pointY - boardY * nextScale
+  };
+  applyPinboardView({ animate });
+}
+
+function roundCss(value: number): string {
+  return String(Math.round(value * 1000) / 1000);
+}
+
+function mod(value: number, divisor: number): number {
+  if (!Number.isFinite(value) || !Number.isFinite(divisor) || divisor === 0) return 0;
+  return ((value % divisor) + divisor) % divisor;
 }
 
 function bindPinNoteDrag(handle: HTMLButtonElement) {
@@ -1558,8 +2204,9 @@ function bindPinNoteDrag(handle: HTMLButtonElement) {
   });
   handle.addEventListener("pointermove", (event) => {
     if (!active) return;
-    const x = Math.max(0, Math.round(baseX + event.clientX - startX));
-    const y = Math.max(0, Math.round(baseY + event.clientY - startY));
+    const scale = normalizedPinboardView().scale;
+    const x = Math.round(baseX + (event.clientX - startX) / scale);
+    const y = Math.round(baseY + (event.clientY - startY) / scale);
     note.dataset.x = String(x);
     note.dataset.y = String(y);
     note.style.left = `${x}px`;
@@ -1594,8 +2241,9 @@ function bindPinNoteResize(handle: HTMLButtonElement) {
   });
   handle.addEventListener("pointermove", (event) => {
     if (!active) return;
-    const w = clamp(Math.round(baseW + event.clientX - startX), 100, 420);
-    const h = clamp(Math.round(baseH + event.clientY - startY), 72, 320);
+    const scale = normalizedPinboardView().scale;
+    const w = clamp(Math.round(baseW + (event.clientX - startX) / scale), 100, 420);
+    const h = clamp(Math.round(baseH + (event.clientY - startY) / scale), 72, 320);
     note.dataset.w = String(w);
     note.dataset.h = String(h);
     note.style.width = `${w}px`;
@@ -1632,6 +2280,7 @@ function leavePinboard(done?: () => void) {
   }
   direct(board, "leave", [], (result) => {
     setPinboardPresent(result);
+    clearPinboardViewports();
     done?.();
     if (state.tab === "pinboard") render();
   });
@@ -1642,6 +2291,10 @@ function setPinboardPresent(result: any) {
   state.world.pinboard.present = result.map(String);
   const board = state.world.pinboard.board;
   if (board?.props) board.props.subscribers = state.world.pinboard.present;
+  const present = new Set(state.world.pinboard.present);
+  for (const actor of Object.keys(state.pinboardViewports)) {
+    if (!present.has(actor)) removePinboardViewport(actor);
+  }
 }
 
 function pinboardCall(verb: string, args: any[] = []) {
@@ -1880,7 +2533,7 @@ function bindTaskspace() {
     const title = titleInput?.value.trim() || "Untitled";
     const description = descriptionInput?.value.trim() || "";
     const space = taskspaceSpace();
-    if (space) call(space, space, "create_task", [title, description]);
+    if (space) pendingTaskSelections.add(call(space, space, "create_task", [title, description]));
     if (titleInput) titleInput.value = "";
     if (descriptionInput) descriptionInput.value = "";
   });
@@ -1916,7 +2569,7 @@ function bindTaskspace() {
     const description = descriptionInput?.value.trim() || "";
     state.taskExpanded[id] = true;
     const space = taskspaceSpace();
-    if (space) call(space, id, "add_subtask", [title, description]);
+    if (space) pendingTaskSelections.add(call(space, id, "add_subtask", [title, description]));
     if (titleInput) titleInput.value = "";
     if (descriptionInput) descriptionInput.value = "";
   });
