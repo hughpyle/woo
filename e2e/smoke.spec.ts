@@ -271,7 +271,7 @@ test("chat room transitions broadcast through source and destination rooms", asy
   }
 });
 
-test("taskspace supports hierarchical task workflow", async ({ page }) => {
+test("taskspace supports hierarchical task workflow", async ({ page, request }) => {
   await page.goto("/");
   await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
   const actor = (await page.locator(".actor").textContent())?.trim() ?? "";
@@ -297,6 +297,17 @@ test("taskspace supports hierarchical task workflow", async ({ page }) => {
   await expect(inspector).toContainText(actorText);
   await inspector.getByRole("button", { name: "In Progress" }).click();
   await expect(inspector.locator(".status-pill").first()).toContainText("in progress");
+
+  const session = await page.evaluate(() => localStorage.getItem("woo.session"));
+  expect(session).toBeTruthy();
+  await inspector.getByPlaceholder("Subtask title").fill(`${subTitle} draft`);
+  await expect(inspector.getByPlaceholder("Subtask title")).toBeFocused();
+  await request.post("/api/objects/the_taskspace/calls/create_task", {
+    headers: { authorization: `Session ${session}` },
+    data: { space: "the_taskspace", args: [`E2E focus churn ${suffix}`, "external refresh while editing"] }
+  });
+  await expect(inspector.getByPlaceholder("Subtask title")).toHaveValue(`${subTitle} draft`);
+  await expect(inspector.getByPlaceholder("Subtask title")).toBeFocused();
 
   await inspector.getByPlaceholder("Subtask title").fill(subTitle);
   await inspector.getByPlaceholder("Description").fill("Subtask from browser smoke");

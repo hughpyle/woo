@@ -34,6 +34,14 @@ type ChatLine = {
   ts?: number;
 };
 
+type RenderFocusSnapshot = {
+  tab: AppState["tab"];
+  selector: string;
+  value: string;
+  selectionStart?: number;
+  selectionEnd?: number;
+};
+
 const state: AppState = {
   tab: "chat",
   audioOn: false,
@@ -72,6 +80,7 @@ const pendingDirect = new Map<string, (result: any) => void>();
 const reconnectBaseDelayMs = 500;
 const reconnectMaxDelayMs = 5000;
 const heartbeatIntervalMs = 25_000;
+const observationDisplayLimit = 20;
 let reconnectDelayMs = reconnectBaseDelayMs;
 let reconnectTimer: number | undefined;
 let heartbeatTimer: number | undefined;
@@ -109,7 +118,7 @@ function connect() {
       rememberTaskObservations(frame.observations ?? []);
       for (const observation of frame.observations ?? []) if (isChatObservation(observation)) receiveChatEvent(observation, false);
       state.observations.unshift({ seq: frame.seq, space: frame.space, observations: frame.observations, message: frame.message });
-      state.observations = state.observations.slice(0, 30);
+      trimObservations();
       rememberSeq(frame.space, frame.seq);
       await refresh();
     }
@@ -125,7 +134,7 @@ function connect() {
     }
     if (frame.op === "task") {
       state.observations.unshift({ task: frame.task, space: frame.space, observations: frame.observations });
-      state.observations = state.observations.slice(0, 30);
+      trimObservations();
       await refresh();
     }
     if (frame.op === "replay") {
@@ -133,7 +142,7 @@ function connect() {
         state.observations.unshift({ seq: entry.seq, space: frame.space, replay: true, message: entry.message, error: entry.error ?? null });
         rememberSeq(frame.space, entry.seq);
       }
-      state.observations = state.observations.slice(0, 30);
+      trimObservations();
       await refresh();
     }
     if (frame.op === "error") {
@@ -144,6 +153,7 @@ function connect() {
         return;
       }
       state.observations.unshift({ error: frame.error });
+      trimObservations();
       render();
     }
   });
@@ -533,8 +543,12 @@ function receiveLiveEvent(observation: any) {
     return;
   }
   state.observations.unshift({ live: true, observation });
-  state.observations = state.observations.slice(0, 30);
+  trimObservations();
   render();
+}
+
+function trimObservations() {
+  state.observations = state.observations.slice(0, observationDisplayLimit);
 }
 
 function receiveLiveControl(observation: any) {
@@ -626,6 +640,7 @@ function pruneLiveControls() {
 }
 
 function render() {
+  const focus = captureRenderFocus();
   const app = document.querySelector<HTMLDivElement>("#app")!;
   app.innerHTML = `
     <div class="shell">
@@ -663,7 +678,67 @@ function render() {
   if (state.tab === "pinboard") bindPinboard();
   if (state.tab === "chat") bindChat();
   if (state.tab === "ide") bindIde();
-  if (state.tab === "chat") focusChatInput();
+  if (!restoreRenderFocus(focus) && state.tab === "chat") focusChatInput();
+}
+
+function captureRenderFocus(): RenderFocusSnapshot | null {
+  const element = document.activeElement;
+  if (!isRestorableInput(element)) return null;
+  const selector = renderFocusSelector(element);
+  if (!selector) return null;
+  return {
+    tab: state.tab,
+    selector,
+    value: element.value,
+    selectionStart: inputSelectionStart(element),
+    selectionEnd: inputSelectionEnd(element)
+  };
+}
+
+function restoreRenderFocus(snapshot: RenderFocusSnapshot | null): boolean {
+  if (!snapshot || snapshot.tab !== state.tab) return false;
+  const element = document.querySelector<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(snapshot.selector);
+  if (!isRestorableInput(element)) return false;
+  if (element.value !== snapshot.value) {
+    element.value = snapshot.value;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  window.requestAnimationFrame(() => {
+    element.focus();
+    if (!(element instanceof HTMLSelectElement) && snapshot.selectionStart !== undefined && snapshot.selectionEnd !== undefined) {
+      try { element.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd); } catch { /* non-text input */ }
+    }
+  });
+  return true;
+}
+
+function isRestorableInput(element: Element | null): element is HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement {
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) return false;
+  if (element instanceof HTMLInputElement && ["button", "checkbox", "file", "radio", "reset", "submit"].includes(element.type)) return false;
+  return true;
+}
+
+function renderFocusSelector(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): string | null {
+  const attrs = Array.from(element.attributes)
+    .filter((attr) => attr.name.startsWith("data-"))
+    .map((attr) => attr.value === "" ? `[${attr.name}]` : `[${attr.name}="${cssAttrValue(attr.value)}"]`);
+  if (attrs.length > 0) return `${element.tagName.toLowerCase()}${attrs.join("")}`;
+  if (element.id) return `#${cssAttrValue(element.id)}`;
+  return null;
+}
+
+function inputSelectionStart(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): number | undefined {
+  if (element instanceof HTMLSelectElement) return undefined;
+  try { return element.selectionStart ?? undefined; } catch { return undefined; }
+}
+
+function inputSelectionEnd(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): number | undefined {
+  if (element instanceof HTMLSelectElement) return undefined;
+  try { return element.selectionEnd ?? undefined; } catch { return undefined; }
+}
+
+function cssAttrValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\n/g, "\\a ");
 }
 
 function navButton(tab: AppState["tab"], label: string) {
