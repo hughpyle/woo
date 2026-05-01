@@ -1524,7 +1524,7 @@ export class WooWorld {
         add(obj.location);
         for (const item of obj.contents) {
           const route = routeByObject.get(item);
-          if (route && route.host !== host) add(item, false, false);
+          if (route && route.host !== host) add(item, false);
         }
       }
       if (this.canCarryFeaturesIfKnown(id)) {
@@ -2923,6 +2923,7 @@ export class WooWorld {
       }
       return item;
     }
+    if (!this.objects.has(item)) return item;
     try {
       const value = await this.dispatch({ ...ctx, caller: room, progr: ctx.actor }, item, "title", []);
       if (typeof value !== "string") throw wooError("E_TYPE", `${item}:title() must return a string`, value);

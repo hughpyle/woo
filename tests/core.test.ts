@@ -570,6 +570,22 @@ describe("woo core", () => {
     expect(room?.contents).toContain("the_dubspace");
   });
 
+  it("lets a host-scoped chat room enter even with mirror-only contents refs", async () => {
+    const full = createWorld().exportWorld();
+    const scoped = nonEmptyHostScopedWorld(full, "the_chatroom");
+    expect(scoped).not.toBeNull();
+
+    const cluster = createWorldFromSerialized(scoped!, { persist: false });
+    const session = cluster.auth("guest:host-chat-enter");
+    const entered = await cluster.directCall("host-chat-enter", session.actor, "the_chatroom", "enter", []);
+
+    expect(entered.op).toBe("result");
+    if (entered.op !== "result") return;
+    const looked = entered.observations.find((obs) => obs.type === "looked") as Record<string, any> | undefined;
+    expect(looked?.text).toContain("Dubspace");
+    expect(looked?.look?.contents?.map((item: Record<string, string>) => item.id)).toEqual(expect.arrayContaining(["the_lamp", "the_mug", "the_dubspace"]));
+  });
+
   it("merges fresh host seed into a stale host slice without wiping dynamic room state", async () => {
     const staleWorld = createWorld();
     const session = staleWorld.auth("guest:merge-host-seed");
