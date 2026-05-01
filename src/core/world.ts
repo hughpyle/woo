@@ -2845,7 +2845,6 @@ export class WooWorld {
     // (or durable awaiting_call parking) lands, fall back to a property read
     // of `name` (cross-host but queue-free) instead of the recursive dispatch.
     if (await this.remoteHostForObject(item)) {
-      if (this.objects.has(item)) return this.object(item).name;
       try {
         const name = await this.getPropChecked(ctx.progr, item, "name");
         if (typeof name === "string" && name.length > 0) return name;
@@ -2954,17 +2953,22 @@ export class WooWorld {
     return this.object(objRef).name || objRef;
   }
 
-  // Cross-host-aware display name. Falls back to a property read if the
-  // referenced object lives on another host (typical for remote actors in
-  // a self-hosted room's roomEnter/roomLeave/roomExit observation text).
+  // Cross-host-aware display name. The local stub of a remote object
+  // (created by ensureInternalActor on cross-host /__internal/remote-dispatch)
+  // carries `name = id` rather than the authoritative display name, so we
+  // always RPC to the owning host when the object is remote — even when a
+  // stub happens to be present locally.
   private async objectDisplayNameAsync(progr: ObjRef, objRef: ObjRef): Promise<string> {
-    if (this.objects.has(objRef)) return this.object(objRef).name || objRef;
-    try {
-      const name = await this.getPropChecked(progr, objRef, "name");
-      if (typeof name === "string" && name.length > 0) return name;
-    } catch {
-      // E_PROPNF / E_PERM — fall through to id.
+    if (await this.remoteHostForObject(objRef)) {
+      try {
+        const name = await this.getPropChecked(progr, objRef, "name");
+        if (typeof name === "string" && name.length > 0) return name;
+      } catch {
+        // E_PROPNF / E_PERM — fall through to id.
+      }
+      return objRef;
     }
+    if (this.objects.has(objRef)) return this.object(objRef).name || objRef;
     return objRef;
   }
 
