@@ -2873,7 +2873,11 @@ export class WooWorld {
       });
     }
     await this.updatePresenceChecked(actor, room, true);
-    if (!this.objects.has(actor) || this.object(actor).location !== room) await this.moveObjectChecked(actor, room);
+    // Always forward — when actor is remote, this DO's local stub may carry a
+    // stale `location` from a prior enter while the actor's owning host has
+    // since moved them elsewhere. moveObjectChecked routes to the owning host,
+    // which is authoritative.
+    await this.moveObjectChecked(actor, room);
     ctx.observe({ type: "entered", source: room, actor, room, text: `${actorName} entered.`, ts });
     const look = await this.composeRoomLook({ ...ctx, thisObj: room }, room);
     this.observeRoomLook(ctx, room, look);
@@ -2887,7 +2891,8 @@ export class WooWorld {
     await this.updatePresenceChecked(actor, room, false);
     const homeValue = this.propOrNull(actor, "home");
     const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
-    if (this.objects.has(actor) && this.object(actor).location === room && this.objects.has(home)) await this.moveObjectChecked(actor, home);
+    // Forward unconditionally; the local stub's `location` may be stale.
+    if (this.objects.has(home)) await this.moveObjectChecked(actor, home);
     ctx.observe({ type: "left", source: room, actor, room, text: `${actorName} left.`, ts: Date.now() });
     return this.chatPresent(room);
   }
