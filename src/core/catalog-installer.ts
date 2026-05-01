@@ -150,6 +150,7 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
     ref_resolved_sha: "unversioned"
   };
   const existing = installedCatalogs(world);
+  assertCatalogInstallNameAvailable(world, manifest, tap, alias, existing);
   assertDependenciesInstalled(manifest, existing);
 
   const localObjects = new Map<string, ObjRef>();
@@ -266,6 +267,7 @@ export function updateCatalogManifest(world: WooWorld, manifest: CatalogManifest
   if (version.majorChanged && !options.migration) {
     throw wooError("E_CATALOG", `catalog major update requires a migration manifest: ${current.version} -> ${manifest.version}`, { from: current.version, to: manifest.version });
   }
+  if (options.migration) validateCatalogMigration(current, manifest, options.migration);
 
   repairCatalogManifest(world, manifest, {
     actor,
@@ -523,15 +525,7 @@ function runCatalogMigration(
   migration: CatalogMigrationManifest,
   installed: InstalledCatalogRecord[]
 ): CatalogMigrationState {
-  if (migration.spec_version !== manifest.spec_version) {
-    throw wooError("E_CATALOG", `migration spec_version ${migration.spec_version} does not match manifest ${manifest.spec_version}`);
-  }
-  if (!versionPatternMatches(migration.from_version, current.version) || !versionPatternMatches(migration.to_version, manifest.version)) {
-    throw wooError("E_CATALOG", `migration version range does not match ${current.version} -> ${manifest.version}`, {
-      from_version: migration.from_version,
-      to_version: migration.to_version
-    });
-  }
+  validateCatalogMigration(current, manifest, migration);
 
   const completed_steps: string[] = [];
   const localObjects = new Map(Object.entries({ ...current.objects, ...manifestObjectRefs(manifest) }));
@@ -562,6 +556,18 @@ function runCatalogMigration(
     completed_steps,
     updated_at: Date.now()
   };
+}
+
+function validateCatalogMigration(current: InstalledCatalogRecord, manifest: CatalogManifest, migration: CatalogMigrationManifest): void {
+  if (migration.spec_version !== manifest.spec_version) {
+    throw wooError("E_CATALOG", `migration spec_version ${migration.spec_version} does not match manifest ${manifest.spec_version}`);
+  }
+  if (!versionPatternMatches(migration.from_version, current.version) || !versionPatternMatches(migration.to_version, manifest.version)) {
+    throw wooError("E_CATALOG", `migration version range does not match ${current.version} -> ${manifest.version}`, {
+      from_version: migration.from_version,
+      to_version: migration.to_version
+    });
+  }
 }
 
 function applyMigrationStep(
@@ -761,6 +767,44 @@ function assertDependenciesInstalled(manifest: CatalogManifest, installed: Insta
         `catalog dependency is not installed: ${dependency}; installed catalogs: ${installedNames.length ? installedNames.join(", ") : "(none)"}`,
         { dependency, installed: installedNames }
       );
+    }
+  }
+}
+
+function assertCatalogInstallNameAvailable(world: WooWorld, manifest: CatalogManifest, tap: string, alias: string, installed: InstalledCatalogRecord[]): void {
+  const aliasMatch = installed.find((record) => record.alias === alias);
+  if (aliasMatch) {
+    throw wooError("E_NAME_COLLISION", `catalog alias is already installed: ${alias}`, {
+      alias,
+      installed_catalog: aliasMatch.catalog,
+      installed_tap: aliasMatch.tap
+    });
+  }
+  const sourceMatch = installed.find((record) => record.tap === tap && record.catalog === manifest.name);
+  if (sourceMatch) {
+    throw wooError("E_NAME_COLLISION", `catalog source is already installed as ${sourceMatch.alias}: ${tap}:${manifest.name}`, {
+      alias,
+      installed_alias: sourceMatch.alias,
+      tap,
+      catalog: manifest.name
+    });
+  }
+  for (const def of [...(manifest.classes ?? []), ...(manifest.features ?? [])]) {
+    if (world.objects.has(def.local_name)) {
+      throw wooError("E_NAME_COLLISION", `catalog object already exists: ${def.local_name}`, {
+        catalog: manifest.name,
+        alias,
+        object: def.local_name
+      });
+    }
+  }
+  for (const hook of manifest.seed_hooks ?? []) {
+    if (hook.kind === "create_instance" && world.objects.has(hook.as)) {
+      throw wooError("E_NAME_COLLISION", `catalog seed object already exists: ${hook.as}`, {
+        catalog: manifest.name,
+        alias,
+        object: hook.as
+      });
     }
   }
 }

@@ -101,6 +101,7 @@ export async function updateGitHubTap(
   const currentMajor = majorVersion(current.version);
   const nextMajor = majorVersion(loaded.manifest.version);
   let migration: CatalogMigrationManifest | null = null;
+  let provenance = loaded.provenance;
   if (currentMajor !== nextMajor) {
     if (request.accept_major !== true) {
       throw wooError("E_CATALOG", `catalog major update requires accept_major: true: ${current.version} -> ${loaded.manifest.version}`, {
@@ -110,7 +111,7 @@ export async function updateGitHubTap(
     }
     const migrationText = await fetchText(loaded.fetcher, `${loaded.baseUrl}/migration-v${currentMajor}-to-v${nextMajor}.json`);
     migration = parseMigration(migrationText);
-    loaded.provenance.migration_hash = hashText(migrationText);
+    provenance = { ...loaded.provenance, migration_hash: hashText(migrationText) };
   }
   const message: Message = {
     actor,
@@ -120,7 +121,7 @@ export async function updateGitHubTap(
       loaded.manifest as unknown as WooValue,
       loaded.frontmatter as WooValue,
       loaded.alias,
-      loaded.provenance,
+      provenance,
       { accept_major: request.accept_major === true },
       migration as unknown as WooValue
     ]

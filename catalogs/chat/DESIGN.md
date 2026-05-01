@@ -183,11 +183,12 @@ Same client speaks against `$chatroom` and against `$taskspace` — the verb set
 
 Free-text input goes through the `$match`-shaped parser per [match.md §MA4](../../spec/semantics/match.md#ma4-command-parsing). `:command_plan` explicitly **lowers** the parsed `cmd` map into the right argument shape per verb — the parsed map is not the right call signature for `:say`, `:tell`, etc., so the dispatcher unpacks it:
 
-The parser is location-scoped rather than host-local. If the actor's current
-room is hosted on another DO, `here`, room contents, and actor inventory still
-resolve through the host bridge; if a visible object is hosted elsewhere, the
-planner reads only its display metadata and verb/direct-callability metadata,
-then leaves execution to normal direct or sequenced dispatch.
+The parser is location-scoped rather than tied to where the actor object lives.
+If the actor is in a room hosted elsewhere, `here`, room contents, and actor
+inventory still resolve from the room and object model. If a visible object
+lives with another host, the planner reads only its display metadata and
+verb/direct-callability metadata, then leaves execution to normal direct or
+sequenced dispatch.
 
 ```woo
 verb $conversational:command_plan(text) {

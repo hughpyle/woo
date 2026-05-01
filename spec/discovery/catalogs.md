@@ -344,6 +344,8 @@ Two catalogs can both define `$control`. Installing both with no aliases collide
 
 The world's `$catalog_registry` shows installed catalogs and their aliases for introspection. References to a catalog's classes use `<alias>:<class>` (for in-world authoring) or the full form `<owner>/<repo>:<catalog>:<class>` (in manifests).
 
+Runtime status: the first catalog lifecycle implementation rejects duplicate registry aliases, duplicate `(tap, catalog)` source identities, and global object-ref collisions with `E_NAME_COLLISION`. Fully alias-scoped class allocation for two catalogs that both define the same local class name is still pending; until then, aliasing prevents registry/source ambiguity but cannot install two class objects at the same concrete objref.
+
 ---
 
 ## CT9. Catalog-bound objects vs world-local objects

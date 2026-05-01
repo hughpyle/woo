@@ -94,6 +94,30 @@ describe("local catalogs", () => {
     expect(() => installCatalogManifest(world, manifest, { tap: "@local", alias: "needs-chat" })).toThrow(/@local:chat.*\(none\)/);
   });
 
+  it("rejects duplicate catalog aliases and duplicate source identities", async () => {
+    const world = createWorld({ catalogs: false });
+    const first: RuntimeCatalogManifest = {
+      name: "collision-one",
+      version: "1.0.0",
+      spec_version: "v1",
+      classes: [{ local_name: "$collision_one", parent: "$thing" }]
+    };
+    const second: RuntimeCatalogManifest = {
+      name: "collision-two",
+      version: "1.0.0",
+      spec_version: "v1",
+      classes: [{ local_name: "$collision_two", parent: "$thing" }]
+    };
+    installCatalogManifest(world, first, { tap: "owner/repo", alias: "collision" });
+
+    expect(() => installCatalogManifest(world, second, { tap: "owner/other", alias: "collision" })).toThrow(/catalog alias is already installed/);
+
+    const sourceWorld = createWorld({ catalogs: false });
+    const source: RuntimeCatalogManifest = { name: "same-source", version: "1.0.0", spec_version: "v1", classes: [] };
+    installCatalogManifest(sourceWorld, source, { tap: "owner/repo", alias: "source-a" });
+    expect(() => installCatalogManifest(sourceWorld, source, { tap: "owner/repo", alias: "source-b" })).toThrow(/catalog source is already installed/);
+  });
+
   it("updates installed catalogs without recreating their registry object", async () => {
     const world = createWorld({ catalogs: false });
     const v1: RuntimeCatalogManifest = {
@@ -143,15 +167,26 @@ describe("local catalogs", () => {
       spec_version: "v1",
       classes: [{ local_name: "$major_probe", parent: "$thing" }]
     };
-    const v2: RuntimeCatalogManifest = { ...v1, version: "2.0.0" };
+    const v2: RuntimeCatalogManifest = {
+      ...v1,
+      version: "2.0.0",
+      classes: [{ local_name: "$major_probe", parent: "$thing", properties: [{ name: "new_field", type: "str", default: "new" }] }]
+    };
 
     installCatalogManifest(world, v1, { tap: "@local", alias: "major-demo" });
 
     expect(() => updateCatalogManifest(world, v2, { tap: "@local", alias: "major-demo" })).toThrow(/accept_major/);
     expect(() => updateCatalogManifest(world, v2, { tap: "@local", alias: "major-demo", acceptMajor: true })).toThrow(/migration manifest/);
+    expect(() => updateCatalogManifest(world, v2, {
+      tap: "@local",
+      alias: "major-demo",
+      acceptMajor: true,
+      migration: { from_version: "1.0", to_version: "2.0.0", spec_version: "v1", steps: [] }
+    })).toThrow(/migration version range/);
+    expect(world.propOrNull("$major_probe", "new_field")).toBeNull();
   });
 
-  it("runs idempotent property migrations across catalog instances", async () => {
+  it("runs structural property migrations across catalog instances", async () => {
     const world = createWorld({ catalogs: false });
     const v1: RuntimeCatalogManifest = {
       name: "migration-demo",

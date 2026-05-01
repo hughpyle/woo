@@ -1793,7 +1793,6 @@ export class WooWorld {
     }
   }
 
-  withMutationSavepoint<T>(fn: () => T): T;
   withMutationSavepoint<T>(fn: () => T): T {
     const run = (): T => this.withBehaviorSavepoint(fn);
     const repo = this.activeObjectRepository();
