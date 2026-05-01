@@ -526,6 +526,35 @@ describe("local catalogs", () => {
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-01-chat-room-contents-repair");
   });
 
+  it("repairs stale catalog tool exposure for agent-visible taskspace and dubspace verbs", () => {
+    const world = createWorld();
+    world.setProp("$system", "applied_migrations", [
+      "2026-04-30-source-catalog-verbs",
+      "2026-04-30-catalog-placement-metadata",
+      "2026-04-30-chat-cockatoo",
+      "2026-04-30-chat-look-contents",
+      "2026-04-30-chat-command-parser",
+      "2026-04-30-dubspace-control-guards",
+      "2026-04-30-room-look-self",
+      "2026-05-01-chat-three-room-demo",
+      "2026-05-01-chat-observation-output",
+      "2026-05-01-chat-room-contents-repair"
+    ]);
+    const createTask = world.object("$taskspace").verbs.get("create_task");
+    const setControl = world.object("$dubspace").verbs.get("set_control");
+    expect(createTask).toBeDefined();
+    expect(setControl).toBeDefined();
+    if (!createTask || !setControl) return;
+    world.addVerb("$taskspace", { ...createTask, tool_exposed: false, version: createTask.version + 1 });
+    world.addVerb("$dubspace", { ...setControl, tool_exposed: false, version: setControl.version + 1 });
+
+    installLocalCatalogs(world, ["chat", "taskspace", "dubspace"]);
+
+    expect(world.object("$taskspace").verbs.get("create_task")?.tool_exposed).toBe(true);
+    expect(world.object("$dubspace").verbs.get("set_control")?.tool_exposed).toBe(true);
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-01-agent-tool-exposure-repair");
+  });
+
   it("migrates the cockatoo into worlds installed before it landed", async () => {
     const world = createWorld();
     // Reset to before the cockatoo migration ran

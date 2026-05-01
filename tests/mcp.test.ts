@@ -9,6 +9,32 @@ function bootstrapWorld() {
 }
 
 describe("McpHost", () => {
+  it("does not expose other actors through contents, inventory, or focus", async () => {
+    const world = bootstrapWorld();
+    const alice = world.auth("guest:mcp-privacy-alice");
+    const bob = world.auth("guest:mcp-privacy-bob");
+    const host = new McpHost(world);
+    host.bindSession(alice.id, alice.actor);
+
+    // Fresh guests sit in $nowhere together. That containment must not make
+    // Bob's inherited $actor maintenance verbs callable by Alice.
+    let tools = host.enumerateTools(alice.actor);
+    expect(tools.some((t) => t.object === alice.actor && t.verb === "wait")).toBe(true);
+    expect(tools.some((t) => t.object === bob.actor)).toBe(false);
+
+    // Same invariant inside an ordinary room: other present actors may be
+    // visible to :look, but their actor verbs are not part of Alice's tool set.
+    await world.directCall(undefined, alice.actor, "the_chatroom", "enter", []);
+    await world.directCall(undefined, bob.actor, "the_chatroom", "enter", []);
+    tools = host.enumerateTools(alice.actor);
+    expect(tools.some((t) => t.object === alice.actor && t.verb === "wait")).toBe(true);
+    expect(tools.some((t) => t.object === bob.actor)).toBe(false);
+
+    const focus = tools.find((t) => t.object === alice.actor && t.verb === "focus")!;
+    await expect(host.invokeTool(alice.actor, alice.id, focus, [bob.actor])).rejects.toMatchObject({ code: "E_PERM" });
+    expect(host.enumerateTools(alice.actor).some((t) => t.object === bob.actor)).toBe(false);
+  });
+
   it("enumerates tools reachable from the actor with route classification", async () => {
     const world = bootstrapWorld();
     const session = world.auth("guest:mcp-list");

@@ -16,6 +16,7 @@ const LOCAL_CATALOG_ROOM_LOOK_SELF_MIGRATION = "2026-04-30-room-look-self";
 const LOCAL_CATALOG_CHAT_THREE_ROOM_MIGRATION = "2026-05-01-chat-three-room-demo";
 const LOCAL_CATALOG_CHAT_OBSERVATION_OUTPUT_MIGRATION = "2026-05-01-chat-observation-output";
 const LOCAL_CATALOG_CHAT_ROOM_CONTENTS_REPAIR_MIGRATION = "2026-05-01-chat-room-contents-repair";
+const LOCAL_CATALOG_AGENT_TOOL_EXPOSURE_REPAIR_MIGRATION = "2026-05-01-agent-tool-exposure-repair";
 
 export const DEFAULT_LOCAL_CATALOGS = bundledCatalogAliases();
 
@@ -65,6 +66,7 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): v
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_THREE_ROOM_MIGRATION, { allowImplementationHints: true });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_OBSERVATION_OUTPUT_MIGRATION, { allowImplementationHints: true });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_ROOM_CONTENTS_REPAIR_MIGRATION, { allowImplementationHints: true, reconcileSeedHooks: true, only: "chat" });
+  runLocalCatalogMigration(world, names, LOCAL_CATALOG_AGENT_TOOL_EXPOSURE_REPAIR_MIGRATION, { allowImplementationHints: true });
 }
 
 function runLocalCatalogMigration(world: WooWorld, names: readonly string[], id: string, options: { allowImplementationHints?: boolean; reconcileSeedHooks?: boolean; only?: string } = {}): void {

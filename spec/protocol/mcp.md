@@ -115,8 +115,8 @@ The dynamic tool set at any moment is computed against the actor's **reachable s
 
 1. **Self.** The actor object — for actor-owned verbs (`@quit`, `@home`, `wait`, `focus`, etc.).
 2. **Current location.** `actor.location` and the verbs defined on it. In a chat room, this is where `:say`/`:look`/`:enter` come from.
-3. **Location contents.** Objects in `actor.location.contents` for which the actor has read access. In `the_chatroom` this surfaces `the_cockatoo:squawk`, `the_lamp:take`, etc.
-4. **Inventory.** Objects in `actor.contents`. After `take lamp`, the lamp's verbs follow the actor between rooms.
+3. **Location contents.** Non-actor objects in `actor.location.contents` for which the actor has read access. In `the_chatroom` this surfaces `the_cockatoo:squawk`, `the_lamp:take`, etc. Other actors in the same container are visible to room verbs such as `:look`/`:who`, but their actor maintenance verbs are not exposed as tools.
+4. **Inventory.** Non-actor objects in `actor.contents`. After `take lamp`, the lamp's verbs follow the actor between rooms.
 5. **Presence spaces.** Spaces the actor is subscribed to via `actor.presence_in`. This is how `the_dubspace` and `the_taskspace` show up in the tool list when the actor is "in" them — even when the actor is *physically* located in a chatroom that frames them. Presence is the woo notion of "I'm in this space" and it's what governs the tool list more than physical location does.
 6. **Working set.** Objects the actor has explicitly added to its scope via `$actor:focus(target)` (§M3.1). This is how task refs returned from `the_taskspace:list_tasks()` become callable: the agent calls `focus(t-7)` and `t-7`'s verbs (`claim`, `set_status`, `add_subtask`) join the tool list. Bounded; capped per implementation policy (default 32 entries).
 7. **Catalog-visible singletons.** Objects the catalog registry advertises as visible to this actor's class/role (per [discovery/catalogs.md](../discovery/catalogs.md)). v1-ops typically surfaces nothing here for ordinary actors; wizard actors get whatever wizard-discoverable singletons the catalog declares. There is no hardcoded list of "universal corenames" in the protocol — visibility is data-driven from the catalog registry, not from the MCP spec.
@@ -135,7 +135,7 @@ $actor:unfocus(target: obj) -> { focus_list: [obj, ...] }
 $actor:focus_list() -> [obj, ...]
 ```
 
-`focus(t)` adds `t` to the actor's `focus_list` property if the actor passes basic visibility checks (the target exists and the actor can `:describe` it). `unfocus(t)` removes. `focus_list()` reads. The list is capped server-side; on overflow, oldest entry is evicted.
+`focus(t)` adds `t` to the actor's `focus_list` property if the actor passes basic visibility checks (the target exists and the actor can `:describe` it). Focusing another actor is rejected; otherwise the target actor's inherited maintenance verbs would become callable by the focuser. `unfocus(t)` removes. `focus_list()` reads. The list is capped server-side; on overflow, oldest entry is evicted.
 
 The list persists with the actor across connections (it's a property on the actor object). Reconnect retains scope. `focus_list` is also visible via `actor:describe()` for agents that want to introspect their own context.
 

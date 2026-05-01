@@ -171,10 +171,12 @@ export class McpHost {
     if (actorObj?.location && this.world.objects.has(actorObj.location)) add(actorObj.location, "location");
     if (actorObj?.location && this.world.objects.has(actorObj.location)) {
       for (const id of this.world.object(actorObj.location).contents) {
+        if (this.isOtherActor(actor, id)) continue;
         if (this.actorCanSee(actor, id)) add(id, "contents");
       }
     }
     if (actorObj) for (const id of actorObj.contents) {
+      if (this.isOtherActor(actor, id)) continue;
       if (this.actorCanSee(actor, id)) add(id, "inventory");
     }
     const presence = actorObj ? this.world.propOrNull(actor, "presence_in") : null;
@@ -183,6 +185,7 @@ export class McpHost {
     }
     const focusList = this.focusListOf(actor);
     for (const id of focusList) {
+      if (this.isOtherActor(actor, id)) continue;
       if (this.actorCanSee(actor, id)) add(id, "focus");
     }
     return Array.from(seen, ([id, origin]) => ({ id, origin }));
@@ -197,10 +200,25 @@ export class McpHost {
     return this.world.canReadProperty(actor, target, "name");
   }
 
+  private isOtherActor(actor: ObjRef, target: ObjRef): boolean {
+    return target !== actor && this.isActorObject(target);
+  }
+
+  private isActorObject(target: ObjRef): boolean {
+    if (!this.world.objects.has(target)) return false;
+    let cursor: ObjRef | null = target;
+    while (cursor && this.world.objects.has(cursor)) {
+      if (cursor === "$actor") return true;
+      cursor = this.world.object(cursor).parent;
+    }
+    return false;
+  }
+
   enumerateTools(actor: ObjRef): McpTool[] {
     const tools: McpTool[] = [];
     const usedNames = new Set<string>();
     for (const { id } of this.reachable(actor)) {
+      if (this.isOtherActor(actor, id)) continue;
       for (const verb of this.tooledVerbsFor(actor, id)) {
         const baseName = sanitizeId(id) + "__" + verb.name;
         let name = baseName;
@@ -397,6 +415,7 @@ export class McpHost {
     const target = String(args[0] ?? "");
     if (!target || !this.world.objects.has(target)) throw wooError("E_INVARG", `focus target not found: ${target}`);
     const actor = ctx.thisObj;
+    if (this.isOtherActor(actor, target)) throw wooError("E_PERM", `cannot focus another actor: ${target}`);
     if (!this.actorCanSee(actor, target)) throw wooError("E_PERM", `focus target not visible: ${target}`);
     const list = this.focusListOf(actor);
     if (!list.includes(target)) {
