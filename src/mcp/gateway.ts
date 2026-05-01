@@ -15,7 +15,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { AppliedFrame, DirectResultFrame, ObjRef, Session } from "../core/types";
 import type { WooWorld } from "../core/world";
 import { createMcpServer } from "./server";
-import { McpHost, type McpBroadcastHooks } from "./host";
+import { McpHost, type McpBroadcastHooks, type McpDispatchHooks } from "./host";
 
 const MCP_TOKEN_HEADER = "mcp-token";
 const MCP_SESSION_HEADER = "mcp-session-id";
@@ -32,6 +32,7 @@ export type McpGatewayOptions = {
   serverName?: string;
   serverVersion?: string;
   broadcasts?: McpBroadcastHooks;
+  dispatch?: McpDispatchHooks;
 };
 
 export class McpGateway {
@@ -39,7 +40,7 @@ export class McpGateway {
   private sessions = new Map<string, SessionEntry>();
 
   constructor(private world: WooWorld, private options: McpGatewayOptions = {}) {
-    this.host = new McpHost(world);
+    this.host = new McpHost(world, options.dispatch);
     if (options.broadcasts) this.host.setBroadcastHooks(options.broadcasts);
   }
 

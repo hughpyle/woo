@@ -1,13 +1,97 @@
 import { describe, expect, it } from "vitest";
 import { createWorld } from "../src/core/bootstrap";
-import { McpHost } from "../src/mcp/host";
+import { McpHost, type McpTool } from "../src/mcp/host";
 import { McpGateway } from "../src/mcp/gateway";
 import { createMcpServer } from "../src/mcp/server";
-import type { Observation, WooValue } from "../src/core/types";
-import type { HostBridge } from "../src/core/world";
+import type { Observation, ObjRef, RemoteToolDescriptor, VerbDef, WooValue } from "../src/core/types";
+import type { CallContext, HostBridge, MoveObjectResult, WooWorld } from "../src/core/world";
 
 function bootstrapWorld() {
   return createWorld();
+}
+
+function nativeToolVerb(name: string, native: string): VerbDef {
+  return {
+    kind: "native",
+    name,
+    aliases: [],
+    owner: "$wiz",
+    perms: "rxd",
+    arg_spec: { args: [] },
+    source: `verb :${name}() rxd { return "${name}"; }`,
+    source_hash: `mcp-test-${name}`,
+    version: 1,
+    line_map: {},
+    native,
+    direct_callable: true,
+    tool_exposed: true
+  };
+}
+
+class RemoteToolBridge implements HostBridge {
+  constructor(
+    readonly localHost: string,
+    private readonly worlds: Map<string, WooWorld>,
+    private readonly routes: Map<ObjRef, string>,
+    private readonly hosts: Map<string, McpHost>
+  ) {}
+
+  hostForObject(id: ObjRef): string | null {
+    return this.routes.get(id) ?? null;
+  }
+
+  async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue> {
+    return await this.worldFor(objRef).getPropChecked(progr, objRef, name);
+  }
+
+  async location(objRef: ObjRef): Promise<ObjRef | null> {
+    return this.worldFor(objRef).object(objRef).location;
+  }
+
+  async dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue> {
+    const remote = this.worldFor(startAt ?? target);
+    return await remote.hostDispatch({ ...ctx, world: remote }, target, verbName, args, startAt);
+  }
+
+  async moveObject(objRef: ObjRef, targetRef: ObjRef, options: { suppressMirrorHost?: string | null } = {}): Promise<MoveObjectResult> {
+    return await this.worldFor(objRef).moveObjectChecked(objRef, targetRef, options);
+  }
+
+  async mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void> {
+    this.worldFor(containerRef).mirrorContents(containerRef, objRef, present);
+  }
+
+  async setActorPresence(actor: ObjRef, space: ObjRef, present: boolean): Promise<void> {
+    this.worldFor(actor).setActorPresence(actor, space, present);
+  }
+
+  async setSpaceSubscriber(space: ObjRef, actor: ObjRef, present: boolean): Promise<void> {
+    this.worldFor(space).setSpaceSubscriber(space, actor, present);
+  }
+
+  async contents(objRef: ObjRef): Promise<ObjRef[]> {
+    return this.worldFor(objRef).contentsOf(objRef);
+  }
+
+  async enumerateRemoteTools(actor: ObjRef, ids: ObjRef[]): Promise<RemoteToolDescriptor[]> {
+    const out: RemoteToolDescriptor[] = [];
+    for (const id of ids) {
+      const host = this.routes.get(id);
+      if (!host || host === this.localHost) continue;
+      const mcpHost = this.hosts.get(host);
+      if (!mcpHost) continue;
+      out.push(...mcpHost.enumerateLocalToolDescriptors(actor, [id]));
+    }
+    return out;
+  }
+
+  private worldFor(id: ObjRef): WooWorld {
+    const host = this.routes.get(id);
+    if (!host) throw new Error(`no route for ${id}`);
+    const world = this.worlds.get(host);
+    if (!world) throw new Error(`no world for ${host}`);
+    return world;
+  }
 }
 
 describe("McpHost", () => {
@@ -167,6 +251,60 @@ describe("McpHost", () => {
     expect(result.applied?.space).toBe("the_taskspace");
     expect(typeof result.applied?.seq).toBe("number");
     expect(result.observations.some((o) => o.type === "task_created")).toBe(true);
+  });
+
+  it("uses dispatch hooks for MCP direct and sequenced invocation routes", async () => {
+    const world = bootstrapWorld();
+    const session = world.auth("guest:mcp-dispatch-hooks");
+    const calls: string[] = [];
+    const host = new McpHost(world, {
+      direct: async (_sessionId, actor, target, verb, args) => {
+        calls.push(`direct:${actor}:${target}:${verb}:${args.length}`);
+        return { op: "result", result: "direct-ok", observations: [], audience: null };
+      },
+      call: async (_sessionId, actor, space, message) => {
+        calls.push(`call:${actor}:${space}:${message.target}:${message.verb}:${message.args.length}`);
+        return {
+          op: "applied",
+          space,
+          seq: 9,
+          ts: 123,
+          message,
+          observations: [{ type: "sequenced-ok", source: space }]
+        };
+      }
+    });
+    host.bindSession(session.id, session.actor);
+
+    const directTool: McpTool = {
+      name: "remote_widget__ping",
+      object: "remote_widget",
+      verb: "ping",
+      aliases: [],
+      description: "",
+      inputSchema: {},
+      direct: true,
+      enclosingSpace: null
+    };
+    const direct = await host.invokeTool(session.actor, session.id, directTool, ["x"]);
+    expect(direct.result).toBe("direct-ok");
+
+    const sequencedTool: McpTool = {
+      name: "remote_space__mutate",
+      object: "remote_space",
+      verb: "mutate",
+      aliases: [],
+      description: "",
+      inputSchema: {},
+      direct: false,
+      enclosingSpace: "remote_space"
+    };
+    const sequenced = await host.invokeTool(session.actor, session.id, sequencedTool, [1, 2]);
+    expect(sequenced.applied).toEqual({ space: "remote_space", seq: 9, ts: 123 });
+    expect(calls).toEqual([
+      `direct:${session.actor}:remote_widget:ping:1`,
+      `call:${session.actor}:remote_space:remote_space:mutate:2`
+    ]);
   });
 
   it("focus and unfocus extend reachability and toggle list_changed", async () => {
@@ -370,6 +508,100 @@ describe("McpGateway", () => {
       headers: { "mcp-session-id": sessionId! }
     }));
     expect(closed.status).toBe(204);
+  });
+
+  it("advertises woo_call positional args as arbitrary JSON values", async () => {
+    const world = bootstrapWorld();
+    const gateway = new McpGateway(world);
+
+    const init = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "vitest", version: "0.0.0" }
+      }
+    }, { "mcp-token": "guest:mcp-woo-call-schema" }));
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    const list = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list"
+    }, { "mcp-session-id": sessionId! }));
+    const body = await list.json() as { result: { tools: Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }> } };
+    const wooCall = body.result.tools.find((tool) => tool.name === "woo_call");
+    const args = wooCall?.inputSchema?.properties?.args as { items?: { anyOf?: unknown[] } } | undefined;
+    expect(args?.items?.anyOf?.some((schema) => (schema as { type?: string }).type === "number")).toBe(true);
+    expect(args?.items?.anyOf?.some((schema) => (schema as { type?: string }).type === "object")).toBe(true);
+  });
+
+  it("resolves woo_call through remote space contents, not just local reachable ids", async () => {
+    const home = bootstrapWorld();
+    const remote = bootstrapWorld();
+    const remoteHost = new McpHost(remote);
+    const worlds = new Map<string, WooWorld>([
+      ["home", home],
+      ["remote", remote]
+    ]);
+    const routes = new Map<ObjRef, string>([
+      ["remote_gallery", "remote"],
+      ["remote_widget", "remote"]
+    ]);
+    const hosts = new Map<string, McpHost>([["remote", remoteHost]]);
+    home.setHostBridge(new RemoteToolBridge("home", worlds, routes, hosts));
+    remote.setHostBridge(new RemoteToolBridge("remote", worlds, routes, hosts));
+
+    home.createObject({ id: "remote_gallery", name: "Remote Gallery", parent: "$space", owner: "$wiz" });
+    home.createObject({ id: "remote_widget", name: "Remote Widget", parent: "$thing", owner: "$wiz" });
+    home.addVerb("remote_widget", nativeToolVerb("ping", "remote_ping"));
+
+    remote.createObject({ id: "remote_gallery", name: "Remote Gallery", parent: "$space", owner: "$wiz" });
+    remote.createObject({ id: "remote_widget", name: "Remote Widget", parent: "$thing", owner: "$wiz", location: "remote_gallery" });
+    remote.addVerb("remote_widget", nativeToolVerb("ping", "remote_ping"));
+    remote.registerNativeHandler("remote_ping", () => "pong");
+
+    const gateway = new McpGateway(home);
+    const init = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "vitest", version: "0.0.0" }
+      }
+    }, { "mcp-token": "guest:mcp-remote-contents" }));
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+    const actor = Array.from(home.sessions.values())[0]?.actor;
+    expect(actor).toBeTruthy();
+    home.object(actor!).location = "remote_gallery";
+    home.object("remote_gallery").contents.add(actor!);
+    home.setProp(actor!, "presence_in", ["remote_gallery"]);
+    remote.setProp("remote_gallery", "subscribers", [actor!]);
+
+    const list = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list"
+    }, { "mcp-session-id": sessionId! }));
+    const listBody = await list.json() as { result: { tools: Array<{ name: string }> } };
+    expect(listBody.result.tools.some((tool) => tool.name === "remote_widget__ping")).toBe(true);
+
+    const call = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "woo_call", arguments: { object: "remote_widget", verb: "ping", args: [] } }
+    }, { "mcp-session-id": sessionId! }));
+    expect(call.ok).toBe(true);
+    const callBody = await call.json() as { result: { isError?: boolean; structuredContent?: { result?: unknown } } };
+    expect(callBody.result.isError).not.toBe(true);
+    expect(callBody.result.structuredContent?.result).toBe("pong");
   });
 
   it("initializes a session via Authorization bearer for Codex-style MCP clients", async () => {

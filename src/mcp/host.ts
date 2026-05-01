@@ -7,7 +7,7 @@
 // (stdio/HTTP) lives in src/mcp/server.ts; this module is transport-agnostic.
 
 import type { CallContext, NativeHandler, WooWorld } from "../core/world";
-import type { AppliedFrame, DirectResultFrame, ObjRef, Observation, RemoteToolDescriptor, WooValue } from "../core/types";
+import type { AppliedFrame, DirectResultFrame, ErrorFrame, Message, ObjRef, Observation, RemoteToolDescriptor, WooValue } from "../core/types";
 import { directedRecipients, wooError } from "../core/types";
 
 // Broadcast hooks the runtime wires into the MCP host so that MCP-initiated
@@ -55,6 +55,11 @@ export type McpInvocationResult = {
   applied?: { space: ObjRef; seq: number; ts: number };
 };
 
+export type McpDispatchHooks = {
+  direct?: (sessionId: string, actor: ObjRef, target: ObjRef, verb: string, args: WooValue[]) => DirectResultFrame | ErrorFrame | Promise<DirectResultFrame | ErrorFrame>;
+  call?: (sessionId: string, actor: ObjRef, space: ObjRef, message: Message) => AppliedFrame | ErrorFrame | Promise<AppliedFrame | ErrorFrame>;
+};
+
 // `actor_wait` runs through the standard verb-dispatch path, which doesn't
 // thread the MCP session id through CallContext. McpHost.invokeTool sets this
 // before dispatching the wait verb so the native handler can find the right
@@ -68,7 +73,7 @@ export class McpHost {
 
   private broadcasts: McpBroadcastHooks = {};
 
-  constructor(private world: WooWorld) {
+  constructor(private world: WooWorld, private dispatchHooks: McpDispatchHooks = {}) {
     // Native handlers register ONCE per world. Subsequent McpHost instances on
     // the same world would clobber per-session queues — McpGateway owns one
     // singleton McpHost per world to avoid that footgun.
@@ -380,24 +385,32 @@ export class McpHost {
   }
 
   async resolveReachableTool(actor: ObjRef, object: ObjRef, verbName: string): Promise<McpTool | null> {
-    if (!this.reachable(actor).some((entry) => entry.id === object)) return null;
+    const locallyReachable = this.reachable(actor).some((entry) => entry.id === object);
     const bridge = this.world.getHostBridge();
-    if (await this.world.isRemoteObject(object)) {
+    if (locallyReachable && await this.world.isRemoteObject(object)) {
       if (!bridge?.enumerateRemoteTools) return null;
       const descriptors = await bridge.enumerateRemoteTools(actor, [object]);
       const descriptor = descriptors.find((candidate) => candidate.object === object && candidate.verb === verbName);
       return descriptor ? this.assembleTool(descriptor.object, descriptor, new Set()) : null;
     }
-    const verb = this.tooledVerbsFor(actor, object).find((candidate) => candidate.name === verbName);
-    if (!verb) return null;
-    return this.assembleTool(object, {
-      verb: verb.name,
-      aliases: verb.aliases,
-      arg_spec: verb.arg_spec,
-      direct: verb.direct_callable === true,
-      source: verb.source ?? "",
-      enclosingSpace: this.enclosingSpaceFor(object)
-    }, new Set());
+    if (locallyReachable) {
+      const verb = this.tooledVerbsFor(actor, object).find((candidate) => candidate.name === verbName);
+      if (!verb) return null;
+      return this.assembleTool(object, {
+        verb: verb.name,
+        aliases: verb.aliases,
+        arg_spec: verb.arg_spec,
+        direct: verb.direct_callable === true,
+        source: verb.source ?? "",
+        enclosingSpace: this.enclosingSpaceFor(object)
+      }, new Set());
+    }
+    if (!bridge?.enumerateRemoteTools) return null;
+    const remoteScopeIds = await this.collectRemoteScopeIds(actor);
+    if (remoteScopeIds.length === 0) return null;
+    const descriptors = await bridge.enumerateRemoteTools(actor, remoteScopeIds);
+    const descriptor = descriptors.find((candidate) => candidate.object === object && candidate.verb === verbName);
+    return descriptor ? this.assembleTool(descriptor.object, descriptor, new Set()) : null;
   }
 
   private tooledVerbsFor(actor: ObjRef, id: ObjRef): Array<{ name: string; aliases: string[]; arg_spec: Record<string, WooValue>; direct_callable?: boolean; perms: string; tool_exposed?: boolean; source?: string }> {
@@ -474,7 +487,9 @@ export class McpHost {
       const previous = CURRENT_WAIT_SESSION_ID;
       CURRENT_WAIT_SESSION_ID = sessionId;
       try {
-        const result = await this.world.directCall(undefined, actor, tool.object, tool.verb, args);
+        const result = this.dispatchHooks.direct
+          ? await this.dispatchHooks.direct(sessionId, actor, tool.object, tool.verb, args)
+          : await this.world.directCall(undefined, actor, tool.object, tool.verb, args);
         if (result.op === "error") throw fromError(result.error);
         // Self observations are returned in the call result; do NOT route them
         // back into this session's queue — that would deliver them twice.
@@ -500,7 +515,9 @@ export class McpHost {
     const space = tool.enclosingSpace ?? this.enclosingSpaceFor(tool.object);
     if (!space) throw wooError("E_INVARG", `verb ${tool.object}:${tool.verb} has no enclosing space for sequenced dispatch`);
     const message = { actor, target: tool.object, verb: tool.verb, args };
-    const frame = await this.world.call(undefined, sessionId, space, message);
+    const frame = this.dispatchHooks.call
+      ? await this.dispatchHooks.call(sessionId, actor, space, message)
+      : await this.world.call(undefined, sessionId, space, message);
     if (frame.op === "error") throw fromError(frame.error);
     if (this.broadcasts.broadcastApplied) {
       (frame as { originMcpSessionId?: string }).originMcpSessionId = sessionId;

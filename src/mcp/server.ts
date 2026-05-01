@@ -111,7 +111,7 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
         properties: {
           object: { type: "string", description: "woo object reference" },
           verb: { type: "string" },
-          args: { type: "array", description: "positional woo arguments" }
+          args: { type: "array", items: wooValueSchema(), description: "positional woo arguments" }
         },
         required: ["object", "verb"]
       },
@@ -329,4 +329,17 @@ function arrayParam(params: Record<string, unknown>, name: string): WooValue[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) throw wooError("E_INVARG", `${name} must be an array`);
   return value as WooValue[];
+}
+
+function wooValueSchema(): Record<string, unknown> {
+  return {
+    anyOf: [
+      { type: "string" },
+      { type: "number" },
+      { type: "boolean" },
+      { type: "object" },
+      { type: "array", items: {} },
+      { type: "null" }
+    ]
+  };
 }

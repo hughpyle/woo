@@ -39,7 +39,7 @@ A small stable control plane exists for MCP clients whose tool metadata can lag 
 | Tool | Purpose |
 |---|---|
 | `woo_list_reachable_tools()` | Returns the current dynamic object-tool descriptors: name, canonical object, verb, route, args, and description. |
-| `woo_call(object, verb, args?)` | Finds the currently reachable dynamic tool for `<object>:<verb>` and invokes it through the normal direct/sequenced route. |
+| `woo_call(object, verb, args?)` | Finds the currently reachable dynamic tool for `<object>:<verb>` and invokes it through the normal direct/sequenced route. `args` is a positional list of arbitrary JSON woo values, not a string-only argv. |
 | `woo_focus(target)` / `woo_unfocus(target)` | Stable protocol wrappers around the actor's `$actor:focus` / `$actor:unfocus` verbs. |
 | `woo_wait(timeout_ms?, limit?)` | Stable protocol wrapper around the actor's `$actor:wait` verb. |
 
@@ -140,7 +140,7 @@ After a tool call, the gateway may compute a cheap local reachability signal (lo
 
 Containment cycles and re-entrant rooms (a room as the contents of another room — see the chat catalog's hot tub) are walked once; the algorithm is a BFS bounded by the reachability set's natural boundary (objects not in any of the seven categories above).
 
-Reachability spans hosts. When a category-2/3/5 entry resolves to a remote $space (per [hosts.md §3](hosts.md#3-hosts-and-execution-model)) the gateway asks that host for its current contents/membership and merges the result with locally-known entries. Per-instance verbs on dynamically-created objects (a `$task` minted at runtime on the taskspace's host, a `$cockatoo` cloned into a chat room) therefore appear in the tool list as soon as the object exists — the agent does not need to know which DO owns what. The remote host is responsible for applying the actor's read-permission filter before returning its contribution; the gateway trusts that filter (same-deployment trust, [hosts.md §3.3](hosts.md#33-trust-model-across-hosts)). Cross-host reachability lookups are best-effort cached for the duration of one tool-list computation; subsequent `tools/list` requests re-fetch.
+Reachability spans hosts. When a category-2/3/5 entry resolves to a remote $space (per [hosts.md §3](hosts.md#3-hosts-and-execution-model)) the gateway asks that host for its current contents/membership and merges the result with locally-known entries. Per-instance verbs on dynamically-created objects (a `$task` minted at runtime on the taskspace's host, a `$cockatoo` cloned into a chat room) therefore appear in the tool list as soon as the object exists — the agent does not need to know which DO owns what. The same rule applies to `woo_call(object, verb, args?)`: targeted resolution must search the remote contribution for the actor's reachable spaces/focus set, not only the gateway's local object ids. The remote host is responsible for applying the actor's read-permission filter before returning its contribution; the gateway trusts that filter (same-deployment trust, [hosts.md §3.3](hosts.md#33-trust-model-across-hosts)). Cross-host reachability lookups are best-effort cached for the duration of one tool-list computation; subsequent `tools/list` requests re-fetch.
 
 ### M3.1 Working set: `$actor:focus`
 

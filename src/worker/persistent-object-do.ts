@@ -187,6 +187,24 @@ export class PersistentObjectDO {
     if (!this.mcpGateway) {
       this.mcpGateway = new McpGateway(world, {
         serverName: "woo",
+        dispatch: {
+          call: async (sessionId, actor, space, message) => {
+            const session = { sessionId, actor };
+            const host = await this.resolveObjectHost(space, WORLD_HOST);
+            const result = host === WORLD_HOST
+              ? await world.call(undefined, sessionId, space, message)
+              : await this.forwardWsCall(world, host, undefined, session, space, message);
+            if (result.op === "applied" && host !== WORLD_HOST) await this.registerRemoteObjectRoutes(host);
+            return result;
+          },
+          direct: async (sessionId, actor, target, verb, args) => {
+            const session = { sessionId, actor };
+            const host = await this.resolveObjectHost(target, WORLD_HOST);
+            return host === WORLD_HOST
+              ? await world.directCall(undefined, actor, target, verb, args)
+              : await this.forwardWsDirect(world, host, undefined, session, target, verb, args);
+          }
+        },
         broadcasts: {
           broadcastApplied: (frame) => this.broadcastApplied(world, frame),
           broadcastLiveEvents: (result) => this.broadcastLiveEvents(world, result)
