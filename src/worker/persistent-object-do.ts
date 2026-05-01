@@ -392,6 +392,22 @@ export class PersistentObjectDO {
         if (memo) return await memoizeHostOperation(memo.reads, `describe:${nameActor}:${readActor}:${objRef}`, read);
         return await read();
       },
+      resolveVerb: async (target, verbName, memo) => {
+        const read = async () => {
+          const host = await hostForObject(target, memo);
+          if (!host || host === localHost) {
+            const { verb } = world.resolveVerb(target, verbName);
+            return { name: verb.name, direct_callable: verb.direct_callable === true };
+          }
+          return await this.forwardInternalChecked<{ name: string; direct_callable: boolean }>(
+            host,
+            "/__internal/remote-resolve-verb",
+            { target, verb: verbName }
+          );
+        };
+        if (memo) return await memoizeHostOperation(memo.reads, `verb:${target}:${verbName}`, read);
+        return await read();
+      },
       location: async (objRef, memo) => {
         const read = async (): Promise<ObjRef | null> => {
           const host = await hostForObject(objRef, memo);
@@ -803,6 +819,13 @@ export class PersistentObjectDO {
           description: world.propOrNullForActor(readActor, obj, "description"),
           aliases: world.propOrNullForActor(readActor, obj, "aliases")
         });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/remote-resolve-verb") {
+        const target = String(body.target ?? "") as ObjRef;
+        const verbName = String(body.verb ?? "");
+        const { verb } = world.resolveVerb(target, verbName);
+        return jsonResponse({ name: verb.name, direct_callable: verb.direct_callable === true });
       }
 
       if (request.method === "POST" && pathname === "/__internal/remote-location") {

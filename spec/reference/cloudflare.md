@@ -38,9 +38,11 @@ The runtime stores the resolved id-to-host map in **Directory** ([§R2](#r2-sing
 
 **Cross-DO RPC** uses the DO stub returned from `idFromName`. The stub's methods are the inter-host RPC surface (verb dispatch, property read/write, version-checked artifact fetch, and the contents-mirror updates described below). Every awaited cross-DO RPC carries the host wait-for guard from [protocol/hosts.md §3.5](../protocol/hosts.md#35-host-wait-for-graph-and-reentrancy): `correlation_id`, `host_chain`, and `route_class`.
 
-**Operation-scoped memoization.** Within one verb execution, the origin host may memoize id-to-host resolutions and read-only cross-DO fetches (`getProp`, `location`, `contents`) by promise. The memo dies with the execution frame; it is not a TTL cache and must not be reused by later calls. Reads inside one execution are therefore a frame-scoped snapshot: if the same frame mutates remote state through dispatch and then repeats a memoized read, the earlier read may be returned. This removes duplicate fetches inside one `:look`, movement, or agent tool resolution without serving stale world state across operations.
+**Operation-scoped memoization.** Within one verb execution, the origin host may memoize id-to-host resolutions and read-only cross-DO fetches (`getProp`, `location`, `contents`, bundled object description, verb metadata) by promise. The memo dies with the execution frame; it is not a TTL cache and must not be reused by later calls. Reads inside one execution are therefore a frame-scoped snapshot: if the same frame mutates remote state through dispatch and then repeats a memoized read, the earlier read may be returned. This removes duplicate fetches inside one `:look`, movement, command parse, or agent tool resolution without serving stale world state across operations.
 
-**Bundled object descriptions.** Read-heavy projections such as room `:look` should use a bundled cross-host describe RPC where available, returning the common display fields (`name`, `description`, `aliases`) in one host call. `name` is the object's display name; property fields use the same per-property read filtering the separate `getProp` calls would apply. This is an optimization, not a new authority surface: callers must still pass the actor/progr identities used for the equivalent reads, and a host may return `null` for fields the actor cannot read.
+**Bundled object descriptions.** Read-heavy projections such as room `:look` and `$match` object resolution should use a bundled cross-host describe RPC where available, returning the common display fields (`name`, `description`, `aliases`) in one host call. `name` is the object's display name; property fields use the same per-property read filtering the separate `getProp` calls would apply. This is an optimization, not a new authority surface: callers must still pass the actor/progr identities used for the equivalent reads, and a host may return `null` for fields the actor cannot read.
+
+**Remote command planning reads.** A room-hosted command planner may need to inspect a visible object's verb metadata when that object is hosted elsewhere. The host RPC returns only the canonical verb name and `direct_callable` flag needed to build a plan; actual execution still routes through ordinary direct or sequenced dispatch and re-checks permissions on the object host.
 
 ### R1.7 Contents-mirror invariants
 
@@ -250,6 +252,9 @@ The concrete CF SQLite encoding lives in [persistence.md](persistence.md). The s
 | Method | Purpose |
 |---|---|
 | `getProp(id, name, expected_version?)` | Property read with lazy version check ([persistence.md §15.3](persistence.md#153-lazy-version-check)). Returns `{value, version, perms}` or `E_PROPNF`/`E_PERM`. |
+| `describeObject(id, actor)` | Bundled read of display `name`, actor-readable `description`, and actor-readable `aliases` for look/match projections. |
+| `resolveVerb(id, name)` | Read-only verb metadata lookup for command planning; returns canonical name and `direct_callable`, not executable code. |
+| `contents(id)` | Read a container's contents mirror for look/match projections. |
 | `getVerb(id, name, expected_version?)` | Verb fetch for the cross-host bytecode cache. Returns `{bytecode, version, owner, perms, definer}`. |
 | `getAncestorChain(id, expected_version?)` | Chain walk for cache population. |
 | `setProp(id, name, value, expected_version)` | Versioned write; `E_VERSION` on stale. |

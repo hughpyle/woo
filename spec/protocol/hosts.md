@@ -148,7 +148,7 @@ used inside behavior and which are only post-turn effects.
 
 | Route class | Examples | May enqueue behavior? | May mutate authoritative state? | Cycle rule |
 |---|---|---:|---:|---|
-| `read` | remote property read, contents read, title metadata fetch | No | No | Acyclic synchronous RPC only |
+| `read` | remote property read, contents read, object-description fetch, verb-metadata lookup for command planning | No | No | Acyclic synchronous RPC only |
 | `dispatch` | remote `CALL_VERB`, direct verb call routed to object host | Yes | Yes, on callee host | Acyclic synchronous RPC only |
 | `owner_mutation` | move object's authoritative `location`, recycle owned object | No user behavior | Yes, on owner host | Acyclic; must not callback into any host in chain |
 | `mirror` | update `container.contents`, subscriber cache, presence mirror | No | Cache only | One-way; if target host is in chain, caller applies locally or defers |

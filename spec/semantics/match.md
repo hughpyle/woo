@@ -18,7 +18,7 @@ A seed object with these verbs. Lives with the chat classes and scaffolding ([bo
 |---|---|---|
 | `:match_object(name, location?)` rxd | obj \| `$failed_match` \| `$ambiguous_match` | Resolve a string to an object visible from `location` (defaults to `actor.location`). |
 | `:match_verb(name, target)` rxd | verb \| null | Resolve a verb name (with alias patterns per [objects.md §9.1](objects.md#91-lookup)) on `target` using runtime lookup, including features where applicable. |
-| `:parse_command(text, actor)` rxd | map | Full pipeline: tokenize, identify verb + dobj + iobj, return a structured `command` map. |
+| `:parse_command(text, actor, location?)` rxd | map | Full pipeline: tokenize, identify verb + dobj + iobj, return a structured `command` map. `location` defaults to `actor.location`. |
 
 Returned by `:match_object`:
 - A successful objref.
@@ -35,11 +35,18 @@ Sentinels are seeded at boot; their identity is stable across reboots so user co
 
 1. **Direct objref.** If `name` starts with `#` and parses as a ULID, look it up in the Directory. If found and visible to the caller, return it.
 2. **Corename.** If `name` starts with `$`, resolve via `$system.<name>`. If found, return it.
-3. **Local search.** Walk `location.contents`. For each candidate `c`:
+3. **Location search.** Walk `location.contents`, even when `location` lives on another host. For each candidate `c`:
    - If `c.name == name` (case-insensitive), it's an exact match.
    - Else if any of `c.aliases` matches `name` per [objects.md §9.1](objects.md#91-lookup) alias grammar, it's an alias match.
    - Else if `c.name` starts with `name` (case-insensitive) and `name` is at least 2 characters, it's a prefix match.
 4. **Carrying-actor search.** Walk `actor.contents` (things the actor holds). Same matching as step 3.
+
+Matching is scoped, not local-only. A command parser running on an actor's home
+host must still resolve objects in the actor's current room when that room is
+self-hosted elsewhere, and a room-hosted parser must still resolve a carryable
+object whose storage host differs from the room. Remote lookup uses read-class
+host RPCs for `contents`, display `name`, and `aliases`; it does not dispatch
+object behavior.
 
 Resolution:
 - If exactly one exact match → return it.
@@ -48,7 +55,7 @@ Resolution:
 - If multiple candidates at the highest-priority tier → `$ambiguous_match`.
 - If no candidates at any tier → `$failed_match`.
 
-The "me" and "here" pseudo-names resolve to `actor` and `actor.location` respectively. These are conventions, not runtime-bound.
+The "me" and "here" pseudo-names resolve to `actor` and `actor.location` respectively. These are conventions, not runtime-bound; `here` still resolves when the current location is remote and absent from the caller's local object map.
 
 ---
 
@@ -68,7 +75,8 @@ This is the *same* lookup the runtime performs on `CALL_VERB`. Surfacing it as a
 
 ## MA4. Command parsing
 
-`$match:parse_command(text, actor)` is the full pipeline. Returns a map shaped:
+`$match:parse_command(text, actor, location?)` is the full pipeline. `location`
+defaults to `actor.location`. Returns a map shaped:
 
 ```
 {
@@ -88,7 +96,7 @@ Pipeline:
 1. **Tokenize.** Split `text` on whitespace, respecting quotes (`"hello world"` is one token). Preserve original substrings for `argstr`/`dobjstr`/`iobjstr`.
 2. **Verb extraction.** First token is the verb name.
 3. **Preposition split.** Scan remaining tokens for the first preposition from §MA5, preferring the longest matching preposition when two entries begin at the same token (`in front of` before `in`). Tokens before it form the direct-object phrase; tokens after form the indirect-object phrase.
-4. **Object resolution.** Run `:match_object(dobjstr, actor.location)` and `:match_object(iobjstr, actor.location)` if present.
+4. **Object resolution.** Run `:match_object(dobjstr, location)` and `:match_object(iobjstr, location)` if present.
 5. **Return** the structured map.
 
 User code dispatches by:
@@ -134,7 +142,7 @@ Custom worlds can extend this list by overriding `$match.prepositions` (a list p
 - **Sentence parsing.** `$match` parses one verb-shaped command per call. Multi-clause input (`get the book and read it`) is the caller's responsibility.
 - **Spell correction or fuzzy matching.** Prefix matching is the only forgiveness offered. Worlds that want Damerau-Levenshtein or phonetic matching layer it on top.
 - **Verb suggestion (`:huh`).** When `:match_verb` returns null, the caller can choose to call `room:huh(cmd)` (a convention, not a built-in). LambdaMOO's `:huh` lives on rooms; same here.
-- **Cross-room search.** `:match_object` only walks `location.contents` and `actor.contents`. A world that wants global search adds a verb that walks an index.
+- **Cross-room search.** `:match_object` only walks `location.contents` and `actor.contents`, even when those containers are remote. A world that wants global search adds a verb that walks an index.
 - **Arg-pattern overload selection.** LambdaMOO's `do_command` chooses among same-named verb candidates by matching `(dobj kind, preposition, iobj kind)` against each verb's arg spec. The v0 woo parser resolves by verb name only and lowers to the target verb's current argument shape. Full arg-pattern dispatch is deferred until the object model supports same-name verb candidates and the authoring surface exposes the grammar clearly.
 
 These deferrals keep `$match` small. The pattern is "scaffolding for the 80% case"; the 20% extends it.
