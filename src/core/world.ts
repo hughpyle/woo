@@ -2746,7 +2746,7 @@ export class WooWorld {
   private async spaceLookSelf(ctx: CallContext): Promise<WooValue> {
     const room = ctx.thisObj;
     const look = await this.composeRoomLook(ctx, room);
-    this.observeRoomLook(ctx, room, look);
+    await this.observeRoomLook(ctx, room, look);
     return look as unknown as WooValue;
   }
 
@@ -2787,23 +2787,24 @@ export class WooWorld {
     }
   }
 
-  private observeRoomLook(ctx: CallContext, room: ObjRef, look: Record<string, WooValue>): void {
+  private async observeRoomLook(ctx: CallContext, room: ObjRef, look: Record<string, WooValue>): Promise<void> {
     ctx.observe({
       type: "looked",
       source: room,
       actor: ctx.actor,
       to: ctx.actor,
       room,
-      text: this.roomLookText(look),
+      text: await this.roomLookText(ctx, look),
       look,
       ts: Date.now()
     });
   }
 
-  private roomLookText(look: Record<string, WooValue>): string {
+  private async roomLookText(ctx: CallContext, look: Record<string, WooValue>): Promise<string> {
     const lines = [String(look.description ?? "")];
     const present = Array.isArray(look.present_actors) ? look.present_actors.filter((item): item is ObjRef => typeof item === "string") : [];
-    lines.push(`Present: ${present.map((actor) => this.objectDisplayName(actor)).join(", ") || "nobody"}.`);
+    const presentNames = await Promise.all(present.map((actor) => this.objectDisplayNameAsync(ctx.progr, actor)));
+    lines.push(`Present: ${presentNames.join(", ") || "nobody"}.`);
     const contents = Array.isArray(look.contents) ? look.contents : [];
     const things = contents
       .map((item) => {
@@ -2817,8 +2818,9 @@ export class WooWorld {
     return lines.filter(Boolean).join(" ");
   }
 
-  private roomWho(ctx: CallContext): WooValue {
+  private async roomWho(ctx: CallContext): Promise<WooValue> {
     const present = this.chatPresent(ctx.thisObj);
+    const presentNames = await Promise.all(present.map((actor) => this.objectDisplayNameAsync(ctx.progr, actor)));
     ctx.observe({
       type: "who",
       source: ctx.thisObj,
@@ -2826,7 +2828,7 @@ export class WooWorld {
       to: ctx.actor,
       room: ctx.thisObj,
       present_actors: present,
-      text: `Present: ${present.map((actor) => this.objectDisplayName(actor)).join(", ") || "nobody"}.`,
+      text: `Present: ${presentNames.join(", ") || "nobody"}.`,
       ts: Date.now()
     });
     return present;
@@ -2864,7 +2866,7 @@ export class WooWorld {
     const actor = ctx.actor;
     const room = ctx.thisObj;
     const oldLocation = this.objects.has(actor) ? this.object(actor).location : null;
-    const actorName = this.objectDisplayName(actor);
+    const actorName = await this.objectDisplayNameAsync(ctx.progr, actor);
     const ts = Date.now();
     if (oldLocation && oldLocation !== room && this.objects.has(oldLocation) && this.inheritsFrom(oldLocation, "$space")) {
       await this.updatePresenceChecked(actor, oldLocation, false);
@@ -2886,14 +2888,14 @@ export class WooWorld {
     await this.moveObjectChecked(actor, room);
     ctx.observe({ type: "entered", source: room, actor, room, text: `${actorName} entered.`, ts });
     const look = await this.composeRoomLook({ ...ctx, thisObj: room }, room);
-    this.observeRoomLook(ctx, room, look);
+    await this.observeRoomLook(ctx, room, look);
     return this.chatPresent(room);
   }
 
   private async roomLeave(ctx: CallContext): Promise<WooValue> {
     const actor = ctx.actor;
     const room = ctx.thisObj;
-    const actorName = this.objectDisplayName(actor);
+    const actorName = await this.objectDisplayNameAsync(ctx.progr, actor);
     await this.updatePresenceChecked(actor, room, false);
     const homeValue = this.propOrNull(actor, "home");
     const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
@@ -2913,7 +2915,7 @@ export class WooWorld {
     }
     const target = this.resolveRoomExit(ctx.thisObj, exitName);
     if (!this.inheritsFrom(target, "$space")) throw wooError("E_TYPE", `${target} is not a room or space`, target);
-    const actorName = this.objectDisplayName(ctx.actor);
+    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor);
     await this.updatePresenceChecked(ctx.actor, ctx.thisObj, false);
     await this.updatePresenceChecked(ctx.actor, target, true);
     await this.moveObjectChecked(ctx.actor, target);
@@ -2940,13 +2942,27 @@ export class WooWorld {
       ts
     });
     const look = await this.composeRoomLook({ ...ctx, thisObj: target }, target);
-    this.observeRoomLook(ctx, target, look);
+    await this.observeRoomLook(ctx, target, look);
     return { room: target, from: ctx.thisObj, exit: exitName, title };
   }
 
   private objectDisplayName(objRef: ObjRef): string {
     if (!this.objects.has(objRef)) return objRef;
     return this.object(objRef).name || objRef;
+  }
+
+  // Cross-host-aware display name. Falls back to a property read if the
+  // referenced object lives on another host (typical for remote actors in
+  // a self-hosted room's roomEnter/roomLeave/roomExit observation text).
+  private async objectDisplayNameAsync(progr: ObjRef, objRef: ObjRef): Promise<string> {
+    if (this.objects.has(objRef)) return this.object(objRef).name || objRef;
+    try {
+      const name = await this.getPropChecked(progr, objRef, "name");
+      if (typeof name === "string" && name.length > 0) return name;
+    } catch {
+      // E_PROPNF / E_PERM — fall through to id.
+    }
+    return objRef;
   }
 
   private exitAnnouncement(exitName: string): string {
