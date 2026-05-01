@@ -102,13 +102,13 @@ Phase 0 (toolchain smoke test) — landed:
 
 Phase 1 (CF backend `ObjectRepository`) — landed:
 
-- `src/worker/cf-repository.ts` (~700 lines). Mirrors `LocalSQLiteRepository`. Schema and SQL strings byte-identical (both target SQLite); the wrapping changes:
+- `src/worker/cf-repository.ts`. Mirrors `LocalSQLiteRepository` through the shared SQL shape in `src/core/sql-shape.ts`: schema statements, legacy rebuild statements, row decoders, object-flag encoding, and verb-flag serialization live in one place. The wrapping changes:
   - `state.storage.sql.exec(...)` cursor API instead of better-sqlite3 prepared statements.
   - `state.storage.transactionSync(fn)` for atomicity (raw `BEGIN`/`COMMIT`/`ROLLBACK` aren't allowed via `sql.exec` on CF).
   - **`savepoint(fn)` also uses `state.storage.transactionSync(fn)`** — when called inside an outer transaction it nests as an implicit savepoint. Raw SQL `SAVEPOINT`/`ROLLBACK TO`/`RELEASE` are forbidden through `sql.exec` per CF docs and have been removed.
 - `CFObjectRepository implements ObjectRepository, WorldRepository`. `load()` walks per-object tables to reconstruct a `SerializedWorld` for cross-hibernation hydration. `save()` clears the tables and re-inserts via per-object methods inside one transaction, matching `LocalSQLiteRepository.save()` so `createWorld()`'s post-bootstrap whole-world flush works on CF.
 - Pending-log-outcome assertion at outer-only commit boundary (matches local backend).
-- No CF-storage variant in conformance harness yet (Miniflare integration is the gating piece).
+- `tests/worker/cf-repository.test.ts` exercises `CFObjectRepository` through a DurableObjectState-shaped `sql.exec`/`transactionSync` adapter: bootstrap/reload, nested savepoint rollback, and remote-room command resolution on CF-backed hosts. Full Worker gateway + Directory + cluster-host integration still needs Miniflare or live-deploy coverage.
 
 Phase 2 (Worker entry + DO class) — landed:
 
@@ -154,7 +154,7 @@ Phase 2.4 (host-scoped cluster loader) — landed:
 - Host slices contain hosted objects, parent/classes/features needed for local verb resolution, bytecode literal object references, subscriber actor objects for hosted spaces, and hosted logs/snapshots/tasks. They do not include unrelated bundled demo objects, `$catalog_registry` install history, or gateway sessions.
 - Cluster `/api/auth` and `/ws` now fail loud; the gateway remains the only public auth and WebSocket host. Forwarded internal calls create a minimal local actor/session if the actor was not already in the host slice.
 - Runtime-created object ids now include their anchor-derived scope (`obj_<scope>_<n>`) so independent hosts do not mint the same `obj_1` name.
-- Verification in the current worktree: `npm run typecheck`, `npm test` (105/105 after host-scope tests), `npm run build`, Playwright smoke, `wrangler deploy --dry-run`, and `git diff --check` pass.
+- Verification for this phase was superseded by later runs; current local verification is tracked in the latest work notes and `TECH_DEBT_AUDIT.md`.
 
 Phase 2.5 (single async runtime path + cross-host dispatch bridge) — landed locally:
 
@@ -167,7 +167,7 @@ Phase 2.5 (single async runtime path + cross-host dispatch bridge) — landed lo
 Verb-flag persistence fix (storage-layer bug, both backends) — landed:
 
 - Both `LocalSQLiteRepository` and `CFObjectRepository` had a pre-existing schema bug: the `verb` table had no `flags` column, so `direct_callable` and `skip_presence_check` were silently dropped on save and reset to undefined on load. Locally invisible because the in-memory state from initial bootstrap survived in the same process; on CF every fresh DO instance re-hydrated from storage and lost the flags, so calls to chat verbs returned `E_DIRECT_DENIED`.
-- Schema gains `flags TEXT NOT NULL DEFAULT '{}'`. `save()` and `saveVerb()` write `verbFlagsJson(verb)`; `verbFromRow` reads the JSON and sets the booleans on the reconstituted `VerbDef`.
+- Schema gains `flags TEXT NOT NULL DEFAULT '{}'`. `save()` and `saveVerb()` write shared `verbFlagsJson(verb)` output; the shared row decoder reads the JSON and sets the booleans on the reconstituted `VerbDef`.
 - `ensureColumn` migration adds the column on existing local SQLite databases.
 - CFObjectRepository.migrate() detects "verb table exists without flags column" and drops every table; the next `createWorld()` sees empty storage and runs fresh bootstrap + catalog auto-install. One-time wipe; operator re-claims wizard via the same `WOO_INITIAL_WIZARD_TOKEN` secret. (Local SQLite dev databases keep their data but with empty flags — operator can `rm .woo/dev.sqlite` and restart for a clean re-bootstrap if needed.)
 
@@ -187,7 +187,7 @@ In dependency order:
 - **Aggregate health**: `/healthz` is gateway-local. Add a Directory/host fan-out health endpoint when routed-host liveness needs to be operator-visible.
 - **Verb-lookup cache** (`ancestor_verb_cache`, `ancestor_prop_cache`). Schema exists in `persistence.md §14.1`; population on cross-DO miss is unimplemented.
 - **`src/instrument.ts`** with AE writes, structured logs, per-DO `:metrics()`.
-- **CF storage variant in conformance harness** via Miniflare. Optional; the unit-level transaction/savepoint guarantees are covered by the SQLite + in-memory backends.
+- **Full Worker/DO conformance harness** via Miniflare. `tests/worker/cf-repository.test.ts` now covers `CFObjectRepository` through a DurableObjectState-shaped SQL adapter; the remaining gap is gateway + Directory + cluster-host integration.
 - **Worker-side catalog tap install**: port `src/server/github-taps.ts` helpers into the Worker fetch handler. Currently the Worker route returns 501 `E_NOT_IMPLEMENTED`; local catalogs cover the demos.
 
 ## Known acceptable shortcuts
@@ -199,14 +199,14 @@ In dependency order:
 - **No multi-region tuning.** CF picks the closest region per DO automatically.
 - **No distributed tracing.** Structured logs + `request_id` propagation across cross-DO RPCs cover the audit trail.
 - **No snapshot policy automation.** Operators trigger snapshots manually (or via a verb on `$space`); CF-side automation is post-v1.
-- **No CF-storage variant in conformance harness** until Miniflare or equivalent is wired. The unit-level transaction/savepoint guarantees are covered by the SQLite + in-memory backends.
+- **No full Worker/DO conformance harness** until Miniflare or equivalent is wired. The repository-level CF storage shape is covered by `tests/worker/cf-repository.test.ts`; gateway/Directory/cluster routing still needs integration coverage.
 - **Worker-level rate limiting via Cloudflare's built-in protection.** No application-level rate-limit beyond `wire.md §17.5` outbound queue / inbound burst caps.
 
 ## Open questions
 
 1. **Sessions placement.** Current slice uses Directory's `session_id -> actor` table. Lean from §R11.4 still points toward embedded player ids for long-term removal of a session lookup hop; decide before player-DO routing.
 2. **`world.ts` decomposition.** The Worker can route top-level calls now, but `WooWorld` still assumes local class/verb availability and local dispatch within a host. Light refactor (cluster-aware dispatch + remote definition cache) vs. full decomposition along TECH_DEBT_AUDIT F001 lines remains open.
-3. **Storage transaction boundaries** at CF: `state.storage.transactionSync` compiles and dry-runs; still needs a Miniflare/DO storage probe for commit behavior and repository-local savepoints under real CF storage.
+3. **Storage transaction boundaries** at CF: repository-local savepoint behavior is now covered by a DurableObjectState-shaped adapter, but still needs a Miniflare/DO probe against real `state.storage.sql` semantics.
 4. **Demo catalogs at boot**: should `WOO_AUTO_INSTALL_CATALOGS=chat,dubspace,taskspace` be the default for fresh dev deploys (current intent) or empty for CF deploys (clean world)? Probably default in dev, empty in production.
 
 ## Reference

@@ -15,5 +15,5 @@
     "types": ["node"]
   },
   "include": ["src", "tests", "e2e", "vite.config.ts", "playwright.config.ts"],
-  "exclude": ["src/worker"]
+  "exclude": ["src/worker", "tests/worker"]
 }

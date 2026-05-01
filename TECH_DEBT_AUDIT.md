@@ -1,8 +1,8 @@
 # Tech Debt Audit — woo
 
-Generated: 2026-04-30 · against commit `a5fe91c` (main)
+Generated: 2026-04-30 · updated 2026-05-01
 
-Scope: `src/` (~12k LOC), `tests/`, `e2e/`, surrounding manifests and specs. Tests pass 103/103; both tsconfigs are clean; `npm audit` reports zero vulnerabilities.
+Scope: `src/` (~12k LOC), `tests/`, `e2e/`, surrounding manifests and specs. Tests pass 173/173; both tsconfigs are clean; `npm audit` reports zero vulnerabilities.
 
 ## Executive summary
 
@@ -10,14 +10,14 @@ Scope: `src/` (~12k LOC), `tests/`, `e2e/`, surrounding manifests and specs. Tes
 2. **REST/WS protocol duplication is collapsed in the current worktree** (F002 fixed). `src/core/protocol.ts` now owns public REST handling and WebSocket frame dispatch; Node and Worker provide only host hooks for auth, streams, broadcasting, GitHub taps, and cross-DO routing.
 3. **`WOO_SEED_PHRASE` no longer pretends to be implemented** (F006 fixed in the current worktree). The Worker no longer fail-fasts on a seed phrase it does not read, and the Cloudflare/deploy specs now say seeded deterministic ID allocation is deferred until a real allocator exists.
 4. **`world.ts` is a large god class**, owning bootstrap, persistence, sessions, presence, VM dispatch, parked tasks, snapshots, audit, schema, replay, and identity (F001). The catalog-specific native verbs have been removed, but the class remains the first place every backend bug ends up.
-5. **Two parallel SQL repositories** (`sqlite-repository.ts` 773 LOC, `cf-repository.ts` 878 LOC) duplicate the schema and `verbFromRow` / `verbFlagsJson` byte-for-byte (F003). The verb-flags persistence bug fixed in `ed16b6d` had to be patched in both backends precisely because of this.
-6. **`CFObjectRepository`, `PersistentObjectDO`, `DirectoryDO`, `index.ts` have zero unit-test coverage** (F004). The conformance harness only runs against in-memory + LocalSQLite. The CF backend is exercised only by manual `wrangler deploy` smoke tests.
+5. **SQL schema and row codecs are now shared** (F003 fixed). `src/core/sql-shape.ts` owns schema statements, legacy rebuild statements, row decoders, object-flag encoding, and verb flag serialization; local SQLite and CF keep only their storage adapters.
+6. **`CFObjectRepository` now has production-shape unit coverage, but the full Worker/DO path is still light** (F004 partially fixed). The new worker-typed Vitest coverage exercises CF's `sql.exec`/`transactionSync` shape through a local adapter; `PersistentObjectDO`, `DirectoryDO`, and `index.ts` still need Miniflare or live Worker integration coverage.
 7. **Cluster Durable Objects now load host-scoped slices** (F007/F020 fixed in current worktree). A non-gateway host imports or prunes to its routed objects, support classes/features, hosted logs, snapshots, and tasks. It no longer auto-installs the bundled catalogs or accepts `/api/auth`/`/ws`.
 8. **`as unknown as X` cast farm** in `world.ts` (35), `repository.ts` (22), `cf-repository.ts` (10), `tiny-vm.ts` (8). All routed through `cloneValue()` / `cloneRepoValue()`, which are typed `WooValue → WooValue`. A single `cloneTyped<T>(v: T): T` wrapper would erase ~80 casts (F012).
 9. **`client/main.ts` is 1,289 lines, single-file SPA, with `: any` everywhere** for `world`, `dubspace`, `task`, `observation` (F008). Rendering is `innerHTML = template literal` driven by an untyped state tree.
 10. **The bundled-catalog index is now location-driven, but generated** (F034). That is the right architecture for non-filesystem deployment targets, and standard npm scripts regenerate it, but it needs to stay a generated artifact rather than drift back into a hand-authored catalog list.
 
-Open severity counts after current batch: 5 Critical, 5 High, 13 Medium, 13 Low (36 open) · fixed in current worktree: F002, F005, F006, F007, F009, F011, F015, F016, F020, F022, F027, F033, F039, F042, F047.
+Open severity counts need a full recount after the current fixes. Newly resolved or reduced since the original audit includes F003 fixed and F004 partially fixed, in addition to the earlier fixed set: F002, F005, F006, F007, F009, F011, F015, F016, F020, F022, F027, F033, F039, F042, F047.
 
 ## Architectural mental model
 
@@ -36,8 +36,8 @@ The current cut is mid-refactor: a multi-DO routing layer (gateway + Directory +
 |----|----------|-----------|----------|--------|-------------|----------------|
 | F001 | Architectural decay | `src/core/world.ts:1-2388` | High | L | God class. 2,388 LOC, 123 public methods, owns bootstrap / persistence / sessions / presence / VM dispatch / parked tasks / snapshots / audit / schema / replay / identity. Most-modified file in the repo (10 commits in 6 months). | Extract along seam lines that already exist — `Persistence` (lines ~1138–1260), `Sessions` (~408–520), `ParkedTasks` (~870–1006), `Snapshots` (~1097–1137). Don't rewrite — pull pure functions out one cluster at a time, leaving `WooWorld` as a façade. |
 | F002 | Architectural decay / duplication | `src/core/protocol.ts`, `src/server/dev-server.ts`, `src/worker/persistent-object-do.ts` | Fixed | L | **Fixed in current worktree.** Public REST routes and WS frame dispatch now live in `src/core/protocol.ts`. `dev-server.ts` adapts Node `http`/`ws`; `persistent-object-do.ts` adapts Web `Request` plus hibernated sockets. Transport-specific responsibilities remain local: SSE streams, GitHub tap install, CF cross-host forwarding, and broadcast fan-out. | Keep the boundary tight: future protocol verbs/endpoints should be added in `src/core/protocol.ts`, not duplicated in Node/Worker wrappers. |
-| F003 | Architectural decay / duplication | `src/server/sqlite-repository.ts:486-593`, `src/worker/cf-repository.ts:637-744` | Critical | M | Two SQL repositories duplicate schema and helpers (`verbFromRow`, `verbFlagsJson` are byte-for-byte identical — `sqlite-repository.ts:666` and `cf-repository.ts:769`). The verb-flags persistence bug at `ed16b6d` had to be fixed in both. | Pull schema and row-mapping helpers into a shared `src/core/sql-shape.ts`; each backend keeps just the `exec`/`prepare` adapter. |
-| F004 | Test debt | `tests/conformance.test.ts:24-37`, `tests/object-repository.test.ts:5-7`, `tests/persistence.test.ts:8-9` | Critical | M | `CFObjectRepository`, `PersistentObjectDO`, `DirectoryDO`, and `src/worker/index.ts` have zero unit/integration test coverage. Conformance only runs against `InMemoryObjectRepository` + `LocalSQLiteRepository`. CF backend is verified only via live deploy. | Add a Miniflare-driven test harness; run the existing conformance backends array against `CFObjectRepository`. The `notes/impl-cf-deploy.md:30` already lists this as planned but deferred. |
+| F003 | Architectural decay / duplication | `src/core/sql-shape.ts`, `src/server/sqlite-repository.ts`, `src/worker/cf-repository.ts` | Fixed | M | **Fixed.** Schema statements, legacy rebuild statements, row decoders, object flag encoding, and verb flag serialization now live in `src/core/sql-shape.ts`. Local SQLite and CF repositories import that shared shape and keep only their storage API mechanics. | Keep future schema, row-codec, and verb-flag changes in `sql-shape.ts`; do not reintroduce backend-local schema copies. |
+| F004 | Test debt | `tests/worker/cf-repository.test.ts`, `tests/conformance.test.ts:24-37`, `tests/object-repository.test.ts:5-7`, `tests/persistence.test.ts:8-9` | Critical | M | **Partially fixed.** `CFObjectRepository` now has worker-typed Vitest coverage using a DurableObjectState-shaped `sql.exec`/`transactionSync` adapter, covering bootstrap/reload, nested savepoint rollback, and remote-room command resolution on CF-backed hosts. `PersistentObjectDO`, `DirectoryDO`, and `src/worker/index.ts` still lack Miniflare/live Worker integration tests. | Add a Miniflare-driven test harness for the full gateway + Directory + cluster-host path, or run a live-deploy-gated Worker suite via `WOO_E2E_BASE_URL`. |
 | F005 | Consistency rot / Security | `src/server/dev-server.ts:47`, `src/worker/persistent-object-do.ts:122` | Fixed | S | **Fixed in current worktree.** `/api/state` used to be unauthenticated on dev-server while Worker required a session + actor filtering. Dev now requires `Authorization: Session <id>` and calls `world.state(session.actor)`. | Keep the parity test pressure in e2e; the longer-term fix is still F002 (one REST implementation). |
 | F006 | Doc drift / Security | `src/worker/persistent-object-do.ts`, `spec/reference/cloudflare.md §R14.5` | Fixed | S | **Fixed in current worktree by downgrading the contract.** The Worker no longer checks `WOO_SEED_PHRASE`, deploy docs no longer require it, and §R14.5 now states seeded deterministic object-id allocation is deferred. | When the allocator exists, add a new explicit deploy contract and tests before reintroducing a seed phrase. |
 | F007 | Architectural decay | `src/worker/persistent-object-do.ts`, `src/core/world.ts`, `src/core/bootstrap.ts` | Fixed | L | **Fixed in current worktree.** Non-gateway DOs initialize from `exportHostScopedWorld(host)`: hosted objects, support parent/classes/features, bytecode literal refs, hosted logs, snapshots, and tasks. Existing full-shadow cluster stores are pruned on next load. Cluster `/api/auth` and `/ws` now fail loud. | Remaining related work is the general cross-host verb-body RPC layer; the full-shadow bootstrap itself is gone. |
@@ -88,51 +88,31 @@ The current cut is mid-refactor: a multi-DO routing layer (gateway + Directory +
 
 ## Top 5 — if you fix nothing else
 
-### 1. F003 — Share the SQL schema and row mapping
+### 1. F004 — Test the full Worker/DO path
 
-Two repositories with duplicated schemas mean every schema change is two PRs and every persistence bug is two patches. Already happened once (`ed16b6d`).
-
-```ts
-// src/core/sql-shape.ts
-export const SCHEMA = `CREATE TABLE IF NOT EXISTS object (...) ...`;
-export function verbFromRow(row: Row): VerbDef { /* one copy */ }
-export function verbFlagsJson(verb: VerbDef): string { /* one copy */ }
-
-// sqlite-repository imports SCHEMA, runs db.exec(SCHEMA)
-// cf-repository imports SCHEMA, splits on `;` and execs each (CF requires)
-```
-
-Both repositories keep their `prepare`/`exec` adapter; everything above that is shared.
-
-### 2. F004 — Test the CF backend
-
-The CF backend is the only one with no test coverage and is the production target. Even a Miniflare-driven `tests/conformance.test.ts` backend stub would catch the next class of bug before it ships.
+`CFObjectRepository` is now covered, but the deployed topology is gateway → Directory → object-host DOs. That path still needs automated coverage.
 
 ```ts
-// tests/conformance.test.ts: add a third entry to backends[]
-{
-  name: "cf-storage",
-  make: () => {
-    const mf = new Miniflare({ /* SQLite-backed DO */ });
-    const repo = new CFObjectRepository(mf.getDurableObjectState(...));
-    /* same Harness shape */
-  }
-}
+WOO_E2E_BASE_URL=https://woo.example.workers.dev npm run test:e2e
 ```
 
-If Miniflare's `state.storage.sql` parity isn't sufficient yet, run the conformance suite against a live `wrangler dev` instance gated by env var.
+If Miniflare's `state.storage.sql` parity is sufficient, prefer Miniflare for CI and keep the live-deploy suite as an explicit operator smoke.
 
-### 3. F001 — Split the world façade by responsibility
+### 2. F001 — Split the world façade by responsibility
 
 `WooWorld` still owns too much. Now that catalog-specific verbs and protocol duplication are out of the way, the least risky split is mechanical: pull sessions, parked tasks, snapshots, and persistence adapters into focused modules while keeping `WooWorld` as the public façade.
 
-### 4. F008 / F041 — Split and type the client
+### 3. F008 / F041 — Split and type the client
 
 The single-file SPA is now doing real catalog discovery and multiple app projections. It needs typed state projections and smaller render/bind modules before the next UI surface gets bolted onto `client/main.ts`.
 
-### 5. F010 — Replace the cast farm with typed clone helpers
+### 4. F010 — Replace the cast farm with typed clone helpers
 
 The object/value cloning boundary is where persistence, state export, and VM values meet. The current double-cast pattern hides shape errors; a typed clone wrapper is a small cleanup with broad audit payoff.
+
+### 5. F048 — Stop full-state polling after every frame
+
+The SPA still refreshes via `/api/state` after every applied frame. That was fine for v0, but busy rooms and pinboards turn it into O(world) work on ordinary chat/activity.
 
 ### Honorable mentions (not in the Top 5 but close)
 

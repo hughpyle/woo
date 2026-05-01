@@ -32,7 +32,24 @@ import type {
   SpaceSnapshotRecord,
   WorldRepository
 } from "../core/repository";
-import { wooError, type ErrorValue, type Message, type ObjRef, type Observation, type SpaceLogEntry, type VerbDef, type WooValue } from "../core/types";
+import {
+  flagsFromSqlInt as flagsFromInt,
+  flagsToSqlInt as flagsToInt,
+  logEntryFromSqlRow as logEntryFromRow,
+  parseSqlValue as parseValue,
+  sessionFromSqlRow as sessionFromRow,
+  snapshotFromSqlRow as snapshotFromRow,
+  SQL_DELETE_TABLES,
+  SQL_LEGACY_RESET_TABLES,
+  SQL_SCHEMA_STATEMENTS,
+  SQL_SPACE_MESSAGE_OUTCOME_REBUILD_STATEMENTS,
+  sqlGroupBy as groupBy,
+  stringifySqlValue as stringifyValue,
+  taskFromSqlRow as taskFromRow,
+  verbFlagsJson,
+  verbFromSqlRow as verbFromRow
+} from "../core/sql-shape";
+import { wooError, type ErrorValue, type Message, type ObjRef, type Observation, type SpaceLogEntry, type WooValue } from "../core/types";
 
 type Row = Record<string, unknown>;
 
@@ -138,21 +155,7 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
     // subsequent writes go through per-object methods directly.
     this.transaction(() => {
       // Drop everything; we're about to replace it.
-      for (const table of [
-        "world_meta",
-        "task",
-        "space_snapshot",
-        "space_message",
-        "session",
-        "event_schema",
-        "content",
-        "child",
-        "verb",
-        "property_version",
-        "property_value",
-        "property_def",
-        "object"
-      ]) {
+      for (const table of SQL_DELETE_TABLES) {
         this.sql.exec(`DELETE FROM ${table}`);
       }
 
@@ -620,133 +623,15 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
     // Operator re-claims the wizard token after this one-time reset.
     const verbCols = this.tableColumns("verb");
     if (verbCols.size > 0 && !verbCols.has("flags")) {
-      for (const table of [
-        "world_meta", "task", "space_snapshot", "space_message",
-        "session", "event_schema", "content", "child", "verb",
-        "property_version", "property_value", "property_def", "object",
-        "ancestor_verb_cache", "ancestor_prop_cache", "ancestor_chain"
-      ]) {
+      for (const table of SQL_LEGACY_RESET_TABLES) {
         this.sql.exec(`DROP TABLE IF EXISTS ${table}`);
       }
     }
 
-    // Schema mirrors src/server/sqlite-repository.ts migrate() exactly.
+    // Schema mirrors src/server/sqlite-repository.ts via sql-shape.ts.
     // CF Workers SQL doesn't support multi-statement exec in one call, so each
     // CREATE TABLE / CREATE INDEX runs separately.
-    const stmts = [
-      `CREATE TABLE IF NOT EXISTS object (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        parent TEXT,
-        owner TEXT NOT NULL,
-        location TEXT,
-        anchor TEXT,
-        flags INTEGER NOT NULL,
-        created INTEGER NOT NULL,
-        modified INTEGER NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS property_def (
-        object_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        default_val TEXT NOT NULL,
-        type_hint TEXT,
-        owner TEXT NOT NULL,
-        perms TEXT NOT NULL,
-        version INTEGER NOT NULL DEFAULT 1,
-        PRIMARY KEY (object_id, name)
-      )`,
-      `CREATE TABLE IF NOT EXISTS property_value (
-        object_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        value TEXT NOT NULL,
-        PRIMARY KEY (object_id, name)
-      )`,
-      `CREATE TABLE IF NOT EXISTS property_version (
-        object_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        version INTEGER NOT NULL,
-        PRIMARY KEY (object_id, name)
-      )`,
-      `CREATE TABLE IF NOT EXISTS verb (
-        object_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        aliases TEXT NOT NULL,
-        owner TEXT NOT NULL,
-        perms TEXT NOT NULL,
-        arg_spec TEXT NOT NULL,
-        source TEXT NOT NULL,
-        source_hash TEXT NOT NULL,
-        version INTEGER NOT NULL DEFAULT 1,
-        line_map TEXT NOT NULL,
-        native TEXT,
-        bytecode TEXT,
-        flags TEXT NOT NULL DEFAULT '{}',
-        PRIMARY KEY (object_id, name)
-      )`,
-      `CREATE TABLE IF NOT EXISTS child (
-        object_id TEXT NOT NULL,
-        child_ref TEXT NOT NULL,
-        PRIMARY KEY (object_id, child_ref)
-      )`,
-      `CREATE TABLE IF NOT EXISTS content (
-        object_id TEXT NOT NULL,
-        content_ref TEXT NOT NULL,
-        PRIMARY KEY (object_id, content_ref)
-      )`,
-      `CREATE TABLE IF NOT EXISTS event_schema (
-        object_id TEXT NOT NULL,
-        type TEXT NOT NULL,
-        schema TEXT NOT NULL,
-        PRIMARY KEY (object_id, type)
-      )`,
-      `CREATE TABLE IF NOT EXISTS space_message (
-        space_id TEXT NOT NULL,
-        seq INTEGER NOT NULL,
-        ts INTEGER NOT NULL,
-        actor TEXT NOT NULL,
-        message TEXT NOT NULL,
-        observations TEXT NOT NULL DEFAULT '[]',
-        applied_ok INTEGER,
-        error TEXT,
-        PRIMARY KEY (space_id, seq)
-      )`,
-      `CREATE INDEX IF NOT EXISTS space_message_ts ON space_message(space_id, ts)`,
-      `CREATE TABLE IF NOT EXISTS space_snapshot (
-        space_id TEXT NOT NULL,
-        seq INTEGER NOT NULL,
-        ts INTEGER NOT NULL,
-        state TEXT NOT NULL,
-        hash TEXT NOT NULL,
-        PRIMARY KEY (space_id, seq)
-      )`,
-      `CREATE TABLE IF NOT EXISTS task (
-        id TEXT PRIMARY KEY,
-        parked_on TEXT NOT NULL,
-        state TEXT NOT NULL,
-        resume_at INTEGER,
-        awaiting_player TEXT,
-        correlation_id TEXT,
-        serialized TEXT NOT NULL,
-        created INTEGER NOT NULL,
-        origin TEXT NOT NULL
-      )`,
-      `CREATE INDEX IF NOT EXISTS task_parked_on ON task(parked_on)`,
-      `CREATE INDEX IF NOT EXISTS task_resume_at ON task(resume_at) WHERE state = 'suspended'`,
-      `CREATE TABLE IF NOT EXISTS session (
-        id TEXT PRIMARY KEY,
-        actor TEXT NOT NULL,
-        started INTEGER NOT NULL,
-        expires_at INTEGER,
-        last_detach_at INTEGER,
-        token_class TEXT NOT NULL DEFAULT 'guest'
-      )`,
-      `CREATE TABLE IF NOT EXISTS world_meta (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )`
-    ];
-    for (const stmt of stmts) this.sql.exec(stmt);
+    for (const stmt of SQL_SCHEMA_STATEMENTS) this.sql.exec(stmt);
     this.ensureColumn("space_message", "observations", "TEXT NOT NULL DEFAULT '[]'");
     this.ensureNullableSpaceMessageOutcome();
     this.ensureColumn("verb", "flags", "TEXT NOT NULL DEFAULT '{}'");
@@ -768,143 +653,6 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
     // Current sequenced-call storage inserts a pending log row before behavior
     // outcome is known, then records applied_ok in the same outer transaction.
     // Older demo DBs used NOT NULL here, which rejects that pending state.
-    for (const stmt of [
-      "DROP INDEX IF EXISTS space_message_ts",
-      "ALTER TABLE space_message RENAME TO space_message_old_notnull",
-      `CREATE TABLE space_message (
-        space_id TEXT NOT NULL,
-        seq INTEGER NOT NULL,
-        ts INTEGER NOT NULL,
-        actor TEXT NOT NULL,
-        message TEXT NOT NULL,
-        observations TEXT NOT NULL DEFAULT '[]',
-        applied_ok INTEGER,
-        error TEXT,
-        PRIMARY KEY (space_id, seq)
-      )`,
-      `INSERT INTO space_message(space_id, seq, ts, actor, message, observations, applied_ok, error)
-        SELECT space_id, seq, ts, actor, message, COALESCE(observations, '[]'), applied_ok, error
-        FROM space_message_old_notnull`,
-      "DROP TABLE space_message_old_notnull",
-      "CREATE INDEX IF NOT EXISTS space_message_ts ON space_message(space_id, ts)"
-    ]) this.sql.exec(stmt);
+    for (const stmt of SQL_SPACE_MESSAGE_OUTCOME_REBUILD_STATEMENTS) this.sql.exec(stmt);
   }
-}
-
-// ---- row decoders (shared with sqlite-repository.ts conceptually; duplicated
-// here because the local-vs-CF row shapes are byte-identical strings/numbers
-// but the surrounding storage APIs diverge enough that sharing a module would
-// add friction without payoff). Worth extracting if a third backend appears. ----
-
-function verbFromRow(row: Row): VerbDef {
-  const flags = row.flags ? (parseValue(String(row.flags)) as Record<string, unknown>) : {};
-  const base = {
-    name: String(row.name),
-    aliases: parseValue(String(row.aliases)) as string[],
-    owner: String(row.owner),
-    perms: String(row.perms),
-    arg_spec: parseValue(String(row.arg_spec)) as Record<string, WooValue>,
-    source: String(row.source),
-    source_hash: String(row.source_hash),
-    version: Number(row.version),
-    line_map: parseValue(String(row.line_map)) as Record<string, WooValue>,
-    direct_callable: flags.direct_callable === true ? true : undefined,
-    skip_presence_check: flags.skip_presence_check === true ? true : undefined,
-    tool_exposed: flags.tool_exposed === true ? true : undefined
-  };
-  if (row.kind === "native") return { ...base, kind: "native", native: String(row.native) };
-  return { ...base, kind: "bytecode", bytecode: parseValue(String(row.bytecode)) as VerbDef extends { bytecode: infer B } ? B : never };
-}
-
-function verbFlagsJson(verb: VerbDef): string {
-  const flags: Record<string, true> = {};
-  if (verb.direct_callable === true) flags.direct_callable = true;
-  if (verb.skip_presence_check === true) flags.skip_presence_check = true;
-  if (verb.tool_exposed === true) flags.tool_exposed = true;
-  return JSON.stringify(flags);
-}
-
-function snapshotFromRow(row: Row): SpaceSnapshotRecord {
-  return {
-    space_id: String(row.space_id),
-    seq: Number(row.seq),
-    ts: Number(row.ts),
-    state: parseValue(String(row.state)),
-    hash: String(row.hash)
-  };
-}
-
-function taskFromRow(row: Row): ParkedTaskRecord {
-  return {
-    id: String(row.id),
-    parked_on: String(row.parked_on),
-    state: row.state as ParkedTaskRecord["state"],
-    resume_at: row.resume_at == null ? null : Number(row.resume_at),
-    awaiting_player: row.awaiting_player == null ? null : String(row.awaiting_player),
-    correlation_id: row.correlation_id == null ? null : String(row.correlation_id),
-    serialized: parseValue(String(row.serialized)),
-    created: Number(row.created),
-    origin: String(row.origin)
-  };
-}
-
-function sessionFromRow(row: Row): SerializedSession {
-  return {
-    id: String(row.id),
-    actor: String(row.actor),
-    started: Number(row.started),
-    expiresAt: row.expires_at == null ? undefined : Number(row.expires_at),
-    lastDetachAt: row.last_detach_at == null ? null : Number(row.last_detach_at),
-    tokenClass: row.token_class as "guest" | "bearer" | "apikey" | undefined
-  };
-}
-
-function logEntryFromRow(row: Row): SpaceLogEntry {
-  if (row.applied_ok === null || row.applied_ok === undefined) {
-    throw wooError("E_STORAGE", `log entry has no committed outcome: ${row.space_id}:${row.seq}`);
-  }
-  return {
-    space: String(row.space_id),
-    seq: Number(row.seq),
-    ts: Number(row.ts),
-    actor: String(row.actor),
-    message: parseValue(String(row.message)) as unknown as Message,
-    observations: row.observations ? (parseValue(String(row.observations)) as unknown as Observation[]) : [],
-    applied_ok: Boolean(row.applied_ok),
-    error: row.error ? (parseValue(String(row.error)) as unknown as ErrorValue) : undefined
-  };
-}
-
-function groupBy(rows: Row[], key: string): Map<string, Row[]> {
-  const groups = new Map<string, Row[]>();
-  for (const row of rows) {
-    const value = String(row[key]);
-    groups.set(value, [...(groups.get(value) ?? []), row]);
-  }
-  return groups;
-}
-
-function stringifyValue(value: WooValue): string {
-  return JSON.stringify(value);
-}
-
-function parseValue(value: string): WooValue {
-  try {
-    return JSON.parse(value);
-  } catch (err) {
-    throw wooError("E_STORAGE", "invalid JSON value in CF repository", err instanceof Error ? err.message : String(err));
-  }
-}
-
-function flagsToInt(flags: SerializedObject["flags"]): number {
-  return (flags.wizard ? 1 : 0) | (flags.programmer ? 2 : 0) | (flags.fertile ? 4 : 0) | (flags.recyclable ? 8 : 0);
-}
-
-function flagsFromInt(flags: number): SerializedObject["flags"] {
-  return {
-    wizard: Boolean(flags & 1),
-    programmer: Boolean(flags & 2),
-    fertile: Boolean(flags & 4),
-    recyclable: Boolean(flags & 8)
-  };
 }
