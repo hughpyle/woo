@@ -19,11 +19,13 @@ import {
 } from "../core/types";
 import { installGitHubTap } from "./github-taps";
 import { LocalSQLiteRepository } from "./sqlite-repository";
+import { McpGateway } from "../mcp/gateway";
 
 // Local dev server only: HTTP authoring endpoints require a session and then
 // defer to the world's object-authoring permission checks.
 const repository = new LocalSQLiteRepository(process.env.WOO_DB ?? ".woo/dev.sqlite");
 const world = createWorld({ repository, catalogs: parseAutoInstallCatalogs(process.env.WOO_AUTO_INSTALL_CATALOGS) });
+const mcpGateway = new McpGateway(world, { serverName: "woo-dev" });
 type AttachedSocket = { sessionId: string; actor: string; socketId: string };
 const sockets = new Map<WebSocket, AttachedSocket>();
 type RestStream = { id: string; res: http.ServerResponse; actor: ObjRef; target: ObjRef; scope: "space" | "actor" };
@@ -41,6 +43,12 @@ const vite = await createViteServer({
 const server = http.createServer(async (req, res) => {
   const url = parse(req.url ?? "", true);
   try {
+    if (url.pathname === "/mcp" && (req.method === "POST" || req.method === "GET" || req.method === "DELETE")) {
+      const webRequest = await nodeRequestToWeb(req);
+      const webResponse = await mcpGateway.handle(webRequest);
+      await writeWebResponseToNode(webResponse, res);
+      return;
+    }
     const protocol = await handleRestProtocolRequest(nodeRestRequest(req, url.pathname ?? ""), {
       world,
       authenticateToken,
@@ -394,4 +402,37 @@ function json(res: http.ServerResponse, body: unknown, status = 200): void {
   res.statusCode = status;
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body, null, 2));
+}
+
+async function nodeRequestToWeb(req: http.IncomingMessage): Promise<Request> {
+  const host = req.headers.host ?? "localhost";
+  const url = new URL(req.url ?? "/", `http://${host}`);
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(req.headers)) {
+    if (Array.isArray(value)) headers.set(name, value.join(", "));
+    else if (typeof value === "string") headers.set(name, value);
+  }
+  let body: BodyInit | null = null;
+  if (req.method && req.method !== "GET" && req.method !== "HEAD") {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    if (chunks.length > 0) body = Buffer.concat(chunks);
+  }
+  return new Request(url.toString(), { method: req.method, headers, body, duplex: "half" } as RequestInit);
+}
+
+async function writeWebResponseToNode(response: Response, res: http.ServerResponse): Promise<void> {
+  res.statusCode = response.status;
+  for (const [name, value] of response.headers.entries()) res.setHeader(name, value);
+  if (!response.body) {
+    res.end();
+    return;
+  }
+  const reader = response.body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    res.write(Buffer.from(value));
+  }
+  res.end();
 }

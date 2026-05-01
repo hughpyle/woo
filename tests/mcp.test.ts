@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createWorld } from "../src/core/bootstrap";
 import { McpHost } from "../src/mcp/host";
+import { McpGateway } from "../src/mcp/gateway";
 import type { Observation, WooValue } from "../src/core/types";
 
 function bootstrapWorld() {
@@ -149,3 +150,86 @@ describe("McpHost", () => {
     expect(drainedSecond.more).toBe(false);
   });
 });
+
+describe("McpGateway", () => {
+  it("initializes a session via Mcp-Token, lists tools, and calls a verb", async () => {
+    const world = bootstrapWorld();
+    const gateway = new McpGateway(world);
+
+    // 1) initialize
+    const init = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "vitest", version: "0.0.0" }
+      }
+    }, { "mcp-token": "guest:mcp-gateway" }));
+    expect(init.ok).toBe(true);
+    const sessionId = init.headers.get("mcp-session-id");
+    expect(typeof sessionId).toBe("string");
+    expect((sessionId ?? "").length).toBeGreaterThan(0);
+
+    // initialized notification (required by MCP handshake)
+    const notified = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      method: "notifications/initialized"
+    }, { "mcp-session-id": sessionId! }));
+    expect(notified.status).toBe(202);
+
+    // 2) tools/list
+    const list = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list"
+    }, { "mcp-session-id": sessionId! }));
+    expect(list.ok).toBe(true);
+    const listBody = (await list.json()) as { result: { tools: Array<{ name: string }> } };
+    expect(Array.isArray(listBody.result.tools)).toBe(true);
+    expect(listBody.result.tools.some((t) => t.name.includes("wait"))).toBe(true);
+    expect(listBody.result.tools.some((t) => t.name.includes("create_task"))).toBe(true);
+
+    // 3) tools/call — invoke create_task as a sequenced tool
+    const createName = listBody.result.tools.find((t) => t.name.endsWith("__create_task"))!.name;
+    const call = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: createName, arguments: { title: "via gateway", description: "from MCP" } }
+    }, { "mcp-session-id": sessionId! }));
+    expect(call.ok).toBe(true);
+    const callBody = (await call.json()) as { result: { isError?: boolean; structuredContent?: { applied?: { space: string; seq: number } } } };
+    expect(callBody.result.isError).not.toBe(true);
+    expect(callBody.result.structuredContent?.applied?.space).toBe("the_taskspace");
+
+    // 4) DELETE closes the session
+    const closed = await gateway.handle(new Request("http://t/mcp", {
+      method: "DELETE",
+      headers: { "mcp-session-id": sessionId! }
+    }));
+    expect(closed.status).toBe(204);
+  });
+
+  it("rejects requests without a session and without Mcp-Token", async () => {
+    const world = bootstrapWorld();
+    const gateway = new McpGateway(world);
+    const response = await gateway.handle(new Request("http://t/mcp", { method: "POST", body: "{}" }));
+    expect(response.status).toBe(401);
+    const body = await response.json() as { error: { code: string } };
+    expect(body.error.code).toBe("E_NOSESSION");
+  });
+});
+
+function jsonRpcRequest(url: string, body: unknown, headers: Record<string, string>): Request {
+  return new Request(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "accept": "application/json, text/event-stream",
+      ...headers
+    },
+    body: JSON.stringify(body)
+  });
+}
