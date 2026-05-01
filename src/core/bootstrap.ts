@@ -283,9 +283,15 @@ function seedDemoScaffold(world: WooWorld): void {
 function seedGuests(world: WooWorld): void {
   for (let i = 1; i <= 8; i++) {
     const id = `guest_${i}`;
-    world.createObject({ id, name: `Guest ${i}`, parent: "$guest", owner: "$wiz", location: "$nowhere" });
+    const displayName = `Guest ${i}`;
+    world.createObject({ id, name: displayName, parent: "$guest", owner: "$wiz", location: "$nowhere" });
     reparentSeed(world, id, "$guest");
     describeSeed(world, id, `Pre-seeded guest player ${i}. It can be bound to a temporary session, gains presence in demo spaces on auth, and gives local users or agents a stable actor for first-light testing.`);
+    // Mirror WooObject.name into the `name` property too, so cross-host
+    // display-name lookups (which read the property) get "Guest 1" instead
+    // of the default empty string. Catalog seed_hooks already do this via
+    // setNameIfMissing; bootstrap had to do it explicitly.
+    world.setProp(id, "name", displayName);
     seedProp(world, id, "presence_in", []);
     seedProp(world, id, "session_id", null);
     seedProp(world, id, "home", "$nowhere");

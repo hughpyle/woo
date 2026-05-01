@@ -2500,8 +2500,11 @@ export class WooWorld {
       this.guestFreePool.delete(pooled);
       return pooled;
     }
-    const id = `guest_${this.objects.size}`;
-    this.createObject({ id, name: id, parent: this.objects.has("$guest") ? "$guest" : "$player", owner: "$wiz", location: this.objects.has("$nowhere") ? "$nowhere" : null });
+    const counter = this.objects.size;
+    const id = `guest_${counter}`;
+    const displayName = `Guest ${counter}`;
+    this.createObject({ id, name: displayName, parent: this.objects.has("$guest") ? "$guest" : "$player", owner: "$wiz", location: this.objects.has("$nowhere") ? "$nowhere" : null });
+    this.setProp(id, "name", displayName);
     this.setProp(id, "description", "Dynamically allocated guest player. It can be bound to a temporary session and gives a local user or agent a stable actor for first-light testing.");
     this.setProp(id, "presence_in", []);
     this.setProp(id, "session_id", null);
