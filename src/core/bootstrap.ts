@@ -94,6 +94,7 @@ function seedUniversal(world: WooWorld): void {
   define(world, "$actor", "presence_in", [], "list<obj>", "r");
   define(world, "$actor", "features", [], "list<obj>", "r");
   define(world, "$actor", "features_version", 0, "int", "r");
+  define(world, "$actor", "focus_list", [], "list<obj>", "r");
   define(world, "$player", "session_id", null, "str|null", "r");
   define(world, "$player", "home", "$nowhere", "obj|null");
   removeSeedProperty(world, "$player", "attached_sockets");
@@ -132,6 +133,22 @@ function seedUniversal(world: WooWorld): void {
     native(world, obj, "remove_feature", "remove_feature", "verb :remove_feature(f) rx { ... }");
     native(world, obj, "has_feature", "has_feature", "verb :has_feature(f) rxd { ... }", { directCallable: true });
   }
+  native(world, "$actor", "wait", "actor_wait", "verb :wait(timeout_ms, limit) rxd { ... }", {
+    directCallable: true, toolExposed: true,
+    argSpec: { args: ["timeout_ms?", "limit?"], types: { timeout_ms: "int", limit: "int" } }
+  });
+  native(world, "$actor", "focus", "actor_focus", "verb :focus(target) rxd { ... }", {
+    directCallable: true, toolExposed: true,
+    argSpec: { args: ["target"], types: { target: "obj" } }
+  });
+  native(world, "$actor", "unfocus", "actor_unfocus", "verb :unfocus(target) rxd { ... }", {
+    directCallable: true, toolExposed: true,
+    argSpec: { args: ["target"], types: { target: "obj" } }
+  });
+  native(world, "$actor", "focus_list", "actor_focus_list", "verb :focus_list() rxd { ... }", {
+    directCallable: true, toolExposed: true,
+    argSpec: { args: [] }
+  });
   native(world, "$space", "look_self", "space_look_self", "verb :look_self() rxd { ... }", { directCallable: true });
   native(world, "$space", "replay", "replay", "verb :replay(from_seq, limit) rxd { ... }", { directCallable: true });
   native(world, "$catalog_registry", "install", "catalog_registry_install", "verb :install(manifest, frontmatter, alias, provenance) rx { ... }");
@@ -230,7 +247,7 @@ function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: Tin
   });
 }
 
-function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; perms?: string } = {}): void {
+function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; toolExposed?: boolean; perms?: string; argSpec?: Record<string, WooValue> } = {}): void {
   const existing = world.object(obj).verbs.get(name);
   if (existing) {
     const parsedPerms = normalizeVerbPerms(options.perms ?? existing.perms, existing.direct_callable || options.directCallable === true);
@@ -238,9 +255,15 @@ function native(world: WooWorld, obj: ObjRef, name: string, handler: string, sou
       ...existing,
       perms: parsedPerms.perms,
       direct_callable: parsedPerms.directCallable,
-      skip_presence_check: existing.skip_presence_check || options.skipPresenceCheck === true
+      skip_presence_check: existing.skip_presence_check || options.skipPresenceCheck === true,
+      tool_exposed: existing.tool_exposed || options.toolExposed === true
     };
-    if (next.perms !== existing.perms || next.direct_callable !== existing.direct_callable || next.skip_presence_check !== existing.skip_presence_check) world.addVerb(obj, next);
+    if (
+      next.perms !== existing.perms ||
+      next.direct_callable !== existing.direct_callable ||
+      next.skip_presence_check !== existing.skip_presence_check ||
+      next.tool_exposed !== existing.tool_exposed
+    ) world.addVerb(obj, next);
     return;
   }
   const parsedPerms = normalizeVerbPerms(options.perms ?? "rx", options.directCallable === true);
@@ -250,14 +273,15 @@ function native(world: WooWorld, obj: ObjRef, name: string, handler: string, sou
     aliases: [],
     owner: "$wiz",
     perms: parsedPerms.perms,
-    arg_spec: {},
+    arg_spec: options.argSpec ?? {},
     source,
     source_hash: hashSource(source),
     version: 1,
     line_map: {},
     native: handler,
     direct_callable: parsedPerms.directCallable,
-    skip_presence_check: options.skipPresenceCheck === true
+    skip_presence_check: options.skipPresenceCheck === true,
+    tool_exposed: options.toolExposed === true
   });
 }
 

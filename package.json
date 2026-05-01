@@ -9,6 +9,7 @@
     "predev": "npm run catalog:index",
     "dev": "tsx src/server/dev-server.ts",
     "dump:json": "tsx src/server/dump-json.ts",
+    "mcp:stdio": "tsx src/mcp/stdio.ts",
     "pretest": "npm run catalog:index && npm run guard:object-names",
     "test": "vitest run tests",
     "test:e2e": "playwright test",
@@ -20,6 +21,7 @@
     "deploy": "scripts/deploy.sh"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "vite": "^7.0.0",
     "ws": "^8.18.0"
   },

@@ -26,7 +26,7 @@ import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializ
 import { installCatalogManifest, type CatalogManifest } from "./catalog-installer";
 import { normalizeVerbPerms } from "./verb-perms";
 
-type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
+export type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
 const GUEST_SESSION_GRACE_MS = 60_000;
 const GUEST_SESSION_TTL_MS = 5 * 60_000;
 const CREDENTIAL_SESSION_GRACE_MS = 5 * 60_000;
@@ -170,6 +170,15 @@ export class WooWorld {
 
   setHostBridge(bridge: HostBridge | null): void {
     this.hostBridge = bridge;
+  }
+
+  // Register or replace a native verb handler. Used by the MCP host to wire
+  // host-primitive verbs (`actor_wait`, `actor_focus`, etc.) to closures that
+  // own their per-actor queue / focus-list state. The verbs themselves are
+  // seeded by bootstrap with these handler names; this method just plugs in
+  // the implementation.
+  registerNativeHandler(name: string, handler: NativeHandler): void {
+    this.nativeHandlers.set(name, handler);
   }
 
   async isRemoteObject(objRef: ObjRef): Promise<boolean> {
