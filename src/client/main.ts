@@ -507,21 +507,12 @@ function commitCueControls(target: string) {
 }
 
 function receiveLiveEvent(observation: any) {
-  if (isChatObservation(observation)) {
-    receiveChatEvent(observation);
-    return;
-  }
-  if (observation?.type === "gesture_progress") {
-    receiveLiveControl(observation);
-    return;
-  }
+  // Pinboard side effects (window auto-open/close + state refresh) must fire
+  // before the chat-observation branch, because pinboard_* types appear in
+  // both observation lists and the chat branch returns early. The board is a
+  // focus surface, not a place you travel to (catalogs/pinboard/DESIGN.md);
+  // opening/closing the tab is the chat-side analogue of mounting the board.
   if (isPinboardObservation(observation)) {
-    // Auto-open/close the pinboard window when this client's own actor
-    // enters or leaves the board — covers the chat-room "enter pinboard"
-    // command, an MCP agent that called pinboard:enter/leave under this
-    // session, etc. The board is a focus surface, not a place you travel to
-    // (catalogs/pinboard/DESIGN.md); opening/closing the UI is the chat-side
-    // analogue of mounting/unmounting the board.
     if (String(observation?.actor ?? "") === state.actor) {
       if (observation?.type === "pinboard_entered" && state.tab !== "pinboard") {
         state.tab = "pinboard";
@@ -532,6 +523,13 @@ function receiveLiveEvent(observation: any) {
       }
     }
     void refresh();
+  }
+  if (isChatObservation(observation)) {
+    receiveChatEvent(observation);
+    return;
+  }
+  if (observation?.type === "gesture_progress") {
+    receiveLiveControl(observation);
     return;
   }
   state.observations.unshift({ live: true, observation });
@@ -990,7 +988,13 @@ function isPinboardObservation(observation: any) {
 function receiveChatEvent(observation: any, shouldRender = true) {
   const kind = chatLineKind(observation);
   const presentActors = Array.isArray(observation.present_actors) ? observation.present_actors.map(String) : [];
-  if ((kind === "looked" || kind === "who") && presentActors.length > 0) state.chatPresent = presentActors;
+  // Only adopt present_actors as the chat sidebar list when the observation
+  // came from the actor's current chat room; a `look at pinboard` from the
+  // deck would otherwise overwrite the deck's presence list with the
+  // pinboard's subscribers.
+  const observationRoom = typeof observation.room === "string" ? observation.room : "";
+  const fromCurrentRoom = !observationRoom || observationRoom === chatRoom();
+  if ((kind === "looked" || kind === "who") && presentActors.length > 0 && fromCurrentRoom) state.chatPresent = presentActors;
   if (kind === "entered" && typeof observation.actor === "string" && !state.chatPresent.includes(observation.actor)) {
     state.chatPresent = [...state.chatPresent, observation.actor];
   }
