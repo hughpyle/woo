@@ -50,6 +50,8 @@ The protocol-level invariants that make cross-host execution sound:
 
 **1. Origin owns the continuation.** A task's caller continuation stays on the origin host while a remote dispatch is in flight. The receiver owns only the callee frame it was asked to run and returns a value plus observations.
 
+The corollary: while host A awaits a response from host B, the receiver (B) must not synchronously call back into A — A's host queue is single-threaded, the active task holds it, and the callback would deadlock. Operations on B that need to update A's state (e.g. mirroring a container's contents on the originator after a cross-host move) must instead carry a `suppress` hint identifying the originator, omit the loop-back RPC, and return enough information for the originator to apply the update locally after the response. The move-object RPC carries `suppress_mirror_host` and returns `{old_location, location}`; new cross-host operations that have a similar A→B→A shape must follow the same convention.
+
 **2. Idempotency via correlation id.** Every cross-host RPC carries a `correlation_id`. Receivers maintain a recent-replies cache (TTL ~5 minutes) keyed by correlation id. A duplicate request returns the cached reply rather than re-executing. Transient network failures with retries are therefore safe.
 
 **3. Originator authoritative for transient-host returns.** A task that called into a transient host has its identity fields (`progr`, `player`, `caller`, `task_id`) retained by the originator. Returned values are inputs to the originator, not authoritative state.

@@ -50,7 +50,7 @@ import { signInternalRequest, verifyInternalRequest } from "./internal-auth";
 
 // Re-import WooWorld type. Note `import type` must reach the world module
 // without dragging Node-only deps into the Worker bundle.
-import type { CallContext, HostBridge, WooWorld } from "../core/world";
+import type { CallContext, HostBridge, MoveObjectResult, WooWorld } from "../core/world";
 
 export interface Env {
   WOO: DurableObjectNamespace;
@@ -362,13 +362,34 @@ export class PersistentObjectDO {
         }
         return response.result;
       },
-      moveObject: async (objRef, targetRef) => {
+      moveObject: async (objRef, targetRef, options = {}) => {
         const host = await hostForObject(objRef);
         if (!host || host === localHost) {
-          await world.moveObjectChecked(objRef, targetRef);
-          return;
+          return await world.moveObjectChecked(objRef, targetRef, options);
         }
-        await this.forwardInternalChecked(host, "/__internal/remote-move-object", { obj: objRef, target: targetRef });
+        const suppressMirrorHost = options.suppressMirrorHost ?? localHost;
+        const response = await this.forwardInternalChecked<{ ok: true; old_location?: ObjRef | null; location?: ObjRef }>(host, "/__internal/remote-move-object", {
+          obj: objRef,
+          target: targetRef,
+          suppress_mirror_host: suppressMirrorHost
+        });
+        const result: MoveObjectResult = {
+          oldLocation: typeof response.old_location === "string" ? response.old_location : null,
+          location: typeof response.location === "string" ? response.location : targetRef
+        };
+        // If this host owns either affected container, the object owner
+        // suppresses mirror RPCs back here to avoid A→B→A subrequest
+        // recursion. Update this host's contents caches after the
+        // authoritative owner-location write succeeds.
+        if (suppressMirrorHost === localHost) {
+          if (result.oldLocation && await hostForObject(result.oldLocation) === localHost && world.objects.has(result.oldLocation)) {
+            world.mirrorContents(result.oldLocation, objRef, false);
+          }
+          if (await hostForObject(result.location) === localHost && world.objects.has(result.location)) {
+            world.mirrorContents(result.location, objRef, true);
+          }
+        }
+        return result;
       },
       mirrorContents: async (containerRef, objRef, present) => {
         const host = await hostForObject(containerRef);
@@ -703,8 +724,13 @@ export class PersistentObjectDO {
       }
 
       if (request.method === "POST" && pathname === "/__internal/remote-move-object") {
-        await world.moveObjectChecked(String(body.obj ?? "") as ObjRef, String(body.target ?? "") as ObjRef);
-        return jsonResponse({ ok: true });
+        const suppressMirrorHost = typeof body.suppress_mirror_host === "string" ? body.suppress_mirror_host : null;
+        const result = await world.moveObjectChecked(
+          String(body.obj ?? "") as ObjRef,
+          String(body.target ?? "") as ObjRef,
+          { suppressMirrorHost }
+        );
+        return jsonResponse({ ok: true, old_location: result.oldLocation, location: result.location });
       }
 
       if (request.method === "POST" && pathname === "/__internal/mirror-contents") {

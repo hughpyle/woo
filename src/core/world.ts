@@ -83,7 +83,7 @@ export type HostBridge = {
   hostForObject(id: ObjRef): string | null | Promise<string | null>;
   getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue>;
   dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue>;
-  moveObject(objRef: ObjRef, targetRef: ObjRef): Promise<void>;
+  moveObject(objRef: ObjRef, targetRef: ObjRef, options?: { suppressMirrorHost?: string | null }): Promise<MoveObjectResult>;
   mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void>;
   setActorPresence(actor: ObjRef, space: ObjRef, present: boolean): Promise<void>;
   setSpaceSubscriber(space: ObjRef, actor: ObjRef, present: boolean): Promise<void>;
@@ -93,6 +93,11 @@ export type HostBridge = {
   // plus the verbs of its current contents (when id is a $space). Optional —
   // hosts that don't run an MCP gateway can omit it.
   enumerateRemoteTools?(actor: ObjRef, ids: ObjRef[]): Promise<RemoteToolDescriptor[]>;
+};
+
+export type MoveObjectResult = {
+  oldLocation: ObjRef | null;
+  location: ObjRef;
 };
 
 export type WorldSnapshot = {
@@ -1170,13 +1175,12 @@ export class WooWorld {
     await this.moveObjectChecked(objRef, targetRef);
   }
 
-  async moveObjectChecked(objRef: ObjRef, targetRef: ObjRef): Promise<void> {
+  async moveObjectChecked(objRef: ObjRef, targetRef: ObjRef, options: { suppressMirrorHost?: string | null } = {}): Promise<MoveObjectResult> {
     if (await this.remoteHostForObject(objRef)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
-      await this.hostBridge.moveObject(objRef, targetRef);
-      return;
+      return await this.hostBridge.moveObject(objRef, targetRef, options);
     }
-    await this.moveObjectOwned(objRef, targetRef);
+    return await this.moveObjectOwned(objRef, targetRef, options);
   }
 
   contentsOf(objRef: ObjRef): ObjRef[] {
@@ -1918,7 +1922,7 @@ export class WooWorld {
     this.persistObject(targetRef);
   }
 
-  private async moveObjectOwned(objRef: ObjRef, targetRef: ObjRef): Promise<void> {
+  private async moveObjectOwned(objRef: ObjRef, targetRef: ObjRef, options: { suppressMirrorHost?: string | null } = {}): Promise<MoveObjectResult> {
     const obj = this.object(objRef);
     const targetRemote = await this.remoteHostForObject(targetRef);
     if (!targetRemote) this.object(targetRef);
@@ -1926,13 +1930,20 @@ export class WooWorld {
     obj.location = targetRef;
     obj.modified = Date.now();
     this.persistObject(objRef);
-    if (oldLocation && oldLocation !== targetRef) await this.mirrorContainerContents(oldLocation, objRef, false);
-    await this.mirrorContainerContents(targetRef, objRef, true);
+    if (oldLocation && oldLocation !== targetRef) await this.mirrorContainerContents(oldLocation, objRef, false, options);
+    await this.mirrorContainerContents(targetRef, objRef, true, options);
+    return { oldLocation, location: targetRef };
   }
 
-  private async mirrorContainerContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void> {
+  private async mirrorContainerContents(
+    containerRef: ObjRef,
+    objRef: ObjRef,
+    present: boolean,
+    options: { suppressMirrorHost?: string | null } = {}
+  ): Promise<void> {
     const remote = await this.remoteHostForObject(containerRef);
     if (remote) {
+      if (options.suppressMirrorHost && remote === options.suppressMirrorHost) return;
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
       await this.hostBridge.mirrorContents(containerRef, objRef, present);
       return;
@@ -2941,6 +2952,11 @@ export class WooWorld {
     const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
     // Forward unconditionally; the local stub's `location` may be stale.
     if (this.objects.has(home)) await this.moveObjectChecked(actor, home);
+    // Load-bearing when the actor is local to this host (moveObjectOwned
+    // mirrored to home but not back to room since room may be remote);
+    // redundant when the actor is remote (the bridge's post-RPC branch
+    // already mirrored). Idempotent either way — see hosts.md §3.4.
+    if (this.objects.has(room)) this.mirrorContents(room, actor, false);
     ctx.observe({ type: "left", source: room, actor, room, text: `${actorName} left.`, ts: Date.now() });
     return this.chatPresent(room);
   }
@@ -3006,6 +3022,10 @@ export class WooWorld {
     await this.updatePresenceChecked(ctx.actor, ctx.thisObj, false);
     await this.updatePresenceChecked(ctx.actor, target, true);
     await this.moveObjectChecked(ctx.actor, target);
+    // Load-bearing for actor-local moves; redundant for remote-actor moves
+    // (the bridge's post-RPC branch already mirrored). Idempotent. See the
+    // suppress-and-self-mirror convention in hosts.md §3.4.
+    if (this.objects.has(ctx.thisObj)) this.mirrorContents(ctx.thisObj, ctx.actor, false);
     const title = await this.titleForLook(ctx, ctx.thisObj, target);
     // When target is on a remote host, this DO can't read its subscribers
     // locally, so audience for the "entered" observation would fall back to
@@ -3095,6 +3115,9 @@ export class WooWorld {
     if (item === ctx.actor || (this.objects.has(item) && this.inheritsFrom(item, "$actor"))) throw wooError("E_PERM", "actors are not carryable", item);
     if (!await this.isPortableFor(ctx, item)) throw wooError("E_PERM", `${await this.titleForLook(ctx, room, item)} is not carryable`, item);
     await this.moveObjectChecked(item, ctx.actor);
+    // Load-bearing for item-local moves; redundant for remote-item moves.
+    // See suppress-and-self-mirror convention in hosts.md §3.4.
+    if (this.objects.has(room)) this.mirrorContents(room, item, false);
     const title = await this.titleForLook(ctx, room, item);
     ctx.observe({ type: "taken", actor: ctx.actor, item, text: `You take ${title}.`, ts: Date.now() });
     return { item, title };
@@ -3108,6 +3131,9 @@ export class WooWorld {
     if (match.status !== "ok") throw wooError("E_INVARG", `You are not carrying "${name}".`, name);
     const item = match.value;
     await this.moveObjectChecked(item, room);
+    // Load-bearing for item-local moves; redundant for remote-item moves.
+    // See suppress-and-self-mirror convention in hosts.md §3.4.
+    if (this.objects.has(room)) this.mirrorContents(room, item, true);
     const title = await this.titleForLook(ctx, room, item);
     ctx.observe({ type: "dropped", actor: ctx.actor, item, room, text: `You drop ${title}.`, ts: Date.now() });
     return { item, title, room };

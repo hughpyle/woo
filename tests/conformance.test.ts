@@ -6,7 +6,7 @@ import { compileVerb, installVerb } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
 import { InMemoryObjectRepository } from "../src/core/repository";
 import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
-import type { CallContext, HostBridge, WooWorld } from "../src/core/world";
+import type { CallContext, HostBridge, MoveObjectResult, WooWorld } from "../src/core/world";
 import { LocalSQLiteRepository } from "../src/server/sqlite-repository";
 
 type Harness = {
@@ -104,8 +104,19 @@ class LocalHostBridge implements HostBridge {
     return await remote.hostDispatch({ ...ctx, world: remote }, target, verbName, args, startAt);
   }
 
-  async moveObject(objRef: ObjRef, targetRef: ObjRef): Promise<void> {
-    await this.worldFor(objRef).moveObjectChecked(objRef, targetRef);
+  async moveObject(objRef: ObjRef, targetRef: ObjRef, options: { suppressMirrorHost?: string | null } = {}): Promise<MoveObjectResult> {
+    const suppressMirrorHost = options.suppressMirrorHost ?? this.localHost;
+    const result = await this.worldFor(objRef).moveObjectChecked(objRef, targetRef, { suppressMirrorHost });
+    const localWorld = this.worlds.get(this.localHost);
+    if (suppressMirrorHost === this.localHost && localWorld) {
+      if (result.oldLocation && this.hostForObject(result.oldLocation) === this.localHost && localWorld.objects.has(result.oldLocation)) {
+        localWorld.mirrorContents(result.oldLocation, objRef, false);
+      }
+      if (this.hostForObject(result.location) === this.localHost && localWorld.objects.has(result.location)) {
+        localWorld.mirrorContents(result.location, objRef, true);
+      }
+    }
+    return result;
   }
 
   async mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void> {
