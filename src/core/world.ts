@@ -2837,11 +2837,17 @@ export class WooWorld {
     // composeRoomLook on the chatroom DO would dispatch `:title()` on every
     // gateway-hosted item, and the gateway's queue is busy waiting on the
     // very call that is now trying to call back. Until host-queue re-entrancy
-    // (or durable awaiting_call parking) lands, fall back to a local read of
-    // the standard display fields and avoid the recursive dispatch entirely
-    // for non-local items.
+    // (or durable awaiting_call parking) lands, fall back to a property read
+    // of `name` (cross-host but queue-free) instead of the recursive dispatch.
     if (await this.remoteHostForObject(item)) {
-      return this.objects.has(item) ? this.object(item).name : item;
+      if (this.objects.has(item)) return this.object(item).name;
+      try {
+        const name = await this.getPropChecked(ctx.progr, item, "name");
+        if (typeof name === "string" && name.length > 0) return name;
+      } catch {
+        // E_PROPNF / E_PERM — fall through to id.
+      }
+      return item;
     }
     try {
       const value = await this.dispatch({ ...ctx, caller: room, progr: ctx.actor }, item, "title", []);
