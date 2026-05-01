@@ -23,6 +23,7 @@ export type McpServerOptions = {
 export type McpServerInstance = {
   server: Server;
   host: McpHost;
+  dispose: () => void;
 };
 
 type StableTool = {
@@ -51,9 +52,21 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
     }
   );
 
-  host.onToolListChanged(() => {
+  const unregisterToolListListener = host.onToolListChanged((changedActor) => {
+    if (changedActor !== actor) return;
     void server.notification({ method: "notifications/tools/list_changed" }).catch(() => {});
   });
+  let disposed = false;
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    unregisterToolListListener();
+  };
+  const previousOnClose = server.onclose;
+  server.onclose = () => {
+    dispose();
+    previousOnClose?.();
+  };
 
   const toolsByName = new Map<string, McpTool>();
   const refreshTools = async (): Promise<McpTool[]> => {
@@ -198,7 +211,7 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
     return invokeForMcp(() => invokeDynamicTool(tool, params));
   });
 
-  return { server, host };
+  return { server, host, dispose };
 }
 
 async function invokeForMcp(invoke: () => Promise<McpInvocationResult>) {

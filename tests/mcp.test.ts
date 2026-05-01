@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createWorld } from "../src/core/bootstrap";
 import { McpHost } from "../src/mcp/host";
 import { McpGateway } from "../src/mcp/gateway";
+import { createMcpServer } from "../src/mcp/server";
 import type { Observation, WooValue } from "../src/core/types";
 
 function bootstrapWorld() {
@@ -198,6 +199,38 @@ describe("McpHost", () => {
     const unfocus = (await host.enumerateTools(session.actor)).find((t) => t.object === session.actor && t.verb === "unfocus")!;
     await host.invokeTool(session.actor, session.id, unfocus, [taskRef]);
     expect((await host.enumerateTools(session.actor)).some((t) => t.object === taskRef)).toBe(false);
+  });
+
+  it("sends list_changed only to sessions for the actor whose tool list changed", async () => {
+    const world = bootstrapWorld();
+    const alice = world.auth("guest:mcp-list-change-alice");
+    const bob = world.auth("guest:mcp-list-change-bob");
+    const host = new McpHost(world);
+    const aliceInstance = createMcpServer({ world, host, actor: alice.actor, sessionId: alice.id });
+    const aliceServer = aliceInstance.server;
+    const bobInstance = createMcpServer({ world, host, actor: bob.actor, sessionId: bob.id });
+    const bobServer = bobInstance.server;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    let aliceNotifications = 0;
+    let bobNotifications = 0;
+    (aliceServer as unknown as { notification: (notification: unknown) => Promise<void> }).notification = async () => { aliceNotifications += 1; };
+    (bobServer as unknown as { notification: (notification: unknown) => Promise<void> }).notification = async () => { bobNotifications += 1; };
+
+    await host.refreshToolList(alice.id, alice.actor);
+    await host.refreshToolList(bob.id, bob.actor);
+
+    world.setProp(alice.actor, "focus_list", ["the_pinboard"]);
+    await host.refreshToolList(alice.id, alice.actor);
+
+    expect(aliceNotifications).toBe(1);
+    expect(bobNotifications).toBe(0);
+
+    bobInstance.dispose();
+    world.setProp(bob.actor, "focus_list", ["the_taskspace"]);
+    await host.refreshToolList(bob.id, bob.actor);
+    expect(bobNotifications).toBe(0);
+    aliceInstance.dispose();
   });
 
   it("waits with timeout and returns more=true when queue overflows the limit", async () => {

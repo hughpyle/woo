@@ -25,6 +25,7 @@ type SessionEntry = {
   woo: Session;
   server: Server;
   transport: WebStandardStreamableHTTPServerTransport;
+  dispose: () => void;
 };
 
 export type McpGatewayOptions = {
@@ -109,6 +110,7 @@ export class McpGateway {
   closeSession(id: string): void {
     const entry = this.sessions.get(id);
     if (entry) {
+      entry.dispose();
       void entry.transport.close().catch(() => {});
       this.sessions.delete(id);
     }
@@ -127,7 +129,7 @@ export class McpGateway {
   }
 
   private bind(woo: Session): SessionEntry {
-    const { server } = createMcpServer({
+    const { server, dispose } = createMcpServer({
       world: this.world,
       host: this.host,
       actor: woo.actor,
@@ -144,7 +146,7 @@ export class McpGateway {
 
     void server.connect(transport).catch(() => {});
 
-    return { woo, server, transport };
+    return { woo, server, transport, dispose };
   }
 }
 
