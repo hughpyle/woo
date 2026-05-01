@@ -39,7 +39,7 @@ import {
   statusForError,
   type RestProtocolRequest
 } from "../core/protocol";
-import type { ObjRef, Observation, RemoteToolDescriptor, Session, WooValue } from "../core/types";
+import type { MetricEvent, ObjRef, Observation, RemoteToolDescriptor, Session, WooValue } from "../core/types";
 import { directedRecipients, wooError } from "../core/types";
 import type { AppliedFrame, DirectResultFrame, ErrorFrame, LiveEventFrame, Message } from "../core/types";
 import type { SerializedWorld } from "../core/repository";
@@ -65,6 +65,8 @@ const WORLD_HOST = "world";
 const DIRECTORY_HOST = "directory";
 const INTERNAL_ORIGIN = "https://woo.internal";
 const MAX_JSON_BODY_BYTES = 1 * 1024 * 1024;
+const METRIC_SAMPLE_BUDGET = 10;
+const METRIC_SAMPLE_WINDOW_MS = 1000;
 
 export class PersistentObjectDO {
   private state: DurableObjectState;
@@ -491,7 +493,39 @@ export class PersistentObjectDO {
       }
     };
     world.setHostBridge(bridge);
+    world.setMetricsHook((event) => this.emitMetric(event, localHost));
   }
+
+  // Sample high-rate metric kinds so a noisy gateway doesn't blow up the log
+  // pipeline. `applied` and `compose_look` already have natural 1-per-call
+  // bounds; `broadcast` and `cross_host_rpc` can fire many times per call so
+  // we cap each kind at SAMPLE_BUDGET per SAMPLE_WINDOW_MS and emit a
+  // periodic dropped-count summary.
+  private emitMetric(event: MetricEvent, hostKey: string): void {
+    if (event.kind === "broadcast" || event.kind === "cross_host_rpc") {
+      const counter = this.metricSampleCounters[event.kind];
+      const now = Date.now();
+      if (now - counter.windowStart >= METRIC_SAMPLE_WINDOW_MS) {
+        if (counter.dropped > 0) {
+          console.log("woo.metric", JSON.stringify({ kind: `${event.kind}_dropped`, count: counter.dropped, ms_window: METRIC_SAMPLE_WINDOW_MS, ts: now, host_key: hostKey }));
+        }
+        counter.windowStart = now;
+        counter.emitted = 0;
+        counter.dropped = 0;
+      }
+      if (counter.emitted >= METRIC_SAMPLE_BUDGET) {
+        counter.dropped += 1;
+        return;
+      }
+      counter.emitted += 1;
+    }
+    console.log("woo.metric", JSON.stringify({ ...event, ts: Date.now(), host_key: hostKey }));
+  }
+
+  private metricSampleCounters: Record<"broadcast" | "cross_host_rpc", { windowStart: number; emitted: number; dropped: number }> = {
+    broadcast: { windowStart: 0, emitted: 0, dropped: 0 },
+    cross_host_rpc: { windowStart: 0, emitted: 0, dropped: 0 }
+  };
 
   private serializedCallContext(ctx: CallContext): Record<string, unknown> {
     return {
@@ -1102,8 +1136,11 @@ export class PersistentObjectDO {
       },
       body: JSON.stringify(body)
     }));
+    const startedAt = Date.now();
     const response = await this.env.WOO.get(id).fetch(request);
-    return await response.json() as T;
+    const parsed = await response.json() as T;
+    this.world?.recordMetric({ kind: "cross_host_rpc", route: path, host, ms: Date.now() - startedAt });
+    return parsed;
   }
 
   private async forwardInternalChecked<T>(host: string, path: string, body: Record<string, unknown>): Promise<T> {
@@ -1130,11 +1167,14 @@ export class PersistentObjectDO {
   }
 
   private broadcastApplied(world: WooWorld, frame: AppliedFrame, originator?: WebSocket): void {
+    const startedAt = Date.now();
     const data = JSON.stringify(frame);
     const dataNoId = JSON.stringify({ ...frame, id: undefined });
+    let audienceSize = 0;
     for (const ws of this.state.getWebSockets()) {
       const att = this.attachment(ws);
       if (!att || !world.hasPresence(att.actor, frame.space)) continue;
+      audienceSize += 1;
       try {
         ws.send(ws === originator ? data : dataNoId);
       } catch {
@@ -1142,6 +1182,7 @@ export class PersistentObjectDO {
       }
     }
     this.mcpGateway?.routeAppliedFrame(frame);
+    world.recordMetric({ kind: "broadcast", audience_size: audienceSize, obs_count: frame.observations.length, ms: Date.now() - startedAt });
   }
 
   private broadcastTaskResult(world: WooWorld, result: ParkedTaskRun): void {
@@ -1160,17 +1201,21 @@ export class PersistentObjectDO {
 
   private broadcastLiveEvents(world: WooWorld, result: DirectResultFrame): void {
     if (!result.audience) return;
+    const startedAt = Date.now();
+    let audienceSize = 0;
     result.observations.forEach((observation, index) => {
       const frame: LiveEventFrame = { op: "event", observation };
-      this.broadcastLiveEvent(world, frame, result.audience!, result.observationAudiences?.[index] ?? result.audienceActors);
+      audienceSize += this.broadcastLiveEvent(world, frame, result.audience!, result.observationAudiences?.[index] ?? result.audienceActors);
     });
     this.mcpGateway?.routeLiveEvents(result);
+    world.recordMetric({ kind: "broadcast", audience_size: audienceSize, obs_count: result.observations.length, ms: Date.now() - startedAt });
   }
 
-  private broadcastLiveEvent(world: WooWorld, frame: LiveEventFrame, audience: ObjRef, audienceActors?: ObjRef[]): void {
+  private broadcastLiveEvent(world: WooWorld, frame: LiveEventFrame, audience: ObjRef, audienceActors?: ObjRef[]): number {
     const data = JSON.stringify(frame);
     const { to: directedTo, from: directedFrom } = directedRecipients(frame.observation);
     const audienceSet = audienceActors ? new Set(audienceActors) : null;
+    let delivered = 0;
     for (const ws of this.state.getWebSockets()) {
       const att = this.attachment(ws);
       if (!att) continue;
@@ -1181,8 +1226,10 @@ export class PersistentObjectDO {
       } else if (!world.hasPresence(att.actor, audience)) {
         continue;
       }
+      delivered += 1;
       try { ws.send(data); } catch { /* gone */ }
     }
+    return delivered;
   }
 
 }

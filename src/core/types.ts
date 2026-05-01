@@ -168,6 +168,18 @@ export type WooObject = {
   eventSchemas: Map<string, Record<string, WooValue>>;
 };
 
+// Engine-level instrumentation. Hosts install a hook (`WooWorld.setMetricsHook`)
+// that drains these and emits structured logs (`woo.metric ...`) so tail-based
+// debugging can reason about audience size, cross-host RPC cost, and
+// per-broadcast fanout without rebuilding the verb path. The set is closed in
+// v1; new kinds need a spec note + emission point.
+export type MetricEvent =
+  | { kind: "broadcast"; audience_size: number; obs_count: number; ms: number; origin_session?: string }
+  | { kind: "compose_look"; room: ObjRef; present_count: number; contents_count: number; remote_titles: number; ms: number }
+  | { kind: "cross_host_rpc"; route: string; host: string; ms: number }
+  | { kind: "subscribers_write"; space: ObjRef; size: number; delta: number }
+  | { kind: "applied"; space: ObjRef; seq: number; verb: string; ms: number };
+
 export type SequencedMessage = {
   space: ObjRef;
   seq: number;

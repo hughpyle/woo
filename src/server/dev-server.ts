@@ -25,6 +25,9 @@ import { McpGateway } from "../mcp/gateway";
 // defer to the world's object-authoring permission checks.
 const repository = new LocalSQLiteRepository(process.env.WOO_DB ?? ".woo/dev.sqlite");
 const world = createWorld({ repository, catalogs: parseAutoInstallCatalogs(process.env.WOO_AUTO_INSTALL_CATALOGS) });
+if (process.env.WOO_METRICS !== "off") {
+  world.setMetricsHook((event) => console.log("woo.metric", JSON.stringify({ ...event, ts: Date.now(), host_key: "dev" })));
+}
 const mcpGateway = new McpGateway(world, {
   serverName: "woo-dev",
   broadcasts: {

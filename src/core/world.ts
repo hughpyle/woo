@@ -11,6 +11,7 @@ import {
   type ErrorFrame,
   type ErrorValue,
   type Message,
+  type MetricEvent,
   type Observation,
   type ObjRef,
   type PropertyDef,
@@ -181,6 +182,7 @@ export class WooWorld {
   // One host runs one behavior at a time. Awaited cross-host RPC must not let a
   // second local behavior mutate the same in-memory state mid-savepoint.
   private hostQueue: Promise<unknown> = Promise.resolve();
+  private metricsHook: ((event: MetricEvent) => void) | null = null;
 
   constructor(private repository?: WooRepository, options: { hostBridge?: HostBridge | null } = {}) {
     this.objectRepository = isObjectRepository(repository) ? repository : null;
@@ -194,6 +196,21 @@ export class WooWorld {
 
   setHostBridge(bridge: HostBridge | null): void {
     this.hostBridge = bridge;
+  }
+
+  // Install a metrics sink. Hosts pipe MetricEvent records to a structured log
+  // (worker: `console.log("woo.metric", JSON.stringify(...))`) so tailing the
+  // host gives ground-truth audience size, RPC cost, and broadcast fanout
+  // without re-running the verb. Called by core at known hot points. No-op
+  // when no hook is set.
+  setMetricsHook(hook: ((event: MetricEvent) => void) | null): void {
+    this.metricsHook = hook;
+  }
+
+  recordMetric(event: MetricEvent): void {
+    const hook = this.metricsHook;
+    if (!hook) return;
+    try { hook(event); } catch { /* metrics must never throw */ }
   }
 
   // Read access for the MCP host (cross-host tool enumeration). Other callers
@@ -884,7 +901,8 @@ export class WooWorld {
   async applyCall(id: string | undefined, spaceRef: ObjRef, message: Message): Promise<AppliedFrame> {
     const repo = this.activeObjectRepository();
     if (repo) return await this.applyCallRepository(repo, id, spaceRef, message);
-    return await this.withPersistencePaused(async () => {
+    const startedAt = Date.now();
+    const frame = await this.withPersistencePaused(async () => {
       this.validateMessage(message);
       const space = this.object(spaceRef);
       this.authorizePresence(message.actor, spaceRef);
@@ -953,11 +971,14 @@ export class WooWorld {
       this.persist(true);
       return frame;
     });
+    this.recordMetric({ kind: "applied", space: spaceRef, seq: frame.seq, verb: message.verb, ms: Date.now() - startedAt });
+    return frame;
   }
 
   private async applyCallRepository(repo: ObjectRepository, id: string | undefined, spaceRef: ObjRef, message: Message): Promise<AppliedFrame> {
     const before = this.snapshotBehaviorState();
     const beforeLogs = this.snapshotLogs();
+    const startedAt = Date.now();
     try {
       const frame = await this.withPersistencePaused(async () => {
         this.validateMessage(message);
@@ -1033,6 +1054,7 @@ export class WooWorld {
         });
         return { op: "applied" as const, id, space: spaceRef, seq, ts: logEntry.ts, message, observations };
       });
+      this.recordMetric({ kind: "applied", space: spaceRef, seq: frame.seq, verb: message.verb, ms: Date.now() - startedAt });
       return frame;
     } catch (err) {
       this.restoreBehaviorState(before);
@@ -2364,6 +2386,7 @@ export class WooWorld {
     this.withPersistenceDeferred(() => {
       this.setProp(space, "subscribers", nextSubscribers);
     });
+    this.recordMetric({ kind: "subscribers_write", space, size: nextSubscribers.length, delta: present ? 1 : -1 });
     return true;
   }
 
@@ -2925,19 +2948,27 @@ export class WooWorld {
   }
 
   private async composeRoomLook(ctx: CallContext, room: ObjRef): Promise<Record<string, WooValue>> {
+    const startedAt = Date.now();
     const present = await this.chatPresentAsync(room, ctx.progr);
-    const contents = await Promise.all((await this.objectContents(room)).filter((item) => !this.isActorForLook(item, present)).map(async (item) => ({
-      id: item,
-      title: await this.titleForLook(ctx, room, item),
-      description: await this.propOrNullForActorAsync(ctx.actor, item, "description")
-    })));
-    return {
+    const items = (await this.objectContents(room)).filter((item) => !this.isActorForLook(item, present));
+    let remoteTitles = 0;
+    const contents = await Promise.all(items.map(async (item) => {
+      if (await this.remoteHostForObject(item)) remoteTitles += 1;
+      return {
+        id: item,
+        title: await this.titleForLook(ctx, room, item),
+        description: await this.propOrNullForActorAsync(ctx.actor, item, "description")
+      };
+    }));
+    const look = {
       id: room,
       title: await this.titleForLook(ctx, ctx.caller, room),
       description: this.propOrNullForActor(ctx.actor, room, "description"),
       present_actors: present,
       contents
     } as unknown as Record<string, WooValue>;
+    this.recordMetric({ kind: "compose_look", room, present_count: present.length, contents_count: items.length, remote_titles: remoteTitles, ms: Date.now() - startedAt });
+    return look;
   }
 
   private async objectContents(objRef: ObjRef): Promise<ObjRef[]> {
