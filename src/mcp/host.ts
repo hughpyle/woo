@@ -354,8 +354,18 @@ export class McpHost {
   }
 
   private async toolListDigest(actor: ObjRef): Promise<string> {
-    const tools = await this.enumerateTools(actor);
-    return tools.map((tool) => `${tool.name}@${tool.object}:${tool.verb}:${tool.direct ? "d" : "s"}`).sort().join("|");
+    // This digest intentionally avoids enumerateTools(). Full enumeration can
+    // cross host boundaries for every focused/present space, so doing it after
+    // every dispatch creates a subrequest storm on CF. The signal only tracks
+    // cheap local scope changes; clients that need exact tools call tools/list.
+    return this.reachable(actor)
+      .map(({ id, origin }) => {
+        const obj = this.world.object(id);
+        const featuresVersion = this.world.propOrNull(id, "features_version") ?? 0;
+        return `${origin}:${id}:${obj.location ?? ""}:${obj.modified}:${featuresVersion}`;
+      })
+      .sort()
+      .join("|");
   }
 
   async refreshToolList(sessionId: string, actor: ObjRef): Promise<boolean> {
@@ -367,6 +377,27 @@ export class McpHost {
       for (const listener of this.listChangedListeners) listener(actor);
     }
     return true;
+  }
+
+  async resolveReachableTool(actor: ObjRef, object: ObjRef, verbName: string): Promise<McpTool | null> {
+    if (!this.reachable(actor).some((entry) => entry.id === object)) return null;
+    const bridge = this.world.getHostBridge();
+    if (await this.world.isRemoteObject(object)) {
+      if (!bridge?.enumerateRemoteTools) return null;
+      const descriptors = await bridge.enumerateRemoteTools(actor, [object]);
+      const descriptor = descriptors.find((candidate) => candidate.object === object && candidate.verb === verbName);
+      return descriptor ? this.assembleTool(descriptor.object, descriptor, new Set()) : null;
+    }
+    const verb = this.tooledVerbsFor(actor, object).find((candidate) => candidate.name === verbName);
+    if (!verb) return null;
+    return this.assembleTool(object, {
+      verb: verb.name,
+      aliases: verb.aliases,
+      arg_spec: verb.arg_spec,
+      direct: verb.direct_callable === true,
+      source: verb.source ?? "",
+      enclosingSpace: this.enclosingSpaceFor(object)
+    }, new Set());
   }
 
   private tooledVerbsFor(actor: ObjRef, id: ObjRef): Array<{ name: string; aliases: string[]; arg_spec: Record<string, WooValue>; direct_callable?: boolean; perms: string; tool_exposed?: boolean; source?: string }> {

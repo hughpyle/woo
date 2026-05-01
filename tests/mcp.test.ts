@@ -4,6 +4,7 @@ import { McpHost } from "../src/mcp/host";
 import { McpGateway } from "../src/mcp/gateway";
 import { createMcpServer } from "../src/mcp/server";
 import type { Observation, WooValue } from "../src/core/types";
+import type { HostBridge } from "../src/core/world";
 
 function bootstrapWorld() {
   return createWorld();
@@ -231,6 +232,34 @@ describe("McpHost", () => {
     await host.refreshToolList(bob.id, bob.actor);
     expect(bobNotifications).toBe(0);
     aliceInstance.dispose();
+  });
+
+  it("does not enumerate remote tools while sending post-call list_changed hints", async () => {
+    const world = bootstrapWorld();
+    const session = world.auth("guest:mcp-lazy-refresh");
+    let remoteEnumerations = 0;
+    world.setHostBridge({
+      localHost: "home",
+      hostForObject: (id: string) => id === "the_chatroom" ? "chat" : "home",
+      enumerateRemoteTools: async () => {
+        remoteEnumerations += 1;
+        return [];
+      }
+    } as unknown as HostBridge);
+    const host = new McpHost(world);
+    host.bindSession(session.id, session.actor);
+    await host.refreshToolList(session.id, session.actor);
+
+    let listChanged = 0;
+    host.onToolListChanged((actor) => {
+      if (actor === session.actor) listChanged += 1;
+    });
+
+    const focus = (await host.enumerateTools(session.actor)).find((t) => t.object === session.actor && t.verb === "focus")!;
+    await host.invokeTool(session.actor, session.id, focus, ["the_chatroom"]);
+
+    expect(listChanged).toBe(1);
+    expect(remoteEnumerations).toBe(0);
   });
 
   it("waits with timeout and returns more=true when queue overflows the limit", async () => {

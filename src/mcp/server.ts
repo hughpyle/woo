@@ -77,9 +77,7 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
   };
 
   const invokeDynamicToolWithArgs = async (tool: McpTool, args: WooValue[]): Promise<McpInvocationResult> => {
-    const result = await host.invokeTool(actor, sessionId, tool, args);
-    await refreshTools();
-    return result;
+    return await host.invokeTool(actor, sessionId, tool, args);
   };
 
   const invokeDynamicTool = async (tool: McpTool, params: Record<string, unknown>): Promise<McpInvocationResult> => {
@@ -87,8 +85,7 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
   };
 
   const findReachableTool = async (object: ObjRef, verb: string): Promise<McpTool> => {
-    const tools = await refreshTools();
-    const tool = tools.find((candidate) => candidate.object === object && candidate.verb === verb);
+    const tool = await host.resolveReachableTool(actor, object, verb);
     if (!tool) throw wooError("E_VERBNF", `reachable MCP tool not found: ${object}:${verb}`);
     return tool;
   };
@@ -196,9 +193,11 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
     const stableTool = stableTools.get(request.params.name);
     if (stableTool) return invokeForMcp(() => stableTool.invoke(params));
 
-    if (toolsByName.size === 0) await refreshTools();
     let tool = toolsByName.get(request.params.name);
     if (!tool) {
+      tool = (await resolveDynamicToolName(request.params.name)) ?? undefined;
+    }
+    if (!tool && !looksLikeDynamicToolName(request.params.name)) {
       await refreshTools();
       tool = toolsByName.get(request.params.name);
     }
@@ -210,6 +209,20 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
     }
     return invokeForMcp(() => invokeDynamicTool(tool, params));
   });
+
+  async function resolveDynamicToolName(name: string): Promise<McpTool | null> {
+    const marker = name.indexOf("__");
+    if (marker <= 0) return null;
+    const objectName = name.slice(0, marker);
+    const verbName = name.slice(marker + 2);
+    if (!verbName) return null;
+    const candidates = objectName.startsWith("$") ? [objectName] : [objectName, `$${objectName}`];
+    for (const candidate of candidates) {
+      const tool = await host.resolveReachableTool(actor, candidate, verbName);
+      if (tool) return tool;
+    }
+    return null;
+  }
 
   return { server, host, dispose };
 }
@@ -294,6 +307,10 @@ function actorControlTool(actor: ObjRef, verb: string): McpTool {
 function objectParams(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
+}
+
+function looksLikeDynamicToolName(name: string): boolean {
+  return name.includes("__");
 }
 
 function stringParam(params: Record<string, unknown>, name: string): string {
