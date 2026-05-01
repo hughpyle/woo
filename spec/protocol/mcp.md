@@ -140,7 +140,7 @@ A verb's `aliases` list ([../semantics/space.md](../semantics/space.md)) is **no
 The dynamic tool set at any moment is computed against the actor's **reachable scope**, the union of:
 
 1. **Self.** The actor object — for actor-owned verbs (`@quit`, `@home`, `wait`, `focus`, etc.).
-2. **Current location.** `actor.location` and the verbs defined on it. In a chat room, this is where `:say`/`:look`/`:enter` come from.
+2. **Current location.** `actor.location` and the verbs defined on it. In a chat room, this is where `:say`/`:look`/`:enter` come from. The location remains reachable even when the location object is remote-hosted and absent from the gateway's local object table; the gateway uses the host route to enumerate it.
 3. **Location contents.** Non-actor objects in `actor.location.contents` for which the actor has read access. In `the_chatroom` this surfaces `the_cockatoo:squawk`, `the_lamp:take`, etc. Other actors in the same container are visible to room verbs such as `:look`/`:who`, but their actor maintenance verbs are not exposed as tools.
 4. **Inventory.** Non-actor objects in `actor.contents`. After `take lamp`, the lamp's verbs follow the actor between rooms.
 5. **Presence spaces.** Spaces the actor is subscribed to via `actor.presence_in`. This is how `the_dubspace` and `the_taskspace` show up in the tool list when the actor is "in" them — even when the actor is *physically* located in a chatroom that frames them. Presence is the woo notion of "I'm in this space" and it's what governs the tool list more than physical location does.

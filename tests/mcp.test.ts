@@ -639,6 +639,52 @@ describe("McpGateway", () => {
     expect(callBody.result.structuredContent?.result).toBe("pong");
   });
 
+  it("treats a remote current location as reachable even without a local stub", async () => {
+    const home = bootstrapWorld();
+    const remote = bootstrapWorld();
+    const remoteHost = new McpHost(remote);
+    const worlds = new Map<string, WooWorld>([
+      ["home", home],
+      ["remote", remote]
+    ]);
+    const routes = new Map<ObjRef, string>([
+      ["remote_room", "remote"],
+      ["remote_widget", "remote"]
+    ]);
+    const hosts = new Map<string, McpHost>([["remote", remoteHost]]);
+    home.setHostBridge(new RemoteToolBridge("home", worlds, routes, hosts));
+    remote.setHostBridge(new RemoteToolBridge("remote", worlds, routes, hosts));
+
+    remote.createObject({ id: "remote_room", name: "Remote Room", parent: "$space", owner: "$wiz" });
+    remote.setProp("remote_room", "name", "Remote Room");
+    remote.addVerb("remote_room", nativeToolVerb("leave", "remote_leave"));
+    remote.registerNativeHandler("remote_leave", () => "left");
+    remote.createObject({ id: "remote_widget", name: "Remote Widget", parent: "$thing", owner: "$wiz", location: "remote_room" });
+    remote.setProp("remote_widget", "name", "Remote Widget");
+    remote.addVerb("remote_widget", nativeToolVerb("ping", "remote_ping"));
+    remote.registerNativeHandler("remote_ping", () => "pong");
+
+    const session = home.auth("guest:mcp-remote-location");
+    home.object(session.actor).location = "remote_room";
+
+    const host = new McpHost(home);
+    host.bindSession(session.id, session.actor);
+
+    const active = await host.listTools(session.actor);
+    expect(active.tools.map((tool) => `${tool.object}:${tool.verb}`)).toContain("remote_room:leave");
+    expect(active.tools.some((tool) => tool.object === "remote_widget")).toBe(false);
+
+    const here = await host.listTools(session.actor, { scope: "here" });
+    expect(here.tools.map((tool) => `${tool.object}:${tool.verb}`)).toContain("remote_room:leave");
+    expect(here.tools.map((tool) => `${tool.object}:${tool.verb}`)).toContain("remote_widget:ping");
+
+    const objectScoped = await host.listTools(session.actor, { scope: "object", object: "remote_room" });
+    expect(objectScoped.tools.map((tool) => `${tool.object}:${tool.verb}`)).toContain("remote_room:leave");
+
+    const tool = await host.resolveReachableTool(session.actor, "remote_room", "leave");
+    expect(tool).toBeDefined();
+  });
+
   it("initializes a session via Authorization bearer for Codex-style MCP clients", async () => {
     const world = bootstrapWorld();
     const gateway = new McpGateway(world);

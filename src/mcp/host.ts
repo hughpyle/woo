@@ -206,13 +206,13 @@ export class McpHost {
 
   reachable(actor: ObjRef): McpReachable[] {
     const seen = new Map<ObjRef, McpReachable["origin"]>();
-    const add = (id: ObjRef, origin: McpReachable["origin"]): void => {
-      if (!this.world.objects.has(id)) return;
+    const add = (id: ObjRef, origin: McpReachable["origin"], requireLocal = true): void => {
+      if (requireLocal && !this.world.objects.has(id)) return;
       if (!seen.has(id)) seen.set(id, origin);
     };
     add(actor, "self");
     const actorObj = this.world.objects.has(actor) ? this.world.object(actor) : null;
-    if (actorObj?.location && this.world.objects.has(actorObj.location)) add(actorObj.location, "location");
+    if (actorObj?.location) add(actorObj.location, "location", false);
     if (actorObj?.location && this.world.objects.has(actorObj.location)) {
       for (const id of this.world.object(actorObj.location).contents) {
         if (this.isOtherActor(actor, id)) continue;
@@ -225,12 +225,16 @@ export class McpHost {
     }
     const presence = actorObj ? this.world.propOrNull(actor, "presence_in") : null;
     if (Array.isArray(presence)) for (const id of presence) {
-      if (typeof id === "string") add(id, "presence");
+      if (typeof id === "string") add(id, "presence", false);
     }
     const focusList = this.focusListOf(actor);
     for (const id of focusList) {
-      if (this.isOtherActor(actor, id)) continue;
-      if (this.actorCanSee(actor, id)) add(id, "focus");
+      if (this.world.objects.has(id)) {
+        if (this.isOtherActor(actor, id)) continue;
+        if (this.actorCanSee(actor, id)) add(id, "focus");
+      } else {
+        add(id, "focus", false);
+      }
     }
     return Array.from(seen, ([id, origin]) => ({ id, origin }));
   }
@@ -362,7 +366,7 @@ export class McpHost {
     };
     const addIfReachable = (id: ObjRef | null | undefined): void => {
       if (!id) return;
-      if (id === actor || reachableIds.has(id) || presence.includes(id) || focus.includes(id)) add(id);
+      if (id === actor || id === currentLocation || reachableIds.has(id) || presence.includes(id) || focus.includes(id)) add(id);
     };
     const addContents = (space: ObjRef | null | undefined): void => {
       if (!space || !this.world.objects.has(space) || !this.descendsFrom(space, "$space")) return;
@@ -511,14 +515,17 @@ export class McpHost {
     // cross host boundaries for every focused/present space, so doing it after
     // every dispatch creates a subrequest storm on CF. The signal only tracks
     // cheap local scope changes; clients that need exact tools call tools/list.
-    return this.reachable(actor)
+    const actorObj = this.world.objects.has(actor) ? this.world.object(actor) : null;
+    const parts = this.reachable(actor)
       .map(({ id, origin }) => {
-        const obj = this.world.object(id);
-        const featuresVersion = this.world.propOrNull(id, "features_version") ?? 0;
-        return `${origin}:${id}:${obj.location ?? ""}:${obj.modified}:${featuresVersion}`;
-      })
-      .sort()
-      .join("|");
+        const obj = this.world.objects.get(id);
+        const featuresVersion = obj ? this.world.propOrNull(id, "features_version") ?? 0 : 0;
+        return `${origin}:${id}:${obj?.location ?? ""}:${obj?.modified ?? "remote"}:${featuresVersion}`;
+      });
+    if (actorObj?.location && !parts.some((part) => part.startsWith(`location:${actorObj.location}:`))) {
+      parts.push(`location:${actorObj.location}:remote`);
+    }
+    return parts.sort().join("|");
   }
 
   async refreshToolList(sessionId: string, actor: ObjRef): Promise<boolean> {
