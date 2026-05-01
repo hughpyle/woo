@@ -787,32 +787,32 @@ export class WooWorld {
       const message: Message = { actor, target, verb: verbName, args };
       let result: WooValue = null;
       let mutated = false;
+      const dispatchCtx: CallContext = {
+        world: this,
+        space: audience ?? "#-1",
+        seq: -1,
+        actor,
+        player: actor,
+        caller: "#-1",
+        callerPerms: actor,
+        progr: actor,
+        thisObj: target,
+        verbName,
+        definer: target,
+        message,
+        observations,
+        observe: (event) => {
+          observations.push({ ...event, source: event.source ?? target });
+        }
+      };
       await this.withPersistencePaused(async () => {
         const before = this.snapshotProps();
         const beforePlacement = this.snapshotPlacement();
         const beforeParkedTasks = new Map(this.parkedTasks);
         const beforeParkedTaskCounter = this.parkedTaskCounter;
         const beforeObjectCount = this.objects.size;
-        const ctx: CallContext = {
-          world: this,
-          space: audience ?? "#-1",
-          seq: -1,
-          actor,
-          player: actor,
-          caller: "#-1",
-          callerPerms: actor,
-          progr: actor,
-          thisObj: target,
-          verbName,
-          definer: target,
-          message,
-          observations,
-          observe: (event) => {
-            observations.push({ ...event, source: event.source ?? target });
-          }
-        };
         try {
-          result = await this.dispatch(ctx, target, verbName, args);
+          result = await this.dispatch(dispatchCtx, target, verbName, args);
           mutated =
             beforeObjectCount !== this.objects.size ||
             this.propsChanged(before) ||
@@ -828,7 +828,11 @@ export class WooWorld {
         }
       });
       if (mutated || this.persistenceDirty) this.persist(true);
-      const liveAudiences = this.directLiveAudiences(audience, observations);
+      // Cross-host bridge stashes authoritative audience info on ctx; prefer
+      // it over recomputing locally where the local subscriber/presence view
+      // for self-hosted spaces is stale.
+      const crossHostAudience = (dispatchCtx as { crossHostAudience?: { audienceActors?: ObjRef[]; observationAudiences?: ObjRef[][] } }).crossHostAudience;
+      const liveAudiences = crossHostAudience ?? this.directLiveAudiences(audience, observations);
       return {
         op: "result",
         id: frameId,
@@ -1839,13 +1843,24 @@ export class WooWorld {
   private resetGuestOnDisconnect(actor: ObjRef): void {
     const homeValue = this.propOrNull(actor, "home");
     const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
+    const fallback = this.guestInventoryFallback(actor, home);
+    for (const item of Array.from(this.object(actor).contents)) this.moveObject(item, this.inventoryEjectTarget(item, fallback));
     this.moveObject(actor, home);
     this.setProp(actor, "description", "");
     this.setProp(actor, "aliases", []);
     this.setProp(actor, "features", []);
     this.setProp(actor, "features_version", Number(this.propOrNull(actor, "features_version") ?? 0) + 1);
-    for (const item of Array.from(this.object(actor).contents)) this.moveObject(item, home);
     this.returnGuest(actor);
+  }
+
+  private guestInventoryFallback(actor: ObjRef, home: ObjRef): ObjRef {
+    const location = this.objects.get(actor)?.location;
+    return location && location !== "$nowhere" && this.objects.has(location) ? location : home;
+  }
+
+  private inventoryEjectTarget(item: ObjRef, fallback: ObjRef): ObjRef {
+    const homeValue = this.propOrNull(item, "home");
+    return typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : fallback;
   }
 
   private killReadTasksFor(actor: ObjRef): void {
@@ -2042,6 +2057,13 @@ export class WooWorld {
     const raw = this.propOrNull(space, "subscribers");
     if (!Array.isArray(raw)) return undefined;
     return raw.filter((item): item is ObjRef => typeof item === "string");
+  }
+
+  // Compute the per-observation audience for a direct call from this host's
+  // authoritative subscribers/presence view. Public so cross-host RPC handlers
+  // can compute audience at the source DO before forwarding to broadcast.
+  computeDirectLiveAudiences(audience: ObjRef | null, observations: Observation[]): { audienceActors?: ObjRef[]; observationAudiences?: ObjRef[][] } {
+    return this.directLiveAudiences(audience, observations);
   }
 
   private directLiveAudiences(audience: ObjRef | null, observations: Observation[]): { audienceActors?: ObjRef[]; observationAudiences?: ObjRef[][] } {
@@ -2630,12 +2652,14 @@ export class WooWorld {
     this.nativeHandlers.set("guest_on_disfunc", async (ctx) => {
       const homeValue = this.propOrNull(ctx.thisObj, "home");
       const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
+      const fallback = this.guestInventoryFallback(ctx.thisObj, home);
+      const carried = await this.objectContents(ctx.thisObj);
+      for (const item of carried) await this.moveObjectChecked(item, this.inventoryEjectTarget(item, fallback));
       await this.moveObjectChecked(ctx.thisObj, home);
       this.setProp(ctx.thisObj, "description", "");
       this.setProp(ctx.thisObj, "aliases", []);
       this.setProp(ctx.thisObj, "features", []);
       this.setProp(ctx.thisObj, "features_version", Number(this.propOrNull(ctx.thisObj, "features_version") ?? 0) + 1);
-      for (const item of await this.objectContents(ctx.thisObj)) await this.moveObjectChecked(item, home);
       this.returnGuest(ctx.thisObj);
       return true;
     });

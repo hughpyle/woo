@@ -693,6 +693,9 @@ describe("woo core", () => {
     const session = world.auth("guest:reap");
     const actor = session.actor;
     await world.directCall("enter-chat-before-reap", actor, "the_chatroom", "enter", []);
+    const takeLamp = await world.directCall("take-lamp-before-reap", actor, "the_chatroom", "take", ["lamp"]);
+    expect(takeLamp.op).toBe("result");
+    expect(world.object("the_lamp").location).toBe(actor);
     world.setProp(actor, "description", "temporary guest description");
     world.setProp(actor, "aliases", ["temp"]);
     world.attachSocket(session.id, "ws-1");
@@ -708,6 +711,8 @@ describe("woo core", () => {
     expect(world.getProp(actor, "description")).toBe("");
     expect(world.getProp(actor, "aliases")).toEqual([]);
     expect(world.object(actor).location).toBe("$nowhere");
+    expect(world.object("the_lamp").location).toBe("the_chatroom");
+    expect(world.object("the_chatroom").contents.has("the_lamp")).toBe(true);
 
     const next = world.auth("guest:after-reap");
     expect(next.actor).toBe(actor);

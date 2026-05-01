@@ -101,7 +101,7 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 
 ### B2.4.2 `$guest` verbs
 
-`$guest:on_disfunc()` overrides the default to reset state per [identity.md §I6.4](identity.md#i64-guest-reset-the-on_disfunc-convention): move to `home` (or `$nowhere`), clear `description`/`aliases`/`features`, drop inventory, return to the free pool via `$system:return_guest(this)`.
+`$guest:on_disfunc()` overrides the default to reset state per [identity.md §I6.4](identity.md#i64-guest-reset-the-on_disfunc-convention): eject inventory to each item's `home` (or the disconnect room, then the guest home), move the guest to `home` (or `$nowhere`), clear `description`/`aliases`/`features`, and return to the free pool via `$system:return_guest(this)`.
 
 ### B2.5 `$sequenced_log` additional properties
 

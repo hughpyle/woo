@@ -316,7 +316,7 @@ export class PersistentObjectDO {
       dispatch: async (ctx, target, verbName, args, startAt) => {
         const host = await hostForObject(startAt ?? target);
         if (!host || host === localHost) return await world.hostDispatch(ctx, target, verbName, args, startAt);
-        const response = await this.forwardInternalChecked<{ result: WooValue; observations?: Observation[] }>(host, "/__internal/remote-dispatch", {
+        const response = await this.forwardInternalChecked<{ result: WooValue; observations?: Observation[]; audience_actors?: ObjRef[]; observation_audiences?: ObjRef[][] }>(host, "/__internal/remote-dispatch", {
           ctx: this.serializedCallContext(ctx),
           target,
           verb: verbName,
@@ -325,6 +325,15 @@ export class PersistentObjectDO {
         });
         if (Array.isArray(response.observations)) {
           for (const observation of response.observations) ctx.observations.push(observation);
+        }
+        // Surface authoritative audience info from the source DO so the
+        // gateway's directCallNow uses it instead of recomputing from stale
+        // local state.
+        if (response.audience_actors || response.observation_audiences) {
+          (ctx as { crossHostAudience?: { audienceActors?: ObjRef[]; observationAudiences?: ObjRef[][] } }).crossHostAudience = {
+            audienceActors: response.audience_actors,
+            observationAudiences: response.observation_audiences
+          };
         }
         return response.result;
       },
@@ -437,6 +446,33 @@ export class PersistentObjectDO {
       state.objects = objects;
     }
     return state;
+  }
+
+  // Send live observations to the gateway's broadcast route so attached
+  // WebSocket / SSE / MCP listeners see them. Best-effort: if the gateway
+  // is unreachable the cluster's authoritative call result is already back
+  // to the originator; broadcast loss only affects passive observers.
+  private async forwardLiveEventsToGateway(
+    audience: ObjRef,
+    observations: Observation[],
+    audiences: { audienceActors?: ObjRef[]; observationAudiences?: ObjRef[][] }
+  ): Promise<void> {
+    try {
+      const id = this.env.WOO.idFromName(WORLD_HOST);
+      const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}/__internal/broadcast-live-events`, {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8", "x-woo-host-key": WORLD_HOST },
+        body: JSON.stringify({
+          audience,
+          audience_actors: audiences.audienceActors,
+          observation_audiences: audiences.observationAudiences,
+          observations
+        })
+      }));
+      await this.env.WOO.get(id).fetch(request);
+    } catch {
+      // best-effort
+    }
   }
 
   private async fetchHostState(host: string, actor: ObjRef): Promise<Record<string, unknown> | null> {
@@ -602,7 +638,12 @@ export class PersistentObjectDO {
           }
         };
         const result = await world.hostDispatch(ctx, target, verb, args, startAt);
-        return jsonResponse({ result, observations });
+        // Compute audience here using this DO's authoritative subscribers; the
+        // gateway's local view of a self-hosted space is stale and would
+        // mis-filter the WS/MCP fan-out. Returned to the caller so the
+        // gateway's broadcastLiveEvents has accurate audience information.
+        const audiences = world.computeDirectLiveAudiences(target, observations);
+        return jsonResponse({ result, observations, audience_actors: audiences.audienceActors, observation_audiences: audiences.observationAudiences });
       }
 
       if (request.method === "POST" && pathname === "/__internal/remote-move-object") {

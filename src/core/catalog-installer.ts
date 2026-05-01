@@ -98,6 +98,7 @@ export type RepairCatalogOptions = {
   actor?: ObjRef;
   allowImplementationHints?: boolean;
   reconcileSeedHooks?: boolean;
+  rehomeNowhereSeedObjects?: boolean;
 };
 
 export function installCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: InstallCatalogOptions = {}): InstalledCatalogRecord {
@@ -171,6 +172,7 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
   const actor = options.actor ?? "$wiz";
   const allowImplementationHints = options.allowImplementationHints ?? false;
   const reconcileSeedHooks = options.reconcileSeedHooks ?? false;
+  const rehomeNowhereSeedObjects = options.rehomeNowhereSeedObjects ?? false;
   const existing = installedCatalogs(world);
   const localObjects = new Map<string, ObjRef>();
   const localSeeds = new Map<string, ObjRef>();
@@ -198,7 +200,7 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
         const location = hook.location ? resolveObjectRef(world, hook.location, localObjects, localSeeds, existing) : null;
         world.createObject({ id, name: hook.name ?? id, parent, owner: actor, anchor, location });
       } else if (reconcileSeedHooks) {
-        reconcileSeedObject(world, id, hook, manifest, actor, localObjects, localSeeds, existing);
+        reconcileSeedObject(world, id, hook, manifest, actor, localObjects, localSeeds, existing, rehomeNowhereSeedObjects);
       }
       localSeeds.set(hook.as, id);
       setDescriptionIfEmpty(world, id, catalogDescription(hook.description, hook.name ?? id, manifest.name));
@@ -218,7 +220,8 @@ function reconcileSeedObject(
   actor: ObjRef,
   localObjects: Map<string, ObjRef>,
   localSeeds: Map<string, ObjRef>,
-  existing: InstalledCatalogRecord[]
+  existing: InstalledCatalogRecord[],
+  rehomeNowhereSeedObjects: boolean
 ): void {
   const obj = world.object(id);
   const parent = resolveObjectRef(world, hook.class, localObjects, localSeeds, existing);
@@ -240,7 +243,8 @@ function reconcileSeedObject(
     if (DYNAMIC_SEED_PROPERTIES.has(name) && obj.properties.has(name)) continue;
     world.setProp(id, name, value);
   }
-  if (obj.location !== location && (!obj.location || !world.objects.has(obj.location))) {
+  const strandedInNowhere = rehomeNowhereSeedObjects && obj.location === "$nowhere" && location !== null && location !== "$nowhere";
+  if (obj.location !== location && (!obj.location || !world.objects.has(obj.location) || strandedInNowhere)) {
     if (obj.location && world.objects.has(obj.location)) world.object(obj.location).contents.delete(id);
     obj.location = location;
     if (location && world.objects.has(location)) world.object(location).contents.add(id);

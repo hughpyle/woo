@@ -526,6 +526,36 @@ describe("local catalogs", () => {
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-01-chat-room-contents-repair");
   });
 
+  it("rehomes chat seed portables stranded in $nowhere", () => {
+    const world = createWorld();
+    world.setProp("$system", "applied_migrations", [
+      "2026-04-30-source-catalog-verbs",
+      "2026-04-30-catalog-placement-metadata",
+      "2026-04-30-chat-cockatoo",
+      "2026-04-30-chat-look-contents",
+      "2026-04-30-chat-command-parser",
+      "2026-04-30-dubspace-control-guards",
+      "2026-04-30-room-look-self",
+      "2026-05-01-chat-three-room-demo",
+      "2026-05-01-chat-observation-output",
+      "2026-05-01-chat-room-contents-repair",
+      "2026-05-01-agent-tool-exposure-repair",
+      "2026-05-01-chat-navigation-tool-exposure"
+    ]);
+    world.object("the_deck").contents.delete("the_towel");
+    world.object("the_towel").location = "$nowhere";
+    world.object("the_towel").properties.delete("home");
+    world.object("$nowhere").contents.add("the_towel");
+
+    installLocalCatalogs(world, ["chat"]);
+
+    expect(world.object("the_towel").location).toBe("the_deck");
+    expect(world.object("the_deck").contents.has("the_towel")).toBe(true);
+    expect(world.object("$nowhere").contents.has("the_towel")).toBe(false);
+    expect(world.getProp("the_towel", "home")).toBe("the_deck");
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-01-chat-nowhere-portables-repair");
+  });
+
   it("repairs stale catalog tool exposure for agent-visible taskspace and dubspace verbs", () => {
     const world = createWorld();
     world.setProp("$system", "applied_migrations", [

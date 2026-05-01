@@ -144,19 +144,20 @@ The convention is `:on_disfunc()` on `$guest`:
 
 ```woo
 verb $guest:on_disfunc() {
+  let where = this.location;       // room at disconnect time, if valid
+  for item in this.contents {      // eject everything held
+    item:moveto(item.home || where || this.home);
+  }
   this:moveto(this.home);          // back to $nowhere
   this.description = "";           // wipe self-description
   this.aliases = [];               // wipe aliases
   this.features = [];              // detach all features
-  for item in this.contents {      // drop everything held
-    item:moveto(this.home);
-  }
   // re-add to the free pool so the next auth can bind here
   $system:return_guest(this);
 }
 ```
 
-This is the LambdaCore `@disfunc` pattern under a clearer name. The `home` property is conventionally `$nowhere` (a seeded `$thing`; see [bootstrap.md §B6](bootstrap.md#b6-demo-instances)); operators may override per-guest if they want named lounges.
+This is the LambdaCore `@disfunc` pattern under a clearer name. Guest inventory is ejected before the guest is moved home: an item with its own valid `home` returns there, otherwise it falls back to the disconnect room, then the guest's home. The guest `home` property is conventionally `$nowhere` (a seeded `$thing`; see [bootstrap.md §B6](bootstrap.md#b6-demo-instances)); operators may override per-guest if they want named lounges.
 
 The disfunc runs with `progr = this.owner` (typically `$wiz`), so it has authority to reset state regardless of what permission flips occurred during the session.
 
