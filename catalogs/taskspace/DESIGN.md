@@ -405,6 +405,32 @@ These flows compose with the [REST API](../../spec/protocol/rest.md): the agent'
 
 Two actors with different roles hand off through reviewable states; the platform enforces correctness on transitions and entrance conditions; the listing verbs make the agent loop predictable and discoverable. This is the smallest workflow that's recognizably real coordination — anything bigger (priorities, dependencies, sprints, calendars) layers on top.
 
+## Tasks Are Objects (Not Records)
+
+Taskspace deliberately models tasks as full `$task` objects rather than as
+value records on `the_taskspace`. The contrast is the [pinboard](../pinboard/DESIGN.md):
+notes there are lightweight values inside the board's state. Taskspace makes
+the opposite call.
+
+The reason is identity and hierarchy. A task has its own lifecycle that other
+parts of the world refer to: subtasks point at parents, artifacts may pin to
+tasks, future workflows attach roles and watchers. That cross-reference is
+cleaner with object refs than with `(taskspace, board_local_id)` tuples — the
+language already speaks in obj. A task can also carry its own verbs (`claim`,
+`set_status`, etc.), so per-task affordances surface directly through the
+existing class/verb model rather than as space-level proxies.
+
+The cost is per-instance reachability: the agent has to enter taskspace
+discovery via `the_taskspace:list_tasks()` and `$actor:focus(task)` to
+materialize a specific task's verbs as MCP tools (per
+[mcp.md §M3.1](../../spec/protocol/mcp.md#m31-working-set-actorfocus)). Cross-host
+reachability ([mcp.md §M3](../../spec/protocol/mcp.md#m3-reachability--what-shows-up-where))
+ensures `$task` instances created on the taskspace's host appear in the tool
+list once focused, without taskspace-specific plumbing in the gateway.
+
+The two models are both first-class in v1; pinboard for flat coordination
+surfaces, taskspace for hierarchical work items with lifecycles.
+
 ## Why This Demo Exists
 
 Dubspace proves live shared control. Taskspace proves durable async

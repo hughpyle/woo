@@ -28,6 +28,20 @@ export type Observation = Record<string, WooValue> & {
   type: string;
 };
 
+// Tool descriptor returned by HostBridge.enumerateRemoteTools so the gateway
+// can surface verbs on objects that live on a different host. Mirrors the
+// gateway-side McpTool shape without name sanitization (the gateway dedupes
+// names across the merged set).
+export type RemoteToolDescriptor = {
+  object: ObjRef;
+  verb: string;
+  aliases: string[];
+  arg_spec: Record<string, WooValue>;
+  direct: boolean;
+  source: string;
+  enclosingSpace: ObjRef | null;
+};
+
 // Per spec/semantics/events.md §12.7.1, directed observations route by their
 // `to`/`from` fields rather than by audience-space presence. The set is closed
 // in v1; additions here require a spec update so transports stay in sync.

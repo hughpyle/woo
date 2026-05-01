@@ -145,7 +145,7 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
       localSeeds.set(hook.as, id);
       setDescriptionIfEmpty(world, id, catalogDescription(hook.description, hook.name ?? id, manifest.name));
       setNameIfMissing(world, id, hook.name ?? id);
-      for (const [name, value] of Object.entries(hook.properties ?? {})) setPropIfMissing(world, id, name, value);
+      for (const [name, value] of Object.entries(hook.properties ?? {})) setPropIfMissing(world, id, name, resolveCatalogValue(world, value, localObjects, localSeeds, existing));
       continue;
     }
     const consumer = resolveObjectRef(world, hook.consumer, localObjects, localSeeds, existing);
@@ -205,7 +205,7 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
       localSeeds.set(hook.as, id);
       setDescriptionIfEmpty(world, id, catalogDescription(hook.description, hook.name ?? id, manifest.name));
       setNameIfMissing(world, id, hook.name ?? id);
-      for (const [name, value] of Object.entries(hook.properties ?? {})) setPropIfMissing(world, id, name, value);
+      for (const [name, value] of Object.entries(hook.properties ?? {})) setPropIfMissing(world, id, name, resolveCatalogValue(world, value, localObjects, localSeeds, existing));
       continue;
     }
     if (world.objects.has(hook.consumer) && world.objects.has(hook.feature)) attachFeature(world, hook.consumer, hook.feature);
@@ -241,7 +241,7 @@ function reconcileSeedObject(
   if (hook.description) world.setProp(id, "description", catalogDescription(hook.description, hook.name ?? id, manifest.name));
   for (const [name, value] of Object.entries(hook.properties ?? {})) {
     if (DYNAMIC_SEED_PROPERTIES.has(name) && obj.properties.has(name)) continue;
-    world.setProp(id, name, value);
+    world.setProp(id, name, resolveCatalogValue(world, value, localObjects, localSeeds, existing));
   }
   const strandedInNowhere = rehomeNowhereSeedObjects && obj.location === "$nowhere" && location !== null && location !== "$nowhere";
   if (obj.location !== location && (!obj.location || !world.objects.has(obj.location) || strandedInNowhere)) {
@@ -381,8 +381,30 @@ function resolveObjectRef(
     const record = installed.find((item) => item.alias === alias || item.catalog === alias);
     const resolved = name.startsWith("$") ? record?.objects?.[name] : record?.seeds?.[name];
     if (resolved) return resolved;
+    if (world.objects.has(name)) return name;
   }
   throw wooError("E_UNRESOLVED_REFERENCE", `catalog reference could not be resolved: ${ref}`, ref);
+}
+
+function resolveCatalogValue(
+  world: WooWorld,
+  value: WooValue,
+  localObjects: Map<string, ObjRef>,
+  localSeeds: Map<string, ObjRef>,
+  installed: InstalledCatalogRecord[]
+): WooValue {
+  if (typeof value === "string") {
+    try {
+      return resolveObjectRef(world, value, localObjects, localSeeds, installed);
+    } catch {
+      return value;
+    }
+  }
+  if (Array.isArray(value)) return value.map((item) => resolveCatalogValue(world, item, localObjects, localSeeds, installed));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolveCatalogValue(world, item, localObjects, localSeeds, installed)]));
+  }
+  return value;
 }
 
 function attachFeature(world: WooWorld, consumer: ObjRef, feature: ObjRef): void {

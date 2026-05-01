@@ -125,6 +125,8 @@ The reachability set is recomputed after every tool call. If it differs from the
 
 Containment cycles and re-entrant rooms (a room as the contents of another room — see the chat catalog's hot tub) are walked once; the algorithm is a BFS bounded by the reachability set's natural boundary (objects not in any of the seven categories above).
 
+Reachability spans hosts. When a category-2/3/5 entry resolves to a remote $space (per [hosts.md §3](hosts.md#3-hosts-and-execution-model)) the gateway asks that host for its current contents/membership and merges the result with locally-known entries. Per-instance verbs on dynamically-created objects (a `$task` minted at runtime on the taskspace's host, a `$cockatoo` cloned into a chat room) therefore appear in the tool list as soon as the object exists — the agent does not need to know which DO owns what. The remote host is responsible for applying the actor's read-permission filter before returning its contribution; the gateway trusts that filter (same-deployment trust, [hosts.md §3.3](hosts.md#33-trust-model-across-hosts)). Cross-host reachability lookups are best-effort cached for the duration of one tool-list computation; subsequent `tools/list` requests re-fetch.
+
 ### M3.1 Working set: `$actor:focus`
 
 The working-set primitive lives on `$actor` (so it's always reachable via §M3.1):

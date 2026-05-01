@@ -18,7 +18,7 @@ describe("McpHost", () => {
 
     // Fresh guests sit in $nowhere together. That containment must not make
     // Bob's inherited $actor maintenance verbs callable by Alice.
-    let tools = host.enumerateTools(alice.actor);
+    let tools = await host.enumerateTools(alice.actor);
     expect(tools.some((t) => t.object === alice.actor && t.verb === "wait")).toBe(true);
     expect(tools.some((t) => t.object === bob.actor)).toBe(false);
 
@@ -26,13 +26,13 @@ describe("McpHost", () => {
     // visible to :look, but their actor verbs are not part of Alice's tool set.
     await world.directCall(undefined, alice.actor, "the_chatroom", "enter", []);
     await world.directCall(undefined, bob.actor, "the_chatroom", "enter", []);
-    tools = host.enumerateTools(alice.actor);
+    tools = await host.enumerateTools(alice.actor);
     expect(tools.some((t) => t.object === alice.actor && t.verb === "wait")).toBe(true);
     expect(tools.some((t) => t.object === bob.actor)).toBe(false);
 
     const focus = tools.find((t) => t.object === alice.actor && t.verb === "focus")!;
     await expect(host.invokeTool(alice.actor, alice.id, focus, [bob.actor])).rejects.toMatchObject({ code: "E_PERM" });
-    expect(host.enumerateTools(alice.actor).some((t) => t.object === bob.actor)).toBe(false);
+    expect((await host.enumerateTools(alice.actor)).some((t) => t.object === bob.actor)).toBe(false);
   });
 
   it("enumerates tools reachable from the actor with route classification", async () => {
@@ -45,7 +45,7 @@ describe("McpHost", () => {
     const entered = await world.directCall(undefined, session.actor, "the_chatroom", "enter", []);
     expect(entered.op).toBe("result");
 
-    const tools = host.enumerateTools(session.actor);
+    const tools = await host.enumerateTools(session.actor);
     const byObjVerb = new Map(tools.map((t) => [`${t.object}:${t.verb}`, t]));
 
     // $actor host primitives are seeded as tool_exposed verbs and reachable via "self".
@@ -82,13 +82,13 @@ describe("McpHost", () => {
     const entered = await world.directCall(undefined, session.actor, "the_chatroom", "enter", []);
     expect(entered.op).toBe("result");
 
-    const sayTool = host.enumerateTools(session.actor).find((t) => t.object === "the_chatroom" && t.verb === "say")!;
+    const sayTool = (await host.enumerateTools(session.actor)).find((t) => t.object === "the_chatroom" && t.verb === "say")!;
     expect(sayTool).toBeDefined();
     const sayResult = await host.invokeTool(session.actor, session.id, sayTool, ["hello, world"]);
     expect(sayResult.observations.some((o) => o.type === "said")).toBe(true);
 
     // The own-call observations are NOT also enqueued — wait should drain empty.
-    const waitTool = host.enumerateTools(session.actor).find((t) => t.object === session.actor && t.verb === "wait")!;
+    const waitTool = (await host.enumerateTools(session.actor)).find((t) => t.object === session.actor && t.verb === "wait")!;
     const waited = await host.invokeTool(session.actor, session.id, waitTool, [0, 64]);
     const drained = waited.result as { observations: Observation[]; more: boolean; queue_depth: number };
     expect(drained.observations.length).toBe(0);
@@ -113,13 +113,13 @@ describe("McpHost", () => {
     if (said.op !== "result") return;
     host.routeLiveEvents(said, alice.id);
 
-    const waitTool = host.enumerateTools(bob.actor).find((t) => t.object === bob.actor && t.verb === "wait")!;
+    const waitTool = (await host.enumerateTools(bob.actor)).find((t) => t.object === bob.actor && t.verb === "wait")!;
     // Bob sees Alice's said observation in his queue.
     const bobDrain = (await host.invokeTool(bob.actor, bob.id, waitTool, [0, 64])).result as { observations: Observation[] };
     expect(bobDrain.observations.some((o) => o.type === "said" && o.actor === alice.actor)).toBe(true);
 
     // Alice does NOT see her own observation in her queue.
-    const aliceWait = host.enumerateTools(alice.actor).find((t) => t.object === alice.actor && t.verb === "wait")!;
+    const aliceWait = (await host.enumerateTools(alice.actor)).find((t) => t.object === alice.actor && t.verb === "wait")!;
     const aliceDrain = (await host.invokeTool(alice.actor, alice.id, aliceWait, [0, 64])).result as { observations: Observation[] };
     expect(aliceDrain.observations.some((o) => o.type === "said" && o.actor === alice.actor)).toBe(false);
   });
@@ -143,7 +143,7 @@ describe("McpHost", () => {
       observationAudiences: [[alice.actor], [bob.actor]]
     }, null);
 
-    const waitForActor = host.enumerateTools(alice.actor).find((t) => t.object === alice.actor && t.verb === "wait")!;
+    const waitForActor = (await host.enumerateTools(alice.actor)).find((t) => t.object === alice.actor && t.verb === "wait")!;
     const aliceDrain = (await host.invokeTool(alice.actor, alice.id, waitForActor, [0, 64])).result as { observations: Observation[] };
     const bobDrain = (await host.invokeTool(bob.actor, bob.id, waitForActor, [0, 64])).result as { observations: Observation[] };
 
@@ -157,7 +157,7 @@ describe("McpHost", () => {
     const host = new McpHost(world);
     host.bindSession(session.id, session.actor);
 
-    const create = host.enumerateTools(session.actor).find((t) => t.object === "the_taskspace" && t.verb === "create_task")!;
+    const create = (await host.enumerateTools(session.actor)).find((t) => t.object === "the_taskspace" && t.verb === "create_task")!;
     expect(create).toBeDefined();
     expect(create.direct).toBe(false);
     const result = await host.invokeTool(session.actor, session.id, create, ["MCP task", "from the host"]);
@@ -172,32 +172,32 @@ describe("McpHost", () => {
     const session = world.auth("guest:mcp-focus");
     const host = new McpHost(world);
     host.bindSession(session.id, session.actor);
-    host.refreshToolList(session.id, session.actor); // seed snapshot
+    await host.refreshToolList(session.id, session.actor); // seed snapshot
 
-    const create = host.enumerateTools(session.actor).find((t) => t.object === "the_taskspace" && t.verb === "create_task")!;
+    const create = (await host.enumerateTools(session.actor)).find((t) => t.object === "the_taskspace" && t.verb === "create_task")!;
     const created = await host.invokeTool(session.actor, session.id, create, ["Focus me", "test"]);
     const taskRef = (created.observations.find((o) => o.type === "task_created")?.task as string | undefined) ?? "";
     expect(typeof taskRef).toBe("string");
     expect(taskRef.length).toBeGreaterThan(0);
 
     // Before focus, the task's per-instance verbs aren't reachable.
-    expect(host.enumerateTools(session.actor).some((t) => t.object === taskRef)).toBe(false);
+    expect((await host.enumerateTools(session.actor)).some((t) => t.object === taskRef)).toBe(false);
 
     let listChanged = 0;
     host.onToolListChanged(() => { listChanged += 1; });
 
-    const focus = host.enumerateTools(session.actor).find((t) => t.object === session.actor && t.verb === "focus")!;
+    const focus = (await host.enumerateTools(session.actor)).find((t) => t.object === session.actor && t.verb === "focus")!;
     await host.invokeTool(session.actor, session.id, focus, [taskRef]);
 
     // After focus, task's verbs (claim, set_status, add_subtask) are reachable.
-    const taskTools = host.enumerateTools(session.actor).filter((t) => t.object === taskRef);
+    const taskTools = (await host.enumerateTools(session.actor)).filter((t) => t.object === taskRef);
     expect(taskTools.length).toBeGreaterThan(0);
     expect(taskTools.some((t) => t.verb === "claim")).toBe(true);
     expect(listChanged).toBeGreaterThan(0);
 
-    const unfocus = host.enumerateTools(session.actor).find((t) => t.object === session.actor && t.verb === "unfocus")!;
+    const unfocus = (await host.enumerateTools(session.actor)).find((t) => t.object === session.actor && t.verb === "unfocus")!;
     await host.invokeTool(session.actor, session.id, unfocus, [taskRef]);
-    expect(host.enumerateTools(session.actor).some((t) => t.object === taskRef)).toBe(false);
+    expect((await host.enumerateTools(session.actor)).some((t) => t.object === taskRef)).toBe(false);
   });
 
   it("waits with timeout and returns more=true when queue overflows the limit", async () => {
@@ -219,7 +219,7 @@ describe("McpHost", () => {
       observationAudiences: observations.map(() => [session.actor])
     }, null);
 
-    const waitTool = host.enumerateTools(session.actor).find((t) => t.object === session.actor && t.verb === "wait")!;
+    const waitTool = (await host.enumerateTools(session.actor)).find((t) => t.object === session.actor && t.verb === "wait")!;
     const first = await host.invokeTool(session.actor, session.id, waitTool, [0, 50]);
     const drainedFirst = first.result as { observations: Observation[]; more: boolean; queue_depth: number };
     expect(drainedFirst.observations.length).toBe(50);

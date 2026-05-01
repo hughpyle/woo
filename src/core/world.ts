@@ -14,6 +14,7 @@ import {
   type Observation,
   type ObjRef,
   type PropertyDef,
+  type RemoteToolDescriptor,
   type Session,
   type SpaceLogEntry,
   type VerbDef,
@@ -87,6 +88,11 @@ export type HostBridge = {
   setActorPresence(actor: ObjRef, space: ObjRef, present: boolean): Promise<void>;
   setSpaceSubscriber(space: ObjRef, actor: ObjRef, present: boolean): Promise<void>;
   contents(objRef: ObjRef): Promise<ObjRef[]>;
+  // Cross-host MCP reachability (spec/protocol/mcp.md §M3). Asks the host
+  // owning each id for tool descriptors covering that id's tool-exposed verbs
+  // plus the verbs of its current contents (when id is a $space). Optional —
+  // hosts that don't run an MCP gateway can omit it.
+  enumerateRemoteTools?(actor: ObjRef, ids: ObjRef[]): Promise<RemoteToolDescriptor[]>;
 };
 
 export type WorldSnapshot = {
@@ -175,6 +181,12 @@ export class WooWorld {
 
   setHostBridge(bridge: HostBridge | null): void {
     this.hostBridge = bridge;
+  }
+
+  // Read access for the MCP host (cross-host tool enumeration). Other callers
+  // should use the typed APIs that wrap the bridge.
+  getHostBridge(): HostBridge | null {
+    return this.hostBridge;
   }
 
   // Register or replace a native verb handler. Used by the MCP host to wire
@@ -2744,6 +2756,8 @@ export class WooWorld {
     this.nativeHandlers.set("room_go", (ctx, args) => this.roomExit(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("room_take", (ctx, args) => this.roomTake(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("room_drop", (ctx, args) => this.roomDrop(ctx, assertString(args[0] ?? "")));
+    this.nativeHandlers.set("pinboard_enter", (ctx) => this.pinboardEnter(ctx));
+    this.nativeHandlers.set("pinboard_leave", (ctx) => this.pinboardLeave(ctx));
     this.nativeHandlers.set("chat_command_plan", (ctx, args) => this.chatCommandPlan(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("chat_command", async (ctx, args) => {
       const plan = await this.chatCommandPlan(ctx, assertString(args[0] ?? ""));
@@ -2754,6 +2768,11 @@ export class WooWorld {
 
   private chatPresent(room: ObjRef): ObjRef[] {
     const present = this.getProp(room, "subscribers");
+    return Array.isArray(present) ? present.filter((item): item is ObjRef => typeof item === "string") : [];
+  }
+
+  private async chatPresentAsync(room: ObjRef, progr: ObjRef): Promise<ObjRef[]> {
+    const present = await this.propOrNullForActorAsync(progr, room, "subscribers");
     return Array.isArray(present) ? present.filter((item): item is ObjRef => typeof item === "string") : [];
   }
 
@@ -2773,7 +2792,7 @@ export class WooWorld {
   }
 
   private async composeRoomLook(ctx: CallContext, room: ObjRef): Promise<Record<string, WooValue>> {
-    const present = this.chatPresent(room);
+    const present = await this.chatPresentAsync(room, ctx.progr);
     const contents = await Promise.all((await this.objectContents(room)).filter((item) => !this.isActorForLook(item, present)).map(async (item) => ({
       id: item,
       title: await this.titleForLook(ctx, room, item),
@@ -2924,6 +2943,53 @@ export class WooWorld {
     if (this.objects.has(home)) await this.moveObjectChecked(actor, home);
     ctx.observe({ type: "left", source: room, actor, room, text: `${actorName} left.`, ts: Date.now() });
     return this.chatPresent(room);
+  }
+
+  private async pinboardEnter(ctx: CallContext): Promise<WooValue> {
+    const board = ctx.thisObj;
+    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor);
+    const boardName = await this.objectDisplayNameAsync(ctx.progr, board);
+    const ts = Date.now();
+    await this.updatePresenceChecked(ctx.actor, board, true);
+    ctx.observe({ type: "pinboard_entered", source: board, actor: ctx.actor, board, text: `${actorName} starts working at ${boardName}.`, ts });
+    await this.observePinboardRoomActivity(ctx, `${actorName} starts working at ${boardName}.`, ts);
+    return await this.chatPresentAsync(board, ctx.progr);
+  }
+
+  private async pinboardLeave(ctx: CallContext): Promise<WooValue> {
+    const board = ctx.thisObj;
+    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor);
+    const boardName = await this.objectDisplayNameAsync(ctx.progr, board);
+    const ts = Date.now();
+    await this.updatePresenceChecked(ctx.actor, board, false);
+    ctx.observe({ type: "pinboard_left", source: board, actor: ctx.actor, board, text: `${actorName} steps back from ${boardName}.`, ts });
+    await this.observePinboardRoomActivity(ctx, `${actorName} steps back from ${boardName}.`, ts);
+    return await this.chatPresentAsync(board, ctx.progr);
+  }
+
+  private async observePinboardRoomActivity(ctx: CallContext, text: string, ts: number): Promise<void> {
+    const room = await this.pinboardMountRoom(ctx);
+    if (!room) return;
+    const observation: Observation = { type: "pinboard_activity", source: room, board: ctx.thisObj, actor: ctx.actor, text, ts };
+    if (await this.remoteHostForObject(room)) {
+      try {
+        const subscribers = await this.getPropChecked(ctx.progr, room, "subscribers");
+        if (Array.isArray(subscribers)) {
+          (observation as Record<string, WooValue>)._audience_override = subscribers.filter((item): item is ObjRef => typeof item === "string");
+        }
+      } catch {
+        (observation as Record<string, WooValue>)._audience_override = [];
+      }
+    }
+    ctx.observe(observation);
+  }
+
+  private async pinboardMountRoom(ctx: CallContext): Promise<ObjRef | null> {
+    const explicit = await this.propOrNullForActorAsync(ctx.progr, ctx.thisObj, "mount_room");
+    if (typeof explicit === "string") return explicit;
+    if (!this.objects.has(ctx.thisObj)) return null;
+    const location = this.object(ctx.thisObj).location;
+    return location && this.objects.has(location) && this.inheritsFrom(location, "$space") ? location : null;
   }
 
   private async roomExit(ctx: CallContext, rawExit: string): Promise<WooValue> {

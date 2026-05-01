@@ -477,8 +477,24 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       const west = await roomB.directCall("walk-west", actor, "the_deck", "west", []);
       expect(west.op).toBe("result");
       expect(home.object(actor).location).toBe("the_chatroom");
+      expect(home.hasPresence(actor, "the_chatroom")).toBe(true);
+      expect(home.hasPresence(actor, "the_deck")).toBe(false);
       expect(roomA.getProp("the_chatroom", "subscribers")).toContain(actor);
       expect(roomB.getProp("the_deck", "subscribers")).not.toContain(actor);
+      if (west.op === "result") {
+        const observations = west.observations ?? [];
+        const audiences = west.observationAudiences ?? [];
+        const enteredIdx = observations.findIndex((o) => o.type === "entered");
+        const looked = observations.find((o) => o.type === "looked" && o.room === "the_chatroom");
+        expect(enteredIdx).toBeGreaterThanOrEqual(0);
+        expect(audiences[enteredIdx]).toContain(witness);
+        expect(looked).toMatchObject({
+          look: {
+            present_actors: expect.arrayContaining([actor, witness])
+          }
+        });
+        expect(String(looked?.text ?? "")).not.toContain("Present: nobody");
+      }
     } finally {
       roomBHarness.cleanup();
       roomAHarness.cleanup();

@@ -7,7 +7,7 @@
 // (stdio/HTTP) lives in src/mcp/server.ts; this module is transport-agnostic.
 
 import type { CallContext, NativeHandler, WooWorld } from "../core/world";
-import type { AppliedFrame, DirectResultFrame, ObjRef, Observation, WooValue } from "../core/types";
+import type { AppliedFrame, DirectResultFrame, ObjRef, Observation, RemoteToolDescriptor, WooValue } from "../core/types";
 import { directedRecipients, wooError } from "../core/types";
 
 // Broadcast hooks the runtime wires into the MCP host so that MCP-initiated
@@ -229,41 +229,137 @@ export class McpHost {
     return false;
   }
 
-  enumerateTools(actor: ObjRef): McpTool[] {
+  async enumerateTools(actor: ObjRef): Promise<McpTool[]> {
     const tools: McpTool[] = [];
     const usedNames = new Set<string>();
+    const seenObjectVerb = new Set<string>();
+
+    // Local enumeration: tools for objects this host knows about.
     for (const { id } of this.reachable(actor)) {
       if (this.isOtherActor(actor, id)) continue;
       for (const verb of this.tooledVerbsFor(actor, id)) {
-        const baseName = sanitizeId(id) + "__" + verb.name;
-        let name = baseName;
-        let suffix = 2;
-        while (usedNames.has(name)) {
-          name = baseName + "_" + suffix++;
-        }
-        usedNames.add(name);
-        tools.push({
-          name,
-          object: id,
+        const tool = this.assembleTool(id, {
           verb: verb.name,
           aliases: verb.aliases,
-          description: this.toolDescription(id, verb),
-          inputSchema: argSpecToJsonSchema(verb.arg_spec),
+          arg_spec: verb.arg_spec,
           direct: verb.direct_callable === true,
+          source: verb.source ?? "",
           enclosingSpace: this.enclosingSpaceFor(id)
-        });
+        }, usedNames);
+        tools.push(tool);
+        seenObjectVerb.add(`${id} ${verb.name}`);
       }
     }
+
+    // Cross-host enumeration (spec/protocol/mcp.md §M3): for every reachable
+    // entry that lives on a remote host, ask that host for tool descriptors
+    // covering the entry plus its current contents. Merge with name-dedup so
+    // seeded contents that exist locally don't double up.
+    const remoteIds = await this.collectRemoteScopeIds(actor);
+    const bridge = this.world.getHostBridge();
+    if (remoteIds.length > 0 && bridge?.enumerateRemoteTools) {
+      let descriptors: RemoteToolDescriptor[] = [];
+      try {
+        descriptors = await bridge.enumerateRemoteTools(actor, remoteIds);
+      } catch {
+        // Best-effort; if a host is unreachable its tools just don't appear.
+      }
+      for (const d of descriptors) {
+        const key = `${d.object} ${d.verb}`;
+        if (seenObjectVerb.has(key)) continue;
+        seenObjectVerb.add(key);
+        tools.push(this.assembleTool(d.object, d, usedNames));
+      }
+    }
+
     return tools;
   }
 
-  private toolListDigest(actor: ObjRef): string {
-    const tools = this.enumerateTools(actor);
+  // Computes tool descriptors for the given ids — the remote-side counterpart
+  // of cross-host enumeration. The caller (gateway) RPCs in here with the
+  // actor (already stubbed locally if needed) and the ids it cares about.
+  // Each id contributes its own tool-exposed verbs; if it's a $space, its
+  // current contents contribute too (filtered by the actor's read access).
+  enumerateLocalToolDescriptors(actor: ObjRef, ids: ObjRef[]): RemoteToolDescriptor[] {
+    const out: RemoteToolDescriptor[] = [];
+    const seen = new Set<string>();
+    const emit = (id: ObjRef): void => {
+      if (this.isOtherActor(actor, id)) return;
+      if (!this.world.objects.has(id)) return;
+      if (!this.actorCanSee(actor, id)) return;
+      for (const verb of this.tooledVerbsFor(actor, id)) {
+        const key = `${id} ${verb.name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          object: id,
+          verb: verb.name,
+          aliases: verb.aliases,
+          arg_spec: verb.arg_spec,
+          direct: verb.direct_callable === true,
+          source: verb.source ?? "",
+          enclosingSpace: this.enclosingSpaceFor(id)
+        });
+      }
+    };
+    for (const id of ids) {
+      if (!this.world.objects.has(id)) continue;
+      emit(id);
+      if (this.descendsFrom(id, "$space")) {
+        for (const child of this.world.object(id).contents) emit(child);
+      }
+    }
+    return out;
+  }
+
+  private assembleTool(
+    object: ObjRef,
+    spec: { verb: string; aliases: string[]; arg_spec: Record<string, WooValue>; direct: boolean; source: string; enclosingSpace: ObjRef | null },
+    usedNames: Set<string>
+  ): McpTool {
+    const baseName = sanitizeId(object) + "__" + spec.verb;
+    let name = baseName;
+    let suffix = 2;
+    while (usedNames.has(name)) {
+      name = baseName + "_" + suffix++;
+    }
+    usedNames.add(name);
+    return {
+      name,
+      object,
+      verb: spec.verb,
+      aliases: spec.aliases,
+      description: this.toolDescription(object, { name: spec.verb, aliases: spec.aliases, source: spec.source }),
+      inputSchema: argSpecToJsonSchema(spec.arg_spec),
+      direct: spec.direct,
+      enclosingSpace: spec.enclosingSpace
+    };
+  }
+
+  private async collectRemoteScopeIds(actor: ObjRef): Promise<ObjRef[]> {
+    const candidates = new Set<ObjRef>();
+    const actorObj = this.world.objects.has(actor) ? this.world.object(actor) : null;
+    if (actorObj?.location) candidates.add(actorObj.location);
+    const presence = actorObj ? this.world.propOrNull(actor, "presence_in") : null;
+    if (Array.isArray(presence)) for (const id of presence) {
+      if (typeof id === "string") candidates.add(id);
+    }
+    for (const id of this.focusListOf(actor)) candidates.add(id);
+    candidates.delete(actor);
+    const remote: ObjRef[] = [];
+    for (const id of candidates) {
+      if (await this.world.isRemoteObject(id)) remote.push(id);
+    }
+    return remote;
+  }
+
+  private async toolListDigest(actor: ObjRef): Promise<string> {
+    const tools = await this.enumerateTools(actor);
     return tools.map((tool) => `${tool.name}@${tool.object}:${tool.verb}:${tool.direct ? "d" : "s"}`).sort().join("|");
   }
 
-  refreshToolList(sessionId: string, actor: ObjRef): boolean {
-    const digest = this.toolListDigest(actor);
+  async refreshToolList(sessionId: string, actor: ObjRef): Promise<boolean> {
+    const digest = await this.toolListDigest(actor);
     const previous = this.toolListSnapshot.get(sessionId);
     if (digest === previous) return false;
     this.toolListSnapshot.set(sessionId, digest);
@@ -364,7 +460,7 @@ export class McpHost {
             delete (result as { originMcpSessionId?: string }).originMcpSessionId;
           }
         }
-        this.refreshToolList(sessionId, actor);
+        await this.refreshToolList(sessionId, actor);
         return { result: result.result, observations: result.observations };
       } finally {
         CURRENT_WAIT_SESSION_ID = previous;
@@ -383,7 +479,7 @@ export class McpHost {
         delete (frame as { originMcpSessionId?: string }).originMcpSessionId;
       }
     }
-    this.refreshToolList(sessionId, actor);
+    await this.refreshToolList(sessionId, actor);
     const errObs = frame.observations.find((o) => o.type === "$error");
     return {
       result: errObs ? null : true,
@@ -444,10 +540,19 @@ export class McpHost {
 
   private handleFocus(ctx: CallContext, args: WooValue[]): WooValue {
     const target = String(args[0] ?? "");
-    if (!target || !this.world.objects.has(target)) throw wooError("E_INVARG", `focus target not found: ${target}`);
+    if (!target) throw wooError("E_INVARG", `focus target not found: ${target}`);
     const actor = ctx.thisObj;
-    if (this.isOtherActor(actor, target)) throw wooError("E_PERM", `cannot focus another actor: ${target}`);
-    if (!this.actorCanSee(actor, target)) throw wooError("E_PERM", `focus target not visible: ${target}`);
+    // Local-known targets get full visibility/actor checks. Remote targets
+    // (runtime objects on a different host that this gateway has never seen
+    // a stub for) are accepted on trust: the cross-host enumeration that
+    // surfaced their tools has already filtered visibility on the owning
+    // host (mcp.md §M3). The actor-exclusion check requires a local stub,
+    // so a remote target can't accidentally escalate to another actor's
+    // verbs anyway.
+    if (this.world.objects.has(target)) {
+      if (this.isOtherActor(actor, target)) throw wooError("E_PERM", `cannot focus another actor: ${target}`);
+      if (!this.actorCanSee(actor, target)) throw wooError("E_PERM", `focus target not visible: ${target}`);
+    }
     const list = this.focusListOf(actor);
     if (!list.includes(target)) {
       list.push(target);

@@ -29,7 +29,8 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
   const { actor, sessionId, host } = options;
   host.bindSession(sessionId, actor);
   // Seed the snapshot so the first list_changed only fires after a real shift.
-  host.refreshToolList(sessionId, actor);
+  // Fire-and-forget: we don't block server creation on the cross-host RPC.
+  void host.refreshToolList(sessionId, actor).catch(() => {});
 
   const server = new Server(
     {
@@ -48,15 +49,15 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
   });
 
   const toolsByName = new Map<string, McpTool>();
-  const refreshTools = (): McpTool[] => {
-    const tools = host.enumerateTools(actor);
+  const refreshTools = async (): Promise<McpTool[]> => {
+    const tools = await host.enumerateTools(actor);
     toolsByName.clear();
     for (const tool of tools) toolsByName.set(tool.name, tool);
     return tools;
   };
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = refreshTools();
+    const tools = await refreshTools();
     return {
       tools: tools.map((tool) => ({
         name: tool.name,
@@ -67,7 +68,7 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    if (toolsByName.size === 0) refreshTools();
+    if (toolsByName.size === 0) await refreshTools();
     const tool = toolsByName.get(request.params.name);
     if (!tool) {
       return {
@@ -84,7 +85,7 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
         observations: result.observations
       };
       if (result.applied) structured.applied = result.applied;
-      refreshTools();
+      await refreshTools();
       return {
         content: [{ type: "text" as const, text: summary }],
         structuredContent: structured,

@@ -39,7 +39,7 @@ import {
   statusForError,
   type RestProtocolRequest
 } from "../core/protocol";
-import type { ObjRef, Observation, Session, WooValue } from "../core/types";
+import type { ObjRef, Observation, RemoteToolDescriptor, Session, WooValue } from "../core/types";
 import { directedRecipients, wooError } from "../core/types";
 import type { AppliedFrame, DirectResultFrame, ErrorFrame, LiveEventFrame, Message } from "../core/types";
 import type { SerializedWorld } from "../core/repository";
@@ -321,8 +321,12 @@ export class PersistentObjectDO {
     const hostForObject = async (id: ObjRef): Promise<string | null> => {
       const cached = this.routeCache.get(id);
       if (cached) return cached;
-      const localRoute = world.objectRoutes().find((route) => route.id === id && route.host === localHost);
-      if (localRoute || (localHost === WORLD_HOST && world.objects.has(id))) return localHost;
+      const route = world.objectRoutes().find((item) => item.id === id);
+      if (route) {
+        this.routeCache.set(id, route.host);
+        return route.host;
+      }
+      if (localHost === WORLD_HOST && world.objects.has(id)) return localHost;
       return await this.resolveObjectHost(id, WORLD_HOST);
     };
     const bridge: HostBridge = {
@@ -395,6 +399,37 @@ export class PersistentObjectDO {
         if (!host || host === localHost) return world.contentsOf(objRef);
         const response = await this.forwardInternalChecked<{ contents: ObjRef[] }>(host, "/__internal/contents", { obj: objRef });
         return response.contents;
+      },
+      enumerateRemoteTools: async (actor, ids) => {
+        // Group ids by owning host, RPC each, merge.
+        const byHost = new Map<string, ObjRef[]>();
+        for (const id of ids) {
+          const host = await hostForObject(id);
+          if (!host || host === localHost) continue;
+          const list = byHost.get(host) ?? [];
+          list.push(id);
+          byHost.set(host, list);
+        }
+        if (byHost.size === 0) return [];
+        const responses = await Promise.all(
+          Array.from(byHost, async ([host, hostIds]) => {
+            try {
+              const response = await this.forwardInternalChecked<{ tools: RemoteToolDescriptor[] }>(host, "/__internal/enumerate-tools", { actor, ids: hostIds });
+              const tools = response.tools ?? [];
+              // Returned descriptors include runtime-minted objects (tasks
+              // created on the cluster) that the directory may not know about
+              // yet. Record the responding host as their route so a follow-up
+              // tool call dispatches without an extra lookup.
+              for (const tool of tools) {
+                if (!this.routeCache.has(tool.object)) this.routeCache.set(tool.object, host);
+              }
+              return tools;
+            } catch {
+              return [] as RemoteToolDescriptor[];
+            }
+          })
+        );
+        return responses.flat();
       }
     };
     world.setHostBridge(bridge);
@@ -701,6 +736,14 @@ export class PersistentObjectDO {
 
       if (request.method === "POST" && pathname === "/__internal/contents") {
         return jsonResponse({ contents: world.contentsOf(String(body.obj ?? "") as ObjRef) });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/enumerate-tools") {
+        const actor = String(body.actor ?? "") as ObjRef;
+        const ids = Array.isArray(body.ids) ? (body.ids as string[]).filter((id) => typeof id === "string") as ObjRef[] : [];
+        if (actor) this.ensureInternalActor(world, actor);
+        const tools = this.getMcpGateway(world).host.enumerateLocalToolDescriptors(actor, ids);
+        return jsonResponse({ tools });
       }
 
       return jsonResponse({ error: { code: "E_OBJNF", message: `no internal route for ${request.method} ${pathname}` } }, 404);
