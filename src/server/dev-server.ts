@@ -17,7 +17,7 @@ import {
   type Session,
   type WooValue
 } from "../core/types";
-import { installGitHubTap } from "./github-taps";
+import { installGitHubTap, updateGitHubTap } from "./github-taps";
 import { LocalSQLiteRepository } from "./sqlite-repository";
 import { McpGateway } from "../mcp/gateway";
 
@@ -70,6 +70,13 @@ const server = http.createServer(async (req, res) => {
         catalog: String(body.catalog ?? ""),
         ref: typeof body.ref === "string" ? body.ref : undefined,
         as: typeof body.as === "string" ? body.as : undefined
+      }),
+      updateTap: (actor, body) => updateGitHubTap(world, actor, {
+        tap: String(body.tap ?? ""),
+        catalog: String(body.catalog ?? ""),
+        ref: typeof body.ref === "string" ? body.ref : undefined,
+        as: typeof body.as === "string" ? body.as : undefined,
+        accept_major: body.accept_major === true
       }),
       openStream: (_request, rawTarget, target, session) => openRestStream(req, res, rawTarget, target, session) ? { handled: true, raw: true } : { handled: false },
       broadcastApplied,

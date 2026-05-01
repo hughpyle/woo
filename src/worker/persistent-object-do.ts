@@ -151,6 +151,9 @@ export class PersistentObjectDO {
         installTap: async () => {
           throw wooError("E_NOT_IMPLEMENTED", "GitHub tap install on CF Worker is pending Phase 7; use @local catalogs for now");
         },
+        updateTap: async () => {
+          throw wooError("E_NOT_IMPLEMENTED", "GitHub tap update on CF Worker is pending Phase 7; use @local catalogs for now");
+        },
         resolveObject: (id, session) => this.resolveRestObject(world, id, session),
         resolveActor: (_protocolRequest, actorValue, session) => this.resolveRestActor(world, request, actorValue, session),
         broadcastApplied: (frame) => this.broadcastApplied(world, frame),

@@ -26,7 +26,7 @@ Deferred to v1.1+:
 - `QuotaAccountant` DO real-time accounting (table scaffolded; daily alarm pass skipped at first).
 - §R10.5 distributed tracing.
 - Multi-region tuning beyond CF defaults.
-- Catalog tap install over GitHub fetch (local catalogs cover the demos).
+- Catalog tap install/update over GitHub fetch (local catalogs cover the demos).
 - Snapshot policy automation (manual snapshot only).
 
 ## Phases
@@ -75,9 +75,9 @@ Wizard-action audit on `X-Woo-Force-Direct`, `X-Woo-Impersonate-Actor`, `wiz:for
 
 `DEPLOY.md` already exists; verify the operator path against the live deploy. End-to-end smoke: deploy → set secrets → first auth as wizard → install local catalogs → exercise dubspace/taskspace/chat from the bundled client.
 
-### Phase 7 (partly landed locally): catalog tap install over GitHub
+### Phase 7 (partly landed locally): catalog tap install/update over GitHub
 
-The local Node server now has `/api/tap/install` and `GET /api/taps`. The helper in `src/server/github-taps.ts` resolves GitHub refs, fetches `manifest.json` and `README.md`, computes SHA-256 hashes, and dispatches `$catalog_registry:install`. The Cloudflare Worker still needs to reuse or port this helper into its fetch handler, then layer in production observability and any private-repo token policy.
+The local Node server now has `/api/tap/install`, `/api/tap/update`, and `GET /api/taps`. The helper in `src/server/github-taps.ts` resolves GitHub refs, fetches `manifest.json` and `README.md`, computes SHA-256 hashes, and dispatches `$catalog_registry:install` or `$catalog_registry:update`. Major updates fetch `migration-v<from>-to-v<to>.json` and pass it to the registry call. The Cloudflare Worker still needs to reuse or port this helper into its fetch handler, then layer in production observability and any private-repo token policy.
 
 ## Current Implementation Status
 
@@ -112,7 +112,7 @@ Phase 1 (CF backend `ObjectRepository`) — landed:
 
 Phase 2 (Worker entry + DO class) — landed:
 
-- `src/worker/persistent-object-do.ts` (~750 lines). `PersistentObjectDO` wraps `WooWorld`+`CFObjectRepository` for both the `world` gateway and Directory-routed anchor-cluster hosts. The gateway runs bootstrap + catalog auto-install; cluster hosts load/prune host-scoped serialized slices exported by the gateway. REST routes include `/healthz`, `/api/auth` on the gateway (with `wizard:<WOO_INITIAL_WIZARD_TOKEN>` claim flow), authenticated `/api/state` aggregate, `/api/objects/{id}` describe, `/api/objects/{id}/properties/{name}`, `/api/objects/{id}/calls/{verb}` (sequenced + direct), `/api/objects/{id}/log`, `/api/taps`. Fail-loud 503 for missing `WOO_INITIAL_WIZARD_TOKEN` or `WOO_INTERNAL_SECRET` per §R14.7. SSE streams (`/stream`) and tap-install GitHub fetch still return 501 `E_NOT_IMPLEMENTED`.
+- `src/worker/persistent-object-do.ts` (~750 lines). `PersistentObjectDO` wraps `WooWorld`+`CFObjectRepository` for both the `world` gateway and Directory-routed anchor-cluster hosts. The gateway runs bootstrap + catalog auto-install; cluster hosts load/prune host-scoped serialized slices exported by the gateway. REST routes include `/healthz`, `/api/auth` on the gateway (with `wizard:<WOO_INITIAL_WIZARD_TOKEN>` claim flow), authenticated `/api/state` aggregate, `/api/objects/{id}` describe, `/api/objects/{id}/properties/{name}`, `/api/objects/{id}/calls/{verb}` (sequenced + direct), `/api/objects/{id}/log`, `/api/taps`. Fail-loud 503 for missing `WOO_INITIAL_WIZARD_TOKEN` or `WOO_INTERNAL_SECRET` per §R14.7. SSE streams (`/stream`) and tap-install/update GitHub fetch still return 501 `E_NOT_IMPLEMENTED`.
 - `src/worker/directory-do.ts`. `DirectoryDO` singleton with SQLite tables for `objref -> host` routes and `session_id -> actor` session routing. It starts empty and learns object placement from generic route tables exported by the world/hosts; chat stays on the gateway until player-DO fan-out/presence indexing exists.
 - `src/worker/index.ts`. Worker entry now routes global API/WS traffic to `env.WOO.idFromName("world")`, object REST routes through Directory, and best-effort broadcasts routed applied frames back through the gateway so WebSocket clients see REST-agent mutations live.
 - `wrangler.toml`. `[[durable_objects.bindings]] name = "WOO" class_name = "PersistentObjectDO"` and `name = "DIRECTORY" class_name = "DirectoryDO"`. `[[migrations]] tag = "v1" new_sqlite_classes = ["PersistentObjectDO"]`; `tag = "v2" new_sqlite_classes = ["DirectoryDO"]`. `compatibility_flags = ["nodejs_compat"]` (needed by `node:crypto` in `src/core/source-hash.ts`).
@@ -188,13 +188,13 @@ In dependency order:
 - **Verb-lookup cache** (`ancestor_verb_cache`, `ancestor_prop_cache`). Schema exists in `persistence.md §14.1`; population on cross-DO miss is unimplemented.
 - **`src/instrument.ts`** with AE writes, structured logs, per-DO `:metrics()`.
 - **Full Worker/DO conformance harness** via Miniflare. `tests/worker/cf-repository.test.ts` now covers `CFObjectRepository` through a DurableObjectState-shaped SQL adapter; the remaining gap is gateway + Directory + cluster-host integration.
-- **Worker-side catalog tap install**: port `src/server/github-taps.ts` helpers into the Worker fetch handler. Currently the Worker route returns 501 `E_NOT_IMPLEMENTED`; local catalogs cover the demos.
+- **Worker-side catalog tap install/update**: port `src/server/github-taps.ts` helpers into the Worker fetch handler. Currently the Worker route returns 501 `E_NOT_IMPLEMENTED`; local catalogs cover the demos.
 
 ## Known acceptable shortcuts
 
 - **Mid-call SUSPEND across DOs raises `E_CROSSDO_PARKING_UNSUPPORTED`** per §R6.2. v1.1 may relax.
 - **No tap caching.** Every install/update fetches fresh from GitHub. §CT4.
-- **Bundled local-catalog auto-install only on the Worker**; GitHub-tap install lands in Phase 7.
+- **Bundled local-catalog auto-install only on the Worker**; GitHub-tap install/update lands in Phase 7.
 - **Quota accounting is hard-cap-on-write only.** Daily-alarm pass deferred. §R5.4.
 - **No multi-region tuning.** CF picks the closest region per DO automatically.
 - **No distributed tracing.** Structured logs + `request_id` propagation across cross-DO RPCs cover the audit trail.

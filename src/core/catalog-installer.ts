@@ -1,7 +1,7 @@
 import { compileVerb } from "./authoring";
 import { fixtureByName } from "./fixtures";
 import { hashSource } from "./source-hash";
-import { wooError, type ObjRef, type TinyBytecode, type VerbDef, type WooValue } from "./types";
+import { wooError, type ErrorValue, type ObjRef, type TinyBytecode, type VerbDef, type WooValue } from "./types";
 import { normalizeVerbPerms } from "./verb-perms";
 import type { WooWorld } from "./world";
 
@@ -68,16 +68,46 @@ type CatalogSeedHook =
       feature: string;
     };
 
-type InstalledCatalogRecord = {
+export type CatalogMigrationStep =
+  | { kind: "rename_property"; class: string; from: string; to: string }
+  | { kind: "drop_property"; class: string; name: string }
+  | { kind: "add_property"; class: string; name: string; default?: WooValue; type?: string; perms?: string }
+  | { kind: "rename_verb"; class: string; from: string; to: string }
+  | { kind: "drop_verb"; class: string; verb: string }
+  | { kind: "change_parent"; class: string; parent: string }
+  | { kind: "rename_class"; from: string; to: string }
+  | { kind: "transform_property"; class: string; name: string; transform: string }
+  | { kind: "custom"; verb: string };
+
+export type CatalogMigrationManifest = {
+  from_version: string;
+  to_version: string;
+  spec_version: string;
+  steps: CatalogMigrationStep[];
+};
+
+export type CatalogMigrationState = {
+  status: "completed" | "failed" | "not_required";
+  from_version: string;
+  to_version: string;
+  completed_steps: string[];
+  failed_step?: string;
+  error?: ErrorValue;
+  updated_at: number;
+};
+
+export type InstalledCatalogRecord = {
   tap: string;
   catalog: string;
   alias: string;
   version: string;
   installed_at: number;
+  updated_at?: number;
   owner: ObjRef;
   objects: Record<string, ObjRef>;
   seeds: Record<string, ObjRef>;
   provenance: Record<string, WooValue>;
+  migration_state?: CatalogMigrationState;
 };
 
 const DYNAMIC_SEED_PROPERTIES = new Set([
@@ -100,6 +130,11 @@ export type RepairCatalogOptions = {
   allowImplementationHints?: boolean;
   reconcileSeedHooks?: boolean;
   rehomeNowhereSeedObjects?: boolean;
+};
+
+export type UpdateCatalogOptions = InstallCatalogOptions & {
+  acceptMajor?: boolean;
+  migration?: CatalogMigrationManifest | null;
 };
 
 export function installCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: InstallCatalogOptions = {}): InstalledCatalogRecord {
@@ -211,6 +246,65 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
     }
     if (world.objects.has(hook.consumer) && world.objects.has(hook.feature)) attachFeature(world, hook.consumer, hook.feature);
   }
+}
+
+export function updateCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: UpdateCatalogOptions = {}): InstalledCatalogRecord {
+  const actor = options.actor ?? "$wiz";
+  const tap = options.tap ?? "@local";
+  const alias = options.alias ?? manifest.name;
+  const allowImplementationHints = options.allowImplementationHints ?? tap === "@local";
+  const records = installedCatalogs(world);
+  const current = records.find((record) => record.alias === alias || (record.tap === tap && record.catalog === manifest.name));
+  if (!current) throw wooError("E_CATALOG", `catalog is not installed: ${tap}:${manifest.name} as ${alias}`, { tap, catalog: manifest.name, alias });
+  assertDependenciesInstalled(manifest, records);
+
+  const version = compareCatalogVersions(current.version, manifest.version);
+  if (version.order < 0) throw wooError("E_CATALOG", `catalog downgrades are not supported: ${current.version} -> ${manifest.version}`, { from: current.version, to: manifest.version });
+  if (version.majorChanged && options.acceptMajor !== true) {
+    throw wooError("E_CATALOG", `catalog major update requires accept_major: true: ${current.version} -> ${manifest.version}`, { from: current.version, to: manifest.version });
+  }
+  if (version.majorChanged && !options.migration) {
+    throw wooError("E_CATALOG", `catalog major update requires a migration manifest: ${current.version} -> ${manifest.version}`, { from: current.version, to: manifest.version });
+  }
+
+  repairCatalogManifest(world, manifest, {
+    actor,
+    allowImplementationHints,
+    reconcileSeedHooks: true
+  });
+
+  const migrationState = options.migration
+    ? runCatalogMigration(world, current, manifest, options.migration, records)
+    : {
+        status: "not_required" as const,
+        from_version: current.version,
+        to_version: manifest.version,
+        completed_steps: [],
+        updated_at: Date.now()
+      };
+
+  const provenance = options.provenance ?? {
+    tap,
+    catalog: manifest.name,
+    alias,
+    ref_requested: tap === "@local" ? "@local" : "unversioned",
+    ref_resolved_sha: "unversioned"
+  };
+  const record: InstalledCatalogRecord = {
+    ...current,
+    tap,
+    catalog: manifest.name,
+    alias,
+    version: manifest.version,
+    updated_at: Date.now(),
+    owner: actor,
+    objects: { ...current.objects, ...manifestObjectRefs(manifest) },
+    seeds: { ...current.seeds, ...manifestSeedRefs(manifest) },
+    provenance,
+    migration_state: migrationState
+  };
+  recordCatalogInstall(world, record);
+  return record;
 }
 
 function reconcileSeedObject(
@@ -408,6 +502,221 @@ function resolveCatalogValue(
   return value;
 }
 
+function manifestObjectRefs(manifest: CatalogManifest): Record<string, ObjRef> {
+  const refs: Record<string, ObjRef> = {};
+  for (const def of [...(manifest.classes ?? []), ...(manifest.features ?? [])]) refs[def.local_name] = def.local_name;
+  return refs;
+}
+
+function manifestSeedRefs(manifest: CatalogManifest): Record<string, ObjRef> {
+  const refs: Record<string, ObjRef> = {};
+  for (const hook of manifest.seed_hooks ?? []) {
+    if (hook.kind === "create_instance") refs[hook.as] = hook.as;
+  }
+  return refs;
+}
+
+function runCatalogMigration(
+  world: WooWorld,
+  current: InstalledCatalogRecord,
+  manifest: CatalogManifest,
+  migration: CatalogMigrationManifest,
+  installed: InstalledCatalogRecord[]
+): CatalogMigrationState {
+  if (migration.spec_version !== manifest.spec_version) {
+    throw wooError("E_CATALOG", `migration spec_version ${migration.spec_version} does not match manifest ${manifest.spec_version}`);
+  }
+  if (!versionPatternMatches(migration.from_version, current.version) || !versionPatternMatches(migration.to_version, manifest.version)) {
+    throw wooError("E_CATALOG", `migration version range does not match ${current.version} -> ${manifest.version}`, {
+      from_version: migration.from_version,
+      to_version: migration.to_version
+    });
+  }
+
+  const completed_steps: string[] = [];
+  const localObjects = new Map(Object.entries({ ...current.objects, ...manifestObjectRefs(manifest) }));
+  const localSeeds = new Map(Object.entries({ ...current.seeds, ...manifestSeedRefs(manifest) }));
+  for (const [index, step] of migration.steps.entries()) {
+    const id = migrationStepId(step, index);
+    try {
+      world.withMutationSavepoint(() => {
+        applyMigrationStep(world, step, localObjects, localSeeds, installed);
+      });
+      completed_steps.push(id);
+    } catch (err) {
+      return {
+        status: "failed",
+        from_version: current.version,
+        to_version: manifest.version,
+        completed_steps,
+        failed_step: id,
+        error: errorValue(err),
+        updated_at: Date.now()
+      };
+    }
+  }
+  return {
+    status: "completed",
+    from_version: current.version,
+    to_version: manifest.version,
+    completed_steps,
+    updated_at: Date.now()
+  };
+}
+
+function applyMigrationStep(
+  world: WooWorld,
+  step: CatalogMigrationStep,
+  localObjects: Map<string, ObjRef>,
+  localSeeds: Map<string, ObjRef>,
+  installed: InstalledCatalogRecord[]
+): void {
+  switch (step.kind) {
+    case "rename_property": {
+      const classRef = resolveObjectRef(world, step.class, localObjects, localSeeds, installed);
+      for (const objRef of classAndDescendants(world, classRef)) renamePropertyLocal(world, objRef, step.from, step.to);
+      return;
+    }
+    case "drop_property": {
+      const classRef = resolveObjectRef(world, step.class, localObjects, localSeeds, installed);
+      for (const objRef of classAndDescendants(world, classRef)) dropPropertyLocal(world, objRef, step.name);
+      return;
+    }
+    case "add_property": {
+      const classRef = resolveObjectRef(world, step.class, localObjects, localSeeds, installed);
+      installProperty(world, classRef, { name: step.name, default: step.default ?? null, type: step.type, perms: step.perms }, world.object(classRef).owner);
+      return;
+    }
+    case "rename_verb": {
+      const classRef = resolveObjectRef(world, step.class, localObjects, localSeeds, installed);
+      renameVerbLocal(world, classRef, step.from, step.to);
+      return;
+    }
+    case "drop_verb": {
+      const classRef = resolveObjectRef(world, step.class, localObjects, localSeeds, installed);
+      const obj = world.object(classRef);
+      obj.verbs.delete(step.verb);
+      touchObject(world, classRef);
+      return;
+    }
+    case "change_parent": {
+      const classRef = resolveObjectRef(world, step.class, localObjects, localSeeds, installed);
+      const parent = resolveObjectRef(world, step.parent, localObjects, localSeeds, installed);
+      world.chparentAuthoredObject(world.object(classRef).owner, classRef, parent);
+      return;
+    }
+    case "rename_class":
+      throw wooError("E_NOT_IMPLEMENTED", "catalog rename_class migrations are deferred", step as unknown as WooValue);
+    case "transform_property":
+      throw wooError("E_NOT_IMPLEMENTED", "catalog transform_property migrations are deferred", step as unknown as WooValue);
+    case "custom":
+      throw wooError("E_NOT_IMPLEMENTED", "catalog custom migrations are deferred", step as unknown as WooValue);
+  }
+}
+
+function classAndDescendants(world: WooWorld, classRef: ObjRef): ObjRef[] {
+  const refs: ObjRef[] = [];
+  const visit = (id: ObjRef): void => {
+    refs.push(id);
+    for (const child of world.object(id).children) visit(child);
+  };
+  visit(classRef);
+  return refs;
+}
+
+function renamePropertyLocal(world: WooWorld, objRef: ObjRef, from: string, to: string): void {
+  const obj = world.object(objRef);
+  const def = obj.propertyDefs.get(from);
+  if (def) {
+    if (!obj.propertyDefs.has(to)) obj.propertyDefs.set(to, { ...def, name: to, version: def.version + 1 });
+    obj.propertyDefs.delete(from);
+  }
+  if (obj.properties.has(from)) {
+    if (!obj.properties.has(to)) obj.properties.set(to, obj.properties.get(from)!);
+    obj.properties.delete(from);
+  }
+  if (obj.propertyVersions.has(from)) {
+    if (!obj.propertyVersions.has(to)) obj.propertyVersions.set(to, obj.propertyVersions.get(from)! + 1);
+    obj.propertyVersions.delete(from);
+  }
+  touchObject(world, objRef);
+}
+
+function dropPropertyLocal(world: WooWorld, objRef: ObjRef, name: string): void {
+  const obj = world.object(objRef);
+  obj.propertyDefs.delete(name);
+  obj.properties.delete(name);
+  obj.propertyVersions.delete(name);
+  touchObject(world, objRef);
+}
+
+function renameVerbLocal(world: WooWorld, objRef: ObjRef, from: string, to: string): void {
+  const obj = world.object(objRef);
+  const verb = obj.verbs.get(from);
+  if (!verb) return;
+  if (!obj.verbs.has(to)) obj.verbs.set(to, { ...verb, name: to, version: verb.version + 1 });
+  obj.verbs.delete(from);
+  touchObject(world, objRef);
+}
+
+function touchObject(world: WooWorld, objRef: ObjRef): void {
+  world.object(objRef).modified = Date.now();
+  world.persist(true);
+}
+
+function migrationStepId(step: CatalogMigrationStep, index: number): string {
+  switch (step.kind) {
+    case "rename_property":
+      return `${index + 1}:rename_property:${step.class}.${step.from}->${step.to}`;
+    case "drop_property":
+      return `${index + 1}:drop_property:${step.class}.${step.name}`;
+    case "add_property":
+      return `${index + 1}:add_property:${step.class}.${step.name}`;
+    case "rename_verb":
+      return `${index + 1}:rename_verb:${step.class}:${step.from}->${step.to}`;
+    case "drop_verb":
+      return `${index + 1}:drop_verb:${step.class}:${step.verb}`;
+    case "change_parent":
+      return `${index + 1}:change_parent:${step.class}->${step.parent}`;
+    case "rename_class":
+      return `${index + 1}:rename_class:${step.from}->${step.to}`;
+    case "transform_property":
+      return `${index + 1}:transform_property:${step.class}.${step.name}`;
+    case "custom":
+      return `${index + 1}:custom`;
+  }
+}
+
+function compareCatalogVersions(from: string, to: string): { order: number; majorChanged: boolean } {
+  const left = parseCatalogVersion(from);
+  const right = parseCatalogVersion(to);
+  for (let i = 0; i < 3; i++) {
+    if (right[i] !== left[i]) return { order: right[i] - left[i], majorChanged: right[0] !== left[0] };
+  }
+  return { order: 0, majorChanged: false };
+}
+
+function parseCatalogVersion(version: string): [number, number, number] {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/.exec(version);
+  if (!match) throw wooError("E_CATALOG", `catalog version must be semver major.minor.patch: ${version}`, version);
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function versionPatternMatches(pattern: string, version: string): boolean {
+  const patternParts = pattern.split(".");
+  const versionParts = version.split(/[+-]/)[0].split(".");
+  if (patternParts.length !== 3 || versionParts.length !== 3) return pattern === version;
+  return patternParts.every((part, index) => part === "x" || part === versionParts[index]);
+}
+
+function errorValue(err: unknown): ErrorValue {
+  if (err && typeof err === "object" && "code" in err) {
+    const error = err as ErrorValue;
+    return { code: String(error.code), message: typeof error.message === "string" ? error.message : String(error.code), value: error.value };
+  }
+  return { code: "E_INTERNAL", message: err instanceof Error ? err.message : String(err) };
+}
+
 function attachFeature(world: WooWorld, consumer: ObjRef, feature: ObjRef): void {
   const raw = world.getProp(consumer, "features");
   const features = Array.isArray(raw) ? raw.map((item) => String(item)) : [];
@@ -465,15 +774,27 @@ function installedCatalogs(world: WooWorld): InstalledCatalogRecord[] {
 function recordCatalogInstall(world: WooWorld, record: InstalledCatalogRecord): void {
   const id = `catalog_${record.alias.replace(/[^A-Za-z0-9_]/g, "_")}`;
   if (world.objects.has("$catalog")) {
-    world.createObject({ id, name: record.alias, parent: "$catalog", owner: record.owner });
+    if (!world.objects.has(id)) world.createObject({ id, name: record.alias, parent: "$catalog", owner: record.owner });
+    else {
+      const obj = world.object(id);
+      obj.name = record.alias;
+      obj.owner = record.owner;
+      if (obj.parent !== "$catalog") {
+        if (obj.parent && world.objects.has(obj.parent)) world.object(obj.parent).children.delete(id);
+        obj.parent = "$catalog";
+        world.object("$catalog").children.add(id);
+      }
+    }
     setDescriptionIfEmpty(world, id, `Installed catalog record for ${record.alias}. It records provenance, version, created class objects, and seeded instances for local introspection.`);
     world.setProp(id, "catalog_name", record.catalog);
     world.setProp(id, "alias", record.alias);
     world.setProp(id, "version", record.version);
+    if (record.updated_at !== undefined) world.setProp(id, "updated_at", record.updated_at);
     world.setProp(id, "tap", record.tap);
     world.setProp(id, "objects", record.objects as unknown as WooValue);
     world.setProp(id, "seeds", record.seeds as unknown as WooValue);
     world.setProp(id, "provenance", record.provenance);
+    if (record.migration_state) world.setProp(id, "migration_state", record.migration_state as unknown as WooValue);
   }
 
   if (!world.objects.has("$catalog_registry")) return;

@@ -132,11 +132,11 @@ Required frontmatter fields: `name`, `version`, `spec_version`, `license`. Optio
 
 ## CT5. Install
 
-Three operations, all wizard-only and audited. Catalog operations are themselves sequenced — they have an owning sequencer, namely `$catalog_registry` itself.
+The v1 runtime-supported operations are `install`, `list`, `update`, and `migration_state`. Mutating catalog operations are wizard-only and audited. They are themselves sequenced — they have an owning sequencer, namely `$catalog_registry` itself. `uninstall` is part of the catalog contract below, but remains deferred until the runtime can prove the conservative safety checks in §CT9.
 
 ### CT5.1 `$catalog_registry` is a `$space`
 
-`$catalog_registry` is a universal singleton (corename `$catalog_registry`) that descends from `$space`. Every install, uninstall, and update is a sequenced call **through `$catalog_registry`** — its log is the catalog-operations history. Replay over the registry log reconstructs the sequence of catalog mutations the world has seen.
+`$catalog_registry` is a universal singleton (corename `$catalog_registry`) that descends from `$space`. Every install and update is a sequenced call **through `$catalog_registry`** — its log is the catalog-operations history. Replay over the registry log reconstructs the sequence of catalog mutations the world has seen. When uninstall lands, it uses the same sequencing scope.
 
 Because the registry is a `$space` subclass, it inherits the same call lifecycle, replay, and snapshot machinery ([sequenced-log.md §SL2](../semantics/sequenced-log.md#sl2-the-native-host-operations), [space.md §S2](../semantics/space.md#s2-the-call-lifecycle)). The async behavior-savepoint discipline applies: a partial install rolls back inside the behavior savepoint while the registry log row commits with `applied_ok=false`. Crash-safety and audit follow without new mechanisms.
 
@@ -175,14 +175,14 @@ POST /api/tap/uninstall
 body: { tap, catalog }
 ```
 
-Wizard-only. Sequenced through `$catalog_registry`. Recycle policy for instances of imported classes follows §CT9.
+Wizard-only. Sequenced through `$catalog_registry`. Recycle policy for instances of imported classes follows §CT9. **Runtime status:** deferred; hosts should return `E_NOT_IMPLEMENTED` until the §CT9 reachability checks are implemented.
 
 ```
 POST /api/tap/update
-body: { tap, catalog, ref?, accept_major? }
+body: { tap, catalog, ref?, as?, accept_major? }
 ```
 
-Explicit re-install at a new ref. Operator opts in; there is no auto-update. The Worker resolves the new ref to a commit SHA before dispatching. The runtime compares the manifest's `version` against the recorded version and refuses if the major bumped unless `accept_major: true`; major-version updates require an explicit migration (§CT14).
+Explicit re-install at a new ref. Operator opts in; there is no auto-update. The host resolves the new ref to a commit SHA before dispatching. The runtime compares the manifest's `version` against the recorded version, refuses downgrades, refuses major bumps unless `accept_major: true`, and requires a migration manifest for major-version updates (§CT14). The local Node server implements this for GitHub taps; the Cloudflare Worker tap-fetch path may return `E_NOT_IMPLEMENTED` until Phase 7 ports the GitHub helper into the Worker runtime.
 
 ```
 GET /api/taps
@@ -205,6 +205,19 @@ For `@local:<catalog>` installs, the Worker reads from the deployment's bundled 
 
 Steps 3–5 run inside the call's savepoint; any failure rolls them back while the registry log row stays at the assigned seq with `applied_ok=false` and an error observation, per the standard sequenced-call discipline.
 
+### CT5.3.1 In-world entry: `$catalog_registry:update`
+
+`$catalog_registry:update(manifest, frontmatter, alias, provenance, options, migration?)` is wizard-only and sequenced through `$catalog_registry`.
+
+1. Locate the installed catalog by `alias` or by `(tap, catalog)`.
+2. Validate dependencies against the currently installed catalog set.
+3. Compare semantic versions. Same-version updates are treated as repairs; patch/minor updates are accepted; downgrades are refused; major updates require `options.accept_major == true` and a migration manifest.
+4. Recompile and repair the installed catalog objects from the new manifest. Existing seed objects keep live state except where the manifest or migration explicitly changes it.
+5. Run migration steps if supplied (§CT14). Step failures are caught and recorded as `migration_state` rather than escaping as behavior failures.
+6. Update the registry record in place, preserving `installed_at` and adding `updated_at`, new provenance, version, object/seed refs, and `migration_state`.
+
+The registry exposes `:migration_state(alias)` as a direct read for operator tooling.
+
 ### CT5.4 Local catalogs and auto-install
 
 A deployment's bundled `catalogs/` directory ships with the world's source. The local-catalog mechanism reads from this bundle when `tap = @local`.
@@ -216,7 +229,7 @@ Boot-time auto-install is controlled by `WOO_AUTO_INSTALL_CATALOGS` (a comma-sep
 - `WOO_AUTO_INSTALL_CATALOGS=` (empty) — clean world; operators install what they want.
 - Each entry is a catalog name resolved against `@local:<name>`.
 
-Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the boot-time pass skips it without appending a no-op registry log row. Boot-time local auto-install is part of deterministic world construction, so it installs directly from the bundled manifest and records the catalog in `$catalog_registry` state without routing through `$catalog_registry:call`. Runtime catalog install/update/uninstall operations are sequenced through `$catalog_registry` and audited.
+Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the boot-time pass skips it without appending a no-op registry log row. Boot-time local auto-install is part of deterministic world construction, so it installs directly from the bundled manifest and records the catalog in `$catalog_registry` state without routing through `$catalog_registry:call`. Runtime catalog install/update operations are sequenced through `$catalog_registry` and audited. Runtime uninstall uses the same pattern once implemented.
 
 Implementation rule: source code must not contain catalog-specific install policy. Adding, removing, or renaming a bundled catalog is a filesystem/catalog operation: place or remove a manifest directory under `catalogs/`, regenerate the bundled catalog index for non-filesystem deployment targets, and let install ordering follow declared dependencies. Runtime code that branches on demo object names or catalog names is a bug unless it is explicitly part of a temporary demo UI adapter.
 
@@ -319,7 +332,7 @@ Trust is rooted in **the operator's choice of which repo to install from**. v1 h
 
 - Public repos only, by URL.
 - Optional commit-signature verification — deferred to v1.1; GitHub's UI shows verified commits today.
-- Every runtime install/uninstall/update is sequenced through `$catalog_registry` (§CT5.1) **and** logged as a wizard action ([cloudflare.md §R10.4](../reference/cloudflare.md#r104-wizard-audit)). Boot-time local auto-install is direct deterministic bootstrap (§CT5.4). Both records carry the full `install_provenance`: tap, catalog, requested ref, **resolved commit SHA**, and SHA-256 hashes of the fetched manifest and README. A later operator can reconstruct exactly what bytes were installed even if the upstream tag has been moved or the branch has advanced.
+- Every runtime install/update is sequenced through `$catalog_registry` (§CT5.1) **and** logged as a wizard action ([cloudflare.md §R10.4](../reference/cloudflare.md#r104-wizard-audit)). Runtime uninstall uses the same rule once implemented. Boot-time local auto-install is direct deterministic bootstrap (§CT5.4). Both records carry the full provenance: tap, catalog, requested ref, **resolved commit SHA**, and SHA-256 hashes of the fetched manifest and README. A later operator can reconstruct exactly what bytes were installed even if the upstream tag has been moved or the branch has advanced.
 
 When the operator says `tap install hugh/woo-libs:dubspace`, they are vouching for `hugh/woo-libs` as a source. Exactly the same trust model as `cargo install` from a git URL or `homebrew tap`.
 
@@ -481,7 +494,7 @@ For installs by ephemeral actors (guests, soon-to-expire sessions), operators sh
 
 Persistent worlds mean catalog upgrades affect live state — instances created by `v1.0` may not be valid under `v2.0` if the class shape changed. A serious ecosystem needs migration conventions as mature as database migration tooling.
 
-v1 ships **the contract**, not yet the tooling. The contract:
+v1 ships **the contract** plus a first runtime slice. The runtime can already record update provenance, gate major updates, expose `migration_state`, and run the idempotent structural steps listed as implemented below. Rich transforms and custom migration code remain publisher/operator tooling work.
 
 ### CT14.1 Migration manifests
 
@@ -517,16 +530,17 @@ A catalog publishing a major-version bump (e.g., `dubspace-v1.x.x` → `dubspace
 
 ### CT14.2 Step kinds (v1)
 
-The v1 migration vocabulary is intentionally minimal:
+The v1 migration vocabulary is intentionally minimal. Runtime status is listed per step:
 
-- `rename_class` — change a catalog-local class name; instances reparent.
-- `rename_property` — rename a property across all instances of a class.
-- `transform_property` — apply a transformation verb to every instance's value of a property.
-- `drop_property` — remove a property; values discarded (irreversible).
-- `add_property` — add a property with a default; instances get the default.
-- `rename_verb` — change a verb name on a class.
-- `drop_verb` — remove a verb (callers fail with `E_VERBNF`).
-- `change_parent` — `chparent` a class to a new parent (must be in the new manifest's class list or universal classes).
+- `rename_property` — implemented; renames a property across a class and its descendants, preserving local instance values.
+- `drop_property` — implemented; removes a property definition and local values across a class and its descendants.
+- `add_property` — implemented; adds a class property with a default; inherited instances see the default.
+- `rename_verb` — implemented for verbs defined directly on the named class.
+- `drop_verb` — implemented for verbs defined directly on the named class; callers fail with `E_VERBNF`.
+- `change_parent` — implemented through the normal authored `chparent` path.
+- `rename_class` — deferred; changing corename/object identity safely requires object-reference migration.
+- `transform_property` — deferred; needs typed transform compilation and metering discipline.
+- `custom` — deferred; needs a stable migration-verb execution profile.
 
 Anything more complex requires a custom migration verb, declared as `kind: "custom"` with a `verb` body in DSL source. Custom steps run with the install actor's authority, like any other catalog code.
 

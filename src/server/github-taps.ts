@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { CatalogManifest } from "../core/catalog-installer";
+import type { CatalogManifest, CatalogMigrationManifest, InstalledCatalogRecord } from "../core/catalog-installer";
 import { wooError, type AppliedFrame, type Message, type ObjRef, type WooValue } from "../core/types";
 import type { WooWorld } from "../core/world";
 
@@ -18,11 +18,17 @@ export type GitHubTapInstallRequest = {
   as?: string;
 };
 
+export type GitHubTapUpdateRequest = GitHubTapInstallRequest & {
+  accept_major?: boolean;
+};
+
 export type LoadedGitHubCatalog = {
   manifest: CatalogManifest;
   frontmatter: Record<string, WooValue>;
   alias: string;
   provenance: Record<string, WooValue>;
+  baseUrl: string;
+  fetcher: FetchLike;
 };
 
 type LoadOptions = {
@@ -62,7 +68,7 @@ export async function loadGitHubCatalog(request: GitHubTapInstallRequest, option
     readme_hash: hashText(readmeText),
     fetched_at: now()
   };
-  return { manifest, frontmatter, alias, provenance };
+  return { manifest, frontmatter, alias, provenance, baseUrl: base, fetcher };
 }
 
 export async function installGitHubTap(
@@ -78,6 +84,46 @@ export async function installGitHubTap(
     target: "$catalog_registry",
     verb: "install",
     args: [loaded.manifest as unknown as WooValue, loaded.frontmatter as WooValue, loaded.alias, loaded.provenance]
+  };
+  return await world.applyCall(undefined, "$catalog_registry", message);
+}
+
+export async function updateGitHubTap(
+  world: WooWorld,
+  actor: ObjRef,
+  request: GitHubTapUpdateRequest,
+  options: LoadOptions = {}
+): Promise<AppliedFrame> {
+  if (!world.object(actor).flags.wizard) throw wooError("E_PERM", "only wizards may update catalogs", actor);
+  const loaded = await loadGitHubCatalog(request, options);
+  const current = installedCatalog(world, loaded.alias, loaded.provenance.tap as string, loaded.manifest.name);
+  if (!current) throw wooError("E_CATALOG", `catalog is not installed: ${loaded.alias}`, loaded.alias);
+  const currentMajor = majorVersion(current.version);
+  const nextMajor = majorVersion(loaded.manifest.version);
+  let migration: CatalogMigrationManifest | null = null;
+  if (currentMajor !== nextMajor) {
+    if (request.accept_major !== true) {
+      throw wooError("E_CATALOG", `catalog major update requires accept_major: true: ${current.version} -> ${loaded.manifest.version}`, {
+        from: current.version,
+        to: loaded.manifest.version
+      });
+    }
+    const migrationText = await fetchText(loaded.fetcher, `${loaded.baseUrl}/migration-v${currentMajor}-to-v${nextMajor}.json`);
+    migration = parseMigration(migrationText);
+    loaded.provenance.migration_hash = hashText(migrationText);
+  }
+  const message: Message = {
+    actor,
+    target: "$catalog_registry",
+    verb: "update",
+    args: [
+      loaded.manifest as unknown as WooValue,
+      loaded.frontmatter as WooValue,
+      loaded.alias,
+      loaded.provenance,
+      { accept_major: request.accept_major === true },
+      migration as unknown as WooValue
+    ]
   };
   return await world.applyCall(undefined, "$catalog_registry", message);
 }
@@ -193,6 +239,22 @@ function parseManifest(text: string): CatalogManifest {
   return manifest;
 }
 
+function parseMigration(text: string): CatalogMigrationManifest {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw wooError("E_CATALOG", `catalog migration is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw wooError("E_CATALOG", "catalog migration must be an object");
+  const migration = parsed as CatalogMigrationManifest;
+  for (const field of ["from_version", "to_version", "spec_version"] as const) {
+    if (typeof migration[field] !== "string" || migration[field].trim() === "") throw wooError("E_CATALOG", `catalog migration missing ${field}`);
+  }
+  if (!Array.isArray(migration.steps)) throw wooError("E_CATALOG", "catalog migration missing steps");
+  return migration;
+}
+
 function validateFrontmatter(frontmatter: Record<string, WooValue>, manifest: CatalogManifest): void {
   for (const field of ["name", "version", "spec_version", "license"]) {
     if (typeof frontmatter[field] !== "string" || String(frontmatter[field]).trim() === "") {
@@ -209,6 +271,18 @@ function validateFrontmatter(frontmatter: Record<string, WooValue>, manifest: Ca
 
 function isSemver(value: string): boolean {
   return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(value);
+}
+
+function majorVersion(value: string): number {
+  const match = /^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.exec(value);
+  if (!match) throw wooError("E_CATALOG", `catalog version must be semver major.minor.patch: ${value}`);
+  return Number(match[1]);
+}
+
+function installedCatalog(world: WooWorld, alias: string, tap: string, catalog: string): InstalledCatalogRecord | null {
+  const raw = world.propOrNull("$catalog_registry", "installed_catalogs");
+  if (!Array.isArray(raw)) return null;
+  return (raw as unknown as InstalledCatalogRecord[]).find((record) => record.alias === alias || (record.tap === tap && record.catalog === catalog)) ?? null;
 }
 
 function normalizeTap(value: string): string {

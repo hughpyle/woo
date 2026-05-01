@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { installVerb } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
-import { installCatalogManifest, type CatalogManifest as RuntimeCatalogManifest } from "../src/core/catalog-installer";
+import { installCatalogManifest, updateCatalogManifest, type CatalogManifest as RuntimeCatalogManifest } from "../src/core/catalog-installer";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
 import type { VerbDef } from "../src/core/types";
 
@@ -92,6 +92,118 @@ describe("local catalogs", () => {
       classes: []
     };
     expect(() => installCatalogManifest(world, manifest, { tap: "@local", alias: "needs-chat" })).toThrow(/@local:chat.*\(none\)/);
+  });
+
+  it("updates installed catalogs without recreating their registry object", async () => {
+    const world = createWorld({ catalogs: false });
+    const v1: RuntimeCatalogManifest = {
+      name: "update-demo",
+      version: "1.0.0",
+      spec_version: "v1",
+      classes: [
+        {
+          local_name: "$update_probe",
+          parent: "$thing",
+          verbs: [{ name: "ping", source: "verb :ping() rxd {\n  return \"one\";\n}" }]
+        }
+      ]
+    };
+    const v1_1: RuntimeCatalogManifest = {
+      ...v1,
+      version: "1.1.0",
+      classes: [
+        {
+          local_name: "$update_probe",
+          parent: "$thing",
+          properties: [{ name: "mode", type: "str", default: "minor" }],
+          verbs: [{ name: "ping", source: "verb :ping() rxd {\n  return \"two\";\n}" }]
+        }
+      ]
+    };
+
+    installCatalogManifest(world, v1, { tap: "@local", alias: "update-demo" });
+    const catalogRecordCreated = world.object("catalog_update_demo").created;
+    updateCatalogManifest(world, v1_1, { tap: "@local", alias: "update-demo" });
+
+    expect(world.object("catalog_update_demo").created).toBe(catalogRecordCreated);
+    expect(world.getProp("$update_probe", "mode")).toBe("minor");
+    const result = await world.directCall("catalog-update-ping", "$wiz", "$update_probe", "ping", []);
+    expect(result.op).toBe("result");
+    if (result.op === "result") expect(result.result).toBe("two");
+    expect(world.getProp("$catalog_registry", "installed_catalogs")).toMatchObject([
+      { alias: "update-demo", version: "1.1.0", migration_state: { status: "not_required" } }
+    ]);
+  });
+
+  it("gates major catalog updates behind explicit migration input", async () => {
+    const world = createWorld({ catalogs: false });
+    const v1: RuntimeCatalogManifest = {
+      name: "major-demo",
+      version: "1.0.0",
+      spec_version: "v1",
+      classes: [{ local_name: "$major_probe", parent: "$thing" }]
+    };
+    const v2: RuntimeCatalogManifest = { ...v1, version: "2.0.0" };
+
+    installCatalogManifest(world, v1, { tap: "@local", alias: "major-demo" });
+
+    expect(() => updateCatalogManifest(world, v2, { tap: "@local", alias: "major-demo" })).toThrow(/accept_major/);
+    expect(() => updateCatalogManifest(world, v2, { tap: "@local", alias: "major-demo", acceptMajor: true })).toThrow(/migration manifest/);
+  });
+
+  it("runs idempotent property migrations across catalog instances", async () => {
+    const world = createWorld({ catalogs: false });
+    const v1: RuntimeCatalogManifest = {
+      name: "migration-demo",
+      version: "1.0.0",
+      spec_version: "v1",
+      classes: [
+        {
+          local_name: "$migrating",
+          parent: "$thing",
+          properties: [{ name: "old_name", type: "str", default: "old" }]
+        }
+      ],
+      seed_hooks: [
+        {
+          kind: "create_instance",
+          class: "$migrating",
+          as: "migrated_1",
+          properties: { old_name: "live value" }
+        }
+      ]
+    };
+    const v2: RuntimeCatalogManifest = {
+      ...v1,
+      version: "2.0.0",
+      classes: [
+        {
+          local_name: "$migrating",
+          parent: "$thing",
+          properties: [{ name: "new_name", type: "str", default: "new" }]
+        }
+      ]
+    };
+
+    installCatalogManifest(world, v1, { tap: "@local", alias: "migration-demo" });
+    const record = updateCatalogManifest(world, v2, {
+      tap: "@local",
+      alias: "migration-demo",
+      acceptMajor: true,
+      migration: {
+        from_version: "1.x.x",
+        to_version: "2.0.0",
+        spec_version: "v1",
+        steps: [{ kind: "rename_property", class: "$migrating", from: "old_name", to: "new_name" }]
+      }
+    });
+
+    expect(record.migration_state).toMatchObject({ status: "completed", completed_steps: ["1:rename_property:$migrating.old_name->new_name"] });
+    expect(world.getProp("migrated_1", "new_name")).toBe("live value");
+    expect(world.propOrNull("migrated_1", "old_name")).toBeNull();
+    const state = await world.directCall("catalog-migration-state", "$wiz", "$catalog_registry", "migration_state", ["migration-demo"]);
+    expect(state.op).toBe("result");
+    if (state.op === "result") expect(state.result).toMatchObject({ status: "completed", to_version: "2.0.0" });
   });
 
   it("installs chat from source without trusted implementation hints", async () => {

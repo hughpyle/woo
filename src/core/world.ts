@@ -25,7 +25,7 @@ import {
 } from "./types";
 import type { ObjectRepository, ParkedTaskRecord, SerializedObject, SerializedSession, SerializedWorld, SpaceSnapshotRecord, WorldRepository } from "./repository";
 import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializedTinyVmTaskWithInput, runTinyVm, type SerializedVmTask } from "./tiny-vm";
-import { installCatalogManifest, type CatalogManifest } from "./catalog-installer";
+import { installCatalogManifest, updateCatalogManifest, type CatalogManifest, type CatalogMigrationManifest } from "./catalog-installer";
 import { normalizeVerbPerms } from "./verb-perms";
 
 export type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
@@ -1793,6 +1793,14 @@ export class WooWorld {
     }
   }
 
+  withMutationSavepoint<T>(fn: () => T): T;
+  withMutationSavepoint<T>(fn: () => T): T {
+    const run = (): T => this.withBehaviorSavepoint(fn);
+    const repo = this.activeObjectRepository();
+    if (repo && this.persistencePaused === 0) return repo.savepoint(run);
+    return run();
+  }
+
   persist(force = false): void {
     if (!this.repository) return;
     if (this.activeObjectRepository()) {
@@ -2924,7 +2932,30 @@ export class WooWorld {
         provenance
       }) as unknown as WooValue;
     });
+    this.nativeHandlers.set("catalog_registry_update", (ctx, args) => {
+      if (!this.object(ctx.actor).flags.wizard) throw wooError("E_PERM", "only wizards may update catalogs", ctx.actor);
+      const manifest = assertMap(args[0]) as unknown as CatalogManifest;
+      const alias = typeof args[2] === "string" ? args[2] : manifest.name;
+      const provenance = args[3] && typeof args[3] === "object" && !Array.isArray(args[3]) ? (args[3] as Record<string, WooValue>) : {};
+      const options = args[4] && typeof args[4] === "object" && !Array.isArray(args[4]) ? (args[4] as Record<string, WooValue>) : {};
+      const migration = args[5] && typeof args[5] === "object" && !Array.isArray(args[5]) ? (args[5] as unknown as CatalogMigrationManifest) : null;
+      return updateCatalogManifest(this, manifest, {
+        actor: ctx.actor,
+        tap: typeof provenance.tap === "string" ? provenance.tap : "@local",
+        alias,
+        provenance,
+        acceptMajor: options.accept_major === true,
+        migration
+      }) as unknown as WooValue;
+    });
     this.nativeHandlers.set("catalog_registry_list", () => this.propOrNull("$catalog_registry", "installed_catalogs"));
+    this.nativeHandlers.set("catalog_registry_migration_state", (_ctx, args) => {
+      const alias = assertString(args[0] ?? "");
+      const records = this.propOrNull("$catalog_registry", "installed_catalogs");
+      if (!Array.isArray(records)) return null;
+      const record = records.find((item) => item && typeof item === "object" && !Array.isArray(item) && (item as Record<string, WooValue>).alias === alias);
+      return record && typeof record === "object" && !Array.isArray(record) ? ((record as Record<string, WooValue>).migration_state ?? null) : null;
+    });
     this.nativeHandlers.set("match_object", async (ctx, args) => {
       const match = await this.matchObjectForActorAsync(assertString(args[0] ?? ""), ctx, typeof args[1] === "string" ? args[1] : await this.objectLocationChecked(ctx.actor, ctx.hostMemo));
       return match.value;

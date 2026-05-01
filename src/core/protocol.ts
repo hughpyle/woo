@@ -35,6 +35,7 @@ export type RestProtocolHost = {
   onAuthenticated?(session: Session): void | Promise<void>;
   state(actor: ObjRef): unknown | Promise<unknown>;
   installTap?(actor: ObjRef, body: Record<string, unknown>): Promise<AppliedFrame>;
+  updateTap?(actor: ObjRef, body: Record<string, unknown>): Promise<AppliedFrame>;
   openStream?(request: RestProtocolRequest, rawTarget: string, target: ObjRef, session: Session): RestProtocolResult | Promise<RestProtocolResult>;
   resolveObject?(id: string, session: Session, request: RestProtocolRequest): ObjRef;
   resolveActor?(request: RestProtocolRequest, actorValue: unknown, session: Session): ObjRef;
@@ -69,6 +70,18 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
         return jsonProtocol({ error: { code: "E_NOT_IMPLEMENTED", message: "GitHub tap install is not available on this host" } }, 501);
       }
       const frame = await host.installTap(session.actor, body);
+      await host.broadcastApplied(frame);
+      return jsonProtocol(frame);
+    }
+
+    if (request.method === "POST" && request.pathname === "/api/tap/update") {
+      const session = host.requireSession(request);
+      requireWizard(world, session.actor);
+      const body = await request.readJson();
+      if (!host.updateTap) {
+        return jsonProtocol({ error: { code: "E_NOT_IMPLEMENTED", message: "GitHub tap update is not available on this host" } }, 501);
+      }
+      const frame = await host.updateTap(session.actor, body);
       await host.broadcastApplied(frame);
       return jsonProtocol(frame);
     }

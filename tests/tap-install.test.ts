@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createWorld } from "../src/core/bootstrap";
-import { installGitHubTap, loadGitHubCatalog, parseFrontmatter } from "../src/server/github-taps";
+import { installGitHubTap, loadGitHubCatalog, parseFrontmatter, updateGitHubTap } from "../src/server/github-taps";
 
 const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -47,6 +47,27 @@ depends:
 
 # Remote Demo
 `;
+
+const updatedManifest = {
+  ...manifest,
+  version: "1.3.0",
+  classes: [
+    {
+      local_name: "$remote_control",
+      parent: "$thing",
+      description: "Remote catalog control class used to prove tap updates replace class verbs from fetched manifests.",
+      properties: [{ name: "value", type: "num", default: 1 }, { name: "mode", type: "str", default: "updated" }],
+      verbs: [
+        {
+          name: "ping",
+          source: "verb :ping() rxd {\n  return \"updated\";\n}"
+        }
+      ]
+    }
+  ]
+};
+
+const updatedReadme = readme.replace("version: 1.2.0", "version: 1.3.0");
 
 describe("GitHub catalog taps", () => {
   it("loads a catalog by resolving the highest catalog semver tag", async () => {
@@ -100,6 +121,37 @@ describe("GitHub catalog taps", () => {
     expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(["install"]);
   });
 
+  it("updates fetched manifests through the catalog registry log", async () => {
+    const world = createWorld({ catalogs: false });
+    await installGitHubTap(
+      world,
+      "$wiz",
+      { tap: "hugh/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0", as: "remote" },
+      { fetch: mockFetch(), now: () => 1000 }
+    );
+
+    const frame = await updateGitHubTap(
+      world,
+      "$wiz",
+      { tap: "hugh/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.3.0", as: "remote" },
+      { fetch: mockFetch({ manifest: updatedManifest, readme: updatedReadme, refs: ["remote-demo-v1.2.0", "remote-demo-v1.3.0"] }), now: () => 2000 }
+    );
+
+    expect(frame.space).toBe("$catalog_registry");
+    expect(frame.seq).toBe(2);
+    expect(world.getProp("$remote_control", "mode")).toBe("updated");
+    expect(world.getProp("$catalog_registry", "installed_catalogs")).toMatchObject([
+      {
+        alias: "remote",
+        version: "1.3.0",
+        updated_at: expect.any(Number),
+        migration_state: { status: "not_required" },
+        provenance: { ref_requested: "remote-demo-v1.3.0", fetched_at: 2000 }
+      }
+    ]);
+    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(["install", "update"]);
+  });
+
   it("requires wizard authority before fetching", async () => {
     const world = createWorld({ catalogs: false });
     const session = world.auth("guest:tap");
@@ -146,14 +198,17 @@ describe("GitHub catalog taps", () => {
   });
 });
 
-function mockFetch(options: { manifest?: typeof manifest; readme?: string } = {}) {
+function mockFetch(options: { manifest?: unknown; readme?: string; refs?: string[] } = {}) {
   const manifestBody = options.manifest ?? manifest;
   const readmeBody = options.readme ?? readme;
+  const refs = options.refs ?? ["remote-demo-v1.0.0", "remote-demo-v1.2.0"];
   return async (url: string) => {
     if (url === "https://api.github.com/repos/hugh/woo-libs/tags?per_page=100") {
-      return response([{ name: "remote-demo-v1.0.0" }, { name: "remote-demo-v1.2.0" }, { name: "other-v9.0.0" }]);
+      return response([...refs.map((name) => ({ name })), { name: "other-v9.0.0" }]);
     }
-    if (url === "https://api.github.com/repos/hugh/woo-libs/commits/remote-demo-v1.2.0") return response({ sha });
+    for (const ref of refs) {
+      if (url === `https://api.github.com/repos/hugh/woo-libs/commits/${ref}`) return response({ sha });
+    }
     if (url === `https://raw.githubusercontent.com/hugh/woo-libs/${sha}/catalogs/remote-demo/manifest.json`) return textResponse(JSON.stringify(manifestBody));
     if (url === `https://raw.githubusercontent.com/hugh/woo-libs/${sha}/catalogs/remote-demo/README.md`) return textResponse(readmeBody);
     return { ok: false, status: 404, statusText: "Not Found", text: async () => "", json: async () => ({}) };

@@ -180,10 +180,12 @@ permission checks.
 | `catalog_name` | str | `""` | Manifest catalog name. |
 | `alias` | str | `""` | Local install alias. |
 | `version` | str | `""` | Installed catalog version. |
+| `updated_at` | num | absent | Last successful runtime update timestamp. |
 | `tap` | str | `""` | Tap or source identifier. |
 | `objects` | map | `{}` | Created class/object refs keyed by manifest-local name. |
 | `seeds` | map | `{}` | Created seed instance refs keyed by manifest-local name. |
 | `provenance` | map | `{}` | Source metadata used for audit and update decisions. |
+| `migration_state` | map | absent | Last update migration state, if any. |
 
 ### B2.14 v1-ops catalog registry
 
@@ -196,12 +198,13 @@ properties plus registry state:
 | `installed_catalogs` | list<map> | `[]` | Installed catalogs with alias, version, provenance, owner, and created-object refs. |
 
 Its current v1 seed verbs are
-`:install(manifest, frontmatter, alias, provenance)` and `:list()` (`rxd`).
-`:uninstall(tap, catalog)` and
-`:update(tap, catalog, ref?, accept_major?)` are reserved catalog-registry verbs
-for the fuller operations surface, but they are not boot-installed yet. All
-mutating verbs are wizard-only and are called through
-`$catalog_registry:call(...)`; direct calls are denied except `:list()`.
+`:install(manifest, frontmatter, alias, provenance)`,
+`:update(manifest, frontmatter, alias, provenance, options, migration?)`,
+`:list()` (`rxd`), and `:migration_state(alias)` (`rxd`).
+`:uninstall(tap, catalog)` is reserved for the fuller operations surface, but
+is not boot-installed yet. All mutating verbs are wizard-only and are called
+through `$catalog_registry:call(...)`; direct calls are denied except `:list()`
+and `:migration_state()`.
 
 ### B2.15 `$nowhere`
 
