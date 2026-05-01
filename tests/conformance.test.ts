@@ -85,6 +85,8 @@ function bytecodeVerb(name: string, bytecode: TinyBytecode): VerbDef {
 }
 
 class LocalHostBridge implements HostBridge {
+  readonly contentsCalls = new Map<ObjRef, number>();
+
   constructor(
     readonly localHost: string,
     private readonly worlds: Map<string, WooWorld>,
@@ -132,6 +134,7 @@ class LocalHostBridge implements HostBridge {
   }
 
   async contents(objRef: ObjRef): Promise<ObjRef[]> {
+    this.contentsCalls.set(objRef, (this.contentsCalls.get(objRef) ?? 0) + 1);
     return this.worldFor(objRef).contentsOf(objRef);
   }
 
@@ -446,8 +449,10 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
         ["the_hot_tub", "room-b"]
       ]);
       home.setHostBridge(new LocalHostBridge("home", worlds, routes));
-      roomA.setHostBridge(new LocalHostBridge("room-a", worlds, routes));
-      roomB.setHostBridge(new LocalHostBridge("room-b", worlds, routes));
+      const roomABridge = new LocalHostBridge("room-a", worlds, routes);
+      const roomBBridge = new LocalHostBridge("room-b", worlds, routes);
+      roomA.setHostBridge(roomABridge);
+      roomB.setHostBridge(roomBBridge);
 
       roomA.createObject({ id: actor, name: actor, parent: "$guest", owner: "$wiz" });
       home.setActorPresence(actor, "the_chatroom", true);
@@ -465,6 +470,10 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
 
       const moved = await roomA.directCall("walk-se", actor, "the_chatroom", "southeast", []);
       expect(moved.op).toBe("result");
+      if (moved.op === "result") {
+        expect(moved.result).toMatchObject({ room: "the_deck", look_deferred: true });
+      }
+      expect(roomABridge.contentsCalls.get("the_deck") ?? 0).toBe(0);
       expect(home.object(actor).location).toBe("the_deck");
       expect(home.hasPresence(actor, "the_chatroom")).toBe(false);
       expect(home.hasPresence(actor, "the_deck")).toBe(true);
@@ -487,6 +496,10 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
 
       const west = await roomB.directCall("walk-west", actor, "the_deck", "west", []);
       expect(west.op).toBe("result");
+      if (west.op === "result") {
+        expect(west.result).toMatchObject({ room: "the_chatroom", look_deferred: true });
+      }
+      expect(roomBBridge.contentsCalls.get("the_chatroom") ?? 0).toBe(0);
       expect(home.object(actor).location).toBe("the_chatroom");
       expect(home.hasPresence(actor, "the_chatroom")).toBe(true);
       expect(home.hasPresence(actor, "the_deck")).toBe(false);
@@ -496,9 +509,15 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
         const observations = west.observations ?? [];
         const audiences = west.observationAudiences ?? [];
         const enteredIdx = observations.findIndex((o) => o.type === "entered");
-        const looked = observations.find((o) => o.type === "looked" && o.room === "the_chatroom");
         expect(enteredIdx).toBeGreaterThanOrEqual(0);
         expect(audiences[enteredIdx]).toContain(witness);
+        expect(observations.find((o) => o.type === "looked" && o.room === "the_chatroom")).toBeUndefined();
+      }
+
+      const look = await roomA.directCall("look-after-west", actor, "the_chatroom", "look", []);
+      expect(look.op).toBe("result");
+      if (look.op === "result") {
+        const looked = look.observations.find((o) => o.type === "looked" && o.room === "the_chatroom");
         expect(looked).toMatchObject({
           look: {
             present_actors: expect.arrayContaining([actor, witness])

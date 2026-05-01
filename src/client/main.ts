@@ -1187,6 +1187,7 @@ function enterChat() {
   direct(room, "enter", [], (result) => {
     setCurrentChatRoom(room);
     setChatPresent(result);
+    if (result?.look_deferred === true) direct(room, "look", [], applyLookResult);
     if (state.tab === "chat") render();
   });
 }
@@ -1438,6 +1439,7 @@ function pushChatLine(line: ChatLine, shouldRender = true) {
 
 function setChatPresent(result: any) {
   if (Array.isArray(result)) state.chatPresent = result.map(String);
+  if (Array.isArray(result?.present_actors)) state.chatPresent = result.present_actors.map(String);
 }
 
 function setCurrentChatRoom(room: string) {
@@ -1629,13 +1631,17 @@ function renderChatCommandResult(plan: any, result: any, originalText: string) {
     return;
   }
   if (result && typeof result === "object" && typeof result.room === "string") {
-    setCurrentChatRoom(result.room);
+    const room = result.room;
+    setCurrentChatRoom(room);
+    setChatPresent(result);
+    if (result.look_deferred === true) direct(room, "look", [], applyLookResult);
     void refresh();
     return;
   }
   if (verb === "enter") {
     if (target) setCurrentChatRoom(target);
     setChatPresent(result);
+    if (result?.look_deferred === true && target) direct(target, "look", [], applyLookResult);
     void refresh();
     return;
   }
@@ -1832,8 +1838,10 @@ function renderPinNote(note: any, editable: boolean, palette: string[]) {
   const z = pinNoteNumber(note?.z, 1);
   const color = pinboardPalette(palette).includes(String(note?.color)) ? String(note.color) : "yellow";
   const text = String(note?.text ?? "");
+  const meta = pinNoteMeta(note);
+  const aria = [text || "Pinboard note", meta.replace(/\n/g, "; ")].filter(Boolean).join("; ");
   return `
-    <article class="pin-note pin-note-${escapeHtml(color)}" data-pin-note="${escapeHtml(id)}" data-x="${x}" data-y="${y}" data-w="${w}" data-h="${h}" style="left:${x}px; top:${y}px; width:${w}px; height:${h}px; z-index:${z}">
+    <article class="pin-note pin-note-${escapeHtml(color)}" data-pin-note="${escapeHtml(id)}" data-note-meta="${escapeHtml(meta)}" title="${escapeHtml(meta)}" aria-label="${escapeHtml(aria)}" data-x="${x}" data-y="${y}" data-w="${w}" data-h="${h}" style="left:${x}px; top:${y}px; width:${w}px; height:${h}px; z-index:${z}">
       <div class="pin-note-head">
         <button class="pin-note-drag" data-pin-note-drag ${editable ? "" : "disabled"} aria-label="Move note">::</button>
         <select data-pin-note-color="${escapeHtml(id)}" ${editable ? "" : "disabled"}>${pinboardPalette(palette).map((item) => `<option value="${escapeHtml(item)}" ${item === color ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}</select>
@@ -1843,6 +1851,24 @@ function renderPinNote(note: any, editable: boolean, palette: string[]) {
       <button class="pin-note-resize" data-pin-note-resize ${editable ? "" : "disabled"} aria-label="Resize note"></button>
     </article>
   `;
+}
+
+function pinNoteMeta(note: any): string {
+  const author = typeof note?.author === "string" ? actorLabel(note.author) : "unknown";
+  const created = pinNoteTimestamp(note?.created_at);
+  const updatedBy = typeof note?.updated_by === "string" ? actorLabel(note.updated_by) : "";
+  const updated = pinNoteTimestamp(note?.updated_at);
+  const lines = [`Added by ${author}${created ? ` at ${created}` : ""}`];
+  if (updatedBy && (note?.updated_by !== note?.author || note?.updated_at !== note?.created_at)) {
+    lines.push(`Last edited by ${updatedBy}${updated ? ` at ${updated}` : ""}`);
+  }
+  return lines.join("\n");
+}
+
+function pinNoteTimestamp(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? new Date(value).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "";
 }
 
 function bindPinboard() {
@@ -2004,6 +2030,10 @@ function bindPinboardViewport() {
   stage.addEventListener("pointerdown", (event) => {
     const target = event.target as HTMLElement | null;
     if (target?.closest(".pin-note, .pinboard-zoom-controls, textarea, input, select, button")) return;
+    if (blurActivePinNoteText()) {
+      event.preventDefault();
+      return;
+    }
     active = true;
     startX = event.clientX;
     startY = event.clientY;
@@ -2029,6 +2059,15 @@ function bindPinboardViewport() {
   stage.addEventListener("pointerup", stop);
   stage.addEventListener("pointercancel", stop);
   schedulePinboardViewportPublish();
+}
+
+function blurActivePinNoteText(): boolean {
+  const active = document.activeElement;
+  if (active instanceof HTMLTextAreaElement && active.matches("[data-pin-note-text]")) {
+    active.blur();
+    return true;
+  }
+  return false;
 }
 
 function normalizedPinboardView(): PinboardView {

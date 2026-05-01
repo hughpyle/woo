@@ -2842,6 +2842,10 @@ export class WooWorld {
     return look as unknown as WooValue;
   }
 
+  private async canComposeRoomLookInline(actor: ObjRef, room: ObjRef): Promise<boolean> {
+    return !(await this.remoteHostForObject(actor)) && !(await this.remoteHostForObject(room));
+  }
+
   private async composeRoomLook(ctx: CallContext, room: ObjRef): Promise<Record<string, WooValue>> {
     const present = await this.chatPresentAsync(room, ctx.progr);
     const contents = await Promise.all((await this.objectContents(room)).filter((item) => !this.isActorForLook(item, present)).map(async (item) => ({
@@ -2979,9 +2983,13 @@ export class WooWorld {
     // which is authoritative.
     await this.moveObjectChecked(actor, room);
     ctx.observe({ type: "entered", source: room, actor, room, text: `${actorName} entered.`, ts });
-    const look = await this.composeRoomLook({ ...ctx, thisObj: room }, room);
-    await this.observeRoomLook(ctx, room, look);
-    return this.chatPresent(room);
+    const present = this.chatPresent(room);
+    if (await this.canComposeRoomLookInline(actor, room)) {
+      const look = await this.composeRoomLook({ ...ctx, thisObj: room }, room);
+      await this.observeRoomLook(ctx, room, look);
+      return present;
+    }
+    return { room, present_actors: present, look_deferred: true } as unknown as WooValue;
   }
 
   private async roomLeave(ctx: CallContext): Promise<WooValue> {
@@ -3050,9 +3058,12 @@ export class WooWorld {
     };
     if (enteredAudience !== null) (enteredObs as Record<string, unknown>)._audience_override = enteredAudience;
     ctx.observe(enteredObs);
-    const look = await this.composeRoomLook({ ...ctx, thisObj: target }, target);
-    await this.observeRoomLook(ctx, target, look);
-    return { room: target, from: ctx.thisObj, exit: exitName, title };
+    const lookDeferred = !(await this.canComposeRoomLookInline(ctx.actor, target));
+    if (!lookDeferred) {
+      const look = await this.composeRoomLook({ ...ctx, thisObj: target }, target);
+      await this.observeRoomLook(ctx, target, look);
+    }
+    return { room: target, from: ctx.thisObj, exit: exitName, title, look_deferred: lookDeferred };
   }
 
   // Returns the subscriber list for `target` excluding the acting actor when

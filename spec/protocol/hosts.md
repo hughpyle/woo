@@ -207,6 +207,15 @@ Native handlers and host primitives are held to the same rule. They must not
 hide synchronous callbacks behind "convenience" helpers. If a helper would call
 back into the origin host, return a delta or schedule a later message instead.
 
+Room movement is the canonical UI-facing example. If a direct exit call moves
+an actor to a room on another host, the source host records presence/move
+deltas and emits departure/arrival observations, but it does not synchronously
+compose the destination room's full `look` output. The result carries
+`look_deferred: true`; the client or agent asks the destination room for
+`:look()` in a separate direct call. This keeps LambdaCore-style room-generated
+output while avoiding source-host fanout through destination contents during an
+open cross-host behavior turn.
+
 #### 3.5.6 Observability and conformance
 
 Every rejected cycle emits a structured `host_cycle_rejected` log event with:
