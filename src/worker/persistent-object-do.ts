@@ -184,7 +184,15 @@ export class PersistentObjectDO {
   }
 
   private getMcpGateway(world: WooWorld): McpGateway {
-    if (!this.mcpGateway) this.mcpGateway = new McpGateway(world, { serverName: "woo" });
+    if (!this.mcpGateway) {
+      this.mcpGateway = new McpGateway(world, {
+        serverName: "woo",
+        broadcasts: {
+          broadcastApplied: (frame) => this.broadcastApplied(world, frame),
+          broadcastLiveEvents: (result) => this.broadcastLiveEvents(world, result)
+        }
+      });
+    }
     return this.mcpGateway;
   }
 

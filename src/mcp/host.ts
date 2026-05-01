@@ -10,6 +10,15 @@ import type { CallContext, NativeHandler, WooWorld } from "../core/world";
 import type { AppliedFrame, DirectResultFrame, ObjRef, Observation, WooValue } from "../core/types";
 import { directedRecipients, wooError } from "../core/types";
 
+// Broadcast hooks the runtime wires into the MCP host so that MCP-initiated
+// direct and sequenced calls fan out to attached WebSocket / SSE clients the
+// same way REST-initiated calls do. Without these, an MCP agent's chat would
+// be invisible to humans on the gateway's WS.
+export type McpBroadcastHooks = {
+  broadcastApplied?: (frame: AppliedFrame) => void | Promise<void>;
+  broadcastLiveEvents?: (result: DirectResultFrame) => void | Promise<void>;
+};
+
 const QUEUE_HARD_CAP = 4096;
 const DEFAULT_LIMIT = 64;
 const MAX_LIMIT = 256;
@@ -57,11 +66,17 @@ export class McpHost {
   private listChangedListeners = new Set<(actor: ObjRef) => void>();
   private toolListSnapshot = new Map<string, string>();
 
+  private broadcasts: McpBroadcastHooks = {};
+
   constructor(private world: WooWorld) {
     // Native handlers register ONCE per world. Subsequent McpHost instances on
     // the same world would clobber per-session queues — McpGateway owns one
     // singleton McpHost per world to avoid that footgun.
     this.installNativeHandlers();
+  }
+
+  setBroadcastHooks(hooks: McpBroadcastHooks): void {
+    this.broadcasts = hooks;
   }
 
   // ----- session lifecycle -----
@@ -338,6 +353,9 @@ export class McpHost {
         // back into this session's queue — that would deliver them twice.
         // Other sessions' queues do see them via the normal broadcast path
         // (dev-server / DO call McpHost.routeLiveEvents with originSessionId).
+        if (this.broadcasts.broadcastLiveEvents && result.audience) {
+          await this.broadcasts.broadcastLiveEvents(result);
+        }
         this.refreshToolList(sessionId, actor);
         return { result: result.result, observations: result.observations };
       } finally {
@@ -349,9 +367,7 @@ export class McpHost {
     const message = { actor, target: tool.object, verb: tool.verb, args };
     const frame = await this.world.call(undefined, sessionId, space, message);
     if (frame.op === "error") throw fromError(frame.error);
-    // Sequenced calls broadcast through broadcastApplied; broadcast wiring
-    // already routes that into MCP queues for *other* sessions. Don't enqueue
-    // here.
+    if (this.broadcasts.broadcastApplied) await this.broadcasts.broadcastApplied(frame);
     this.refreshToolList(sessionId, actor);
     const errObs = frame.observations.find((o) => o.type === "$error");
     return {

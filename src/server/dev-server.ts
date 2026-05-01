@@ -25,7 +25,13 @@ import { McpGateway } from "../mcp/gateway";
 // defer to the world's object-authoring permission checks.
 const repository = new LocalSQLiteRepository(process.env.WOO_DB ?? ".woo/dev.sqlite");
 const world = createWorld({ repository, catalogs: parseAutoInstallCatalogs(process.env.WOO_AUTO_INSTALL_CATALOGS) });
-const mcpGateway = new McpGateway(world, { serverName: "woo-dev" });
+const mcpGateway = new McpGateway(world, {
+  serverName: "woo-dev",
+  broadcasts: {
+    broadcastApplied: (frame) => broadcastApplied(frame),
+    broadcastLiveEvents: (result) => broadcastLiveEvents(result)
+  }
+});
 type AttachedSocket = { sessionId: string; actor: string; socketId: string };
 const sockets = new Map<WebSocket, AttachedSocket>();
 type RestStream = { id: string; res: http.ServerResponse; actor: ObjRef; target: ObjRef; scope: "space" | "actor" };
