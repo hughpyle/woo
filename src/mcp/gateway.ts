@@ -88,11 +88,13 @@ export class McpGateway {
   // observations reach MCP-attached agents the same way they reach WS clients.
 
   routeAppliedFrame(frame: AppliedFrame): void {
-    this.host.routeAppliedFrame(frame, null);
+    const origin = (frame as { originMcpSessionId?: string }).originMcpSessionId ?? null;
+    this.host.routeAppliedFrame(frame, origin);
   }
 
   routeLiveEvents(result: DirectResultFrame): void {
-    this.host.routeLiveEvents(result, null);
+    const origin = (result as { originMcpSessionId?: string }).originMcpSessionId ?? null;
+    this.host.routeLiveEvents(result, origin);
   }
 
   closeSession(id: string): void {

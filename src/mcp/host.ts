@@ -354,7 +354,15 @@ export class McpHost {
         // Other sessions' queues do see them via the normal broadcast path
         // (dev-server / DO call McpHost.routeLiveEvents with originSessionId).
         if (this.broadcasts.broadcastLiveEvents && result.audience) {
-          await this.broadcasts.broadcastLiveEvents(result);
+          // Tag the originating MCP session so the broadcast path can skip
+          // re-enqueueing the caller's own observations (already returned in
+          // the tool result). Other sessions still receive them.
+          (result as { originMcpSessionId?: string }).originMcpSessionId = sessionId;
+          try {
+            await this.broadcasts.broadcastLiveEvents(result);
+          } finally {
+            delete (result as { originMcpSessionId?: string }).originMcpSessionId;
+          }
         }
         this.refreshToolList(sessionId, actor);
         return { result: result.result, observations: result.observations };
@@ -367,7 +375,14 @@ export class McpHost {
     const message = { actor, target: tool.object, verb: tool.verb, args };
     const frame = await this.world.call(undefined, sessionId, space, message);
     if (frame.op === "error") throw fromError(frame.error);
-    if (this.broadcasts.broadcastApplied) await this.broadcasts.broadcastApplied(frame);
+    if (this.broadcasts.broadcastApplied) {
+      (frame as { originMcpSessionId?: string }).originMcpSessionId = sessionId;
+      try {
+        await this.broadcasts.broadcastApplied(frame);
+      } finally {
+        delete (frame as { originMcpSessionId?: string }).originMcpSessionId;
+      }
+    }
     this.refreshToolList(sessionId, actor);
     const errObs = frame.observations.find((o) => o.type === "$error");
     return {
