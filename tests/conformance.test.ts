@@ -443,6 +443,15 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       roomA.setActorPresence(actor, "the_chatroom", true);
       roomA.setSpaceSubscriber("the_chatroom", actor, true);
 
+      // Witness in the source room; should see Alice's "left" but never the
+      // destination-room "entered" event when she walks out.
+      const witness = home.auth("guest:conf-cross-host-witness").actor;
+      routes.set(witness, "home");
+      roomA.createObject({ id: witness, name: witness, parent: "$guest", owner: "$wiz" });
+      home.setActorPresence(witness, "the_chatroom", true);
+      roomA.setActorPresence(witness, "the_chatroom", true);
+      roomA.setSpaceSubscriber("the_chatroom", witness, true);
+
       const moved = await roomA.directCall("walk-se", actor, "the_chatroom", "southeast", []);
       expect(moved.op).toBe("result");
       expect(home.object(actor).location).toBe("the_deck");
@@ -451,6 +460,19 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       expect(roomA.getProp("the_chatroom", "subscribers")).not.toContain(actor);
       expect(roomB.getProp("the_deck", "subscribers")).toContain(actor);
       expect(roomB.object("the_deck").contents.has(actor)).toBe(true);
+
+      // Audience filtering: witness in source room must see "left" but not
+      // "entered" (destination-room observation must not bleed back).
+      if (moved.op === "result") {
+        const observations = moved.observations ?? [];
+        const audiences = moved.observationAudiences ?? [];
+        const leftIdx = observations.findIndex((o) => o.type === "left");
+        const enteredIdx = observations.findIndex((o) => o.type === "entered");
+        expect(leftIdx).toBeGreaterThanOrEqual(0);
+        expect(enteredIdx).toBeGreaterThanOrEqual(0);
+        expect(audiences[leftIdx]).toContain(witness);
+        expect(audiences[enteredIdx] ?? []).not.toContain(witness);
+      }
 
       const west = await roomB.directCall("walk-west", actor, "the_deck", "west", []);
       expect(west.op).toBe("result");

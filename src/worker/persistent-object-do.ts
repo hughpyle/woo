@@ -254,7 +254,28 @@ export class PersistentObjectDO {
     if (scoped && freshSeed) scoped = mergeHostScopedSeed(scoped, freshSeed);
     if (!scoped) scoped = freshSeed;
     if (!scoped) throw wooError("E_OBJNF", `no host-scoped seed for ${hostKey}`, hostKey);
-    return createWorldFromSerialized(scoped, { repository: this.repo });
+    const world = createWorldFromSerialized(scoped, { repository: this.repo });
+    this.scrubStaleSubscribersOnce(world);
+    return world;
+  }
+
+  // One-shot wipe of accumulated subscriber lists on cluster $space objects
+  // that rely on explicit enter/leave (i.e. not auto_presence). Stale entries
+  // built up before cross-host session-reap cleanup landed; live clients
+  // re-enter on next focus. Gated per-space so it only runs once per object
+  // across reboots.
+  private scrubStaleSubscribersOnce(world: WooWorld): void {
+    for (const id of Array.from(world.objects.keys())) {
+      const nextSeq = world.propOrNull(id, "next_seq");
+      if (typeof nextSeq !== "number") continue;
+      if (world.propOrNull(id, "auto_presence") === true) continue;
+      if (world.propOrNull(id, "_subscribers_scrubbed_v1") === true) continue;
+      const subscribers = world.propOrNull(id, "subscribers");
+      if (Array.isArray(subscribers) && subscribers.length > 0) {
+        try { world.setProp(id, "subscribers", []); } catch { continue; }
+      }
+      try { world.setProp(id, "_subscribers_scrubbed_v1", true); } catch { /* read-only */ }
+    }
   }
 
   private async fetchHostSeed(hostKey: ObjRef): Promise<SerializedWorld> {

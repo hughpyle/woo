@@ -1876,7 +1876,17 @@ export class WooWorld {
     const presence = this.propOrNull(actor, "presence_in");
     if (Array.isArray(presence)) {
       for (const space of presence) {
-        if (typeof space === "string" && this.objects.has(space)) this.updatePresence(actor, space, false);
+        if (typeof space !== "string") continue;
+        if (this.objects.has(space)) {
+          this.updatePresence(actor, space, false);
+        } else if (this.hostBridge) {
+          // Remote space — fire-and-forget cleanup so the remote room's
+          // subscriber list doesn't accumulate stale entries when sessions
+          // expire here.
+          void this.hostBridge.setSpaceSubscriber(space, actor, false).catch(() => {
+            // best-effort cleanup; remote may be unreachable
+          });
+        }
       }
     }
     const remaining = this.propOrNull(actor, "presence_in");
@@ -2073,6 +2083,7 @@ export class WooWorld {
       const present = this.observationAudienceActors(audience, observation) ?? [];
       observationAudiences.push(present);
       for (const actor of present) actors.add(actor);
+      delete (observation as Record<string, unknown>)._audience_override;
     }
     return {
       audienceActors: actors.size > 0 ? Array.from(actors) : undefined,
@@ -2081,6 +2092,14 @@ export class WooWorld {
   }
 
   private observationAudienceActors(fallbackAudience: ObjRef | null, observation: Observation): ObjRef[] | undefined {
+    // Per-observation audience override. Used when the source is a remote
+    // $space whose subscriber list this host can't read locally — the caller
+    // pre-fetches subscribers cross-host and stamps them here. The field is
+    // stripped from the observation by directLiveAudiences before broadcast.
+    const override = (observation as Record<string, unknown>)._audience_override;
+    if (Array.isArray(override)) {
+      return override.filter((item): item is ObjRef => typeof item === "string");
+    }
     if ((observation.type === "looked" || observation.type === "who") && typeof observation.to === "string") {
       return [observation.to];
     }
@@ -2922,6 +2941,12 @@ export class WooWorld {
     await this.updatePresenceChecked(ctx.actor, target, true);
     await this.moveObjectChecked(ctx.actor, target);
     const title = await this.titleForLook(ctx, ctx.thisObj, target);
+    // When target is on a remote host, this DO can't read its subscribers
+    // locally, so audience for the "entered" observation would fall back to
+    // this room's subscribers (wrong: source-room watchers would see the
+    // arrival). Pre-fetch authoritative subscribers from the target host and
+    // stamp them as the audience override.
+    const enteredAudience = await this.remoteRoomSubscribers(ctx, target);
     const ts = Date.now();
     ctx.observe({
       type: "left",
@@ -2933,7 +2958,7 @@ export class WooWorld {
       text: `${actorName} ${this.exitAnnouncement(exitName)}`,
       ts
     });
-    ctx.observe({
+    const enteredObs: Observation = {
       type: "entered",
       source: target,
       actor: ctx.actor,
@@ -2942,10 +2967,27 @@ export class WooWorld {
       exit: exitName,
       text: `${actorName} has arrived.`,
       ts
-    });
+    };
+    if (enteredAudience !== null) (enteredObs as Record<string, unknown>)._audience_override = enteredAudience;
+    ctx.observe(enteredObs);
     const look = await this.composeRoomLook({ ...ctx, thisObj: target }, target);
     await this.observeRoomLook(ctx, target, look);
     return { room: target, from: ctx.thisObj, exit: exitName, title };
+  }
+
+  // Returns the subscriber list for `target` excluding the acting actor when
+  // target lives on a remote host. Returns null when target is local (caller
+  // falls back to default audience computation). Errors are swallowed and
+  // produce an empty audience so callers can still emit the observation.
+  private async remoteRoomSubscribers(ctx: CallContext, target: ObjRef): Promise<ObjRef[] | null> {
+    if (!(await this.remoteHostForObject(target))) return null;
+    try {
+      const subs = await this.getPropChecked(ctx.progr, target, "subscribers");
+      if (!Array.isArray(subs)) return [];
+      return subs.filter((item): item is ObjRef => typeof item === "string" && item !== ctx.actor);
+    } catch {
+      return [];
+    }
   }
 
   private objectDisplayName(objRef: ObjRef): string {
