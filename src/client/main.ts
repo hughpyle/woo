@@ -1439,6 +1439,36 @@ function defaultLoopFreq(index: number) {
   return freqs[index - 1] ?? 220;
 }
 
+function makeSilentLoopElement(): HTMLAudioElement {
+  // 1-sample silent 8 kHz mono 8-bit WAV, looped.
+  const samples = 1;
+  const buf = new ArrayBuffer(44 + samples);
+  const view = new DataView(buf);
+  const writeAscii = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeAscii(0, "RIFF");
+  view.setUint32(4, 36 + samples, true);
+  writeAscii(8, "WAVE");
+  writeAscii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);    // PCM
+  view.setUint16(22, 1, true);    // mono
+  view.setUint32(24, 8000, true); // sample rate
+  view.setUint32(28, 8000, true); // byte rate (sampleRate * blockAlign)
+  view.setUint16(32, 1, true);    // block align
+  view.setUint16(34, 8, true);    // bits per sample
+  writeAscii(36, "data");
+  view.setUint32(40, samples, true);
+  view.setUint8(44, 0x80);        // 8-bit unsigned silence center
+  const url = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+  const audio = new Audio(url);
+  audio.setAttribute("playsinline", "");
+  audio.loop = true;
+  audio.volume = 0;
+  return audio;
+}
+
 class DubAudio {
   private context = new AudioContext();
   private gains = new Map<string, GainNode>();
@@ -1456,6 +1486,7 @@ class DubAudio {
   private sequencer?: number;
   private lastStep = -1;
   private lastStartedAt = 0;
+  private silentLoop?: HTMLAudioElement;
 
   constructor() {
     this.filter.type = "lowpass";
@@ -1472,6 +1503,11 @@ class DubAudio {
   }
 
   async start() {
+    // iOS routes Web Audio through the ringer channel (silent switch
+    // mutes it) until an <audio> element is playing inline. Looping a
+    // tiny silent WAV switches Safari to the media channel.
+    if (!this.silentLoop) this.silentLoop = makeSilentLoopElement();
+    try { await this.silentLoop.play(); } catch { /* gesture missing or blocked; AudioContext.resume below still tries */ }
     await this.context.resume();
     this.ensureSequencer();
   }
@@ -1480,6 +1516,7 @@ class DubAudio {
     for (const osc of this.oscillators.values()) osc.stop();
     this.oscillators.clear();
     this.gains.clear();
+    this.silentLoop?.pause();
     await this.context.suspend();
   }
 
