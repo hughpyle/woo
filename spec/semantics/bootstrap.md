@@ -12,9 +12,9 @@ This is the contract the implementation must produce on first start; without it,
 
 1. **Directory** is created first. Holds corename → ULID map and world metadata. Empty at boot until populated.
 2. **`$system` (`#0`)** is created with the reserved ULID `00000000000000000000000000`. `parent = null`.
-3. **Universal classes** are created in dependency order: `$root` → `$actor` → `$player` → `$wiz` / `$guest`, `$sequenced_log` → `$space` → `$thing`. v1-ops catalog-capable worlds also seed `$catalog` and `$catalog_registry` after `$space`. Corenames registered in Directory.
+3. **Remaining universal seed objects** are created in dependency order: `$root` → `$actor` → `$player` → `$wiz` / `$guest`, `$sequenced_log` → `$space`, `$thing` → `$catalog`, plus `$catalog_registry` and `$nowhere`. Corenames registered in Directory.
 4. **Configured local catalogs** are installed depending on which demos are being booted: `@local:chat`, `@local:taskspace`, and `@local:dubspace`. The normative source is the catalog manifests; bootstrap no longer hard-seeds demo classes and instances directly.
-5. **Scaffold and demo instances** are created. `$nowhere` is a bootstrap `$thing` used as the default `home` for guests being reset. `the_dubspace`, `the_taskspace`, and `the_chatroom` are created by their local catalogs with their internal anchored objects. `:add_feature` calls attach `$conversational` to `the_chatroom` and `the_taskspace` (running as wizard at boot, satisfying both attach-policy gates).
+5. **Catalog scaffold and demo instances** are created by the configured local catalogs. `the_dubspace`, `the_taskspace`, and `the_chatroom` come from catalog manifests with their internal anchored objects. `:add_feature` calls attach `$conversational` to `the_chatroom` and `the_taskspace` (running as wizard at boot, satisfying both attach-policy gates).
 6. **Guest player pool** is pre-seeded so first connections don't need to mint identities.
 
 Boot is idempotent: running it twice should be a no-op (each seed is created only if its corename isn't already mapped). This makes test setup and dev-restart trivial.
@@ -23,94 +23,110 @@ Every object created by bootstrap has a non-empty `description` value. The descr
 
 ---
 
-## B2. Universal classes
+## B2. Universal seed inventory
 
-| Corename | ULID alias | Parent | Flags | Description |
-|---|---|---|---|---|
-| `$system` | `#0` | none | wizard | Bootstrap object and world registry root. It has no parent, owns the reserved `#0` identity, carries wizard authority, and anchors corenames and world-level metadata. |
-| `$root` | `#1` | `$system` | — | Universal base class for ordinary persistent objects. It defines common descriptive slots and inherited utility verbs, so most object parent chains terminate here before reaching `$system`. |
-| `$actor` | `#2` | `$root` | — | Base class for principals that can originate messages. Actors participate in spaces through presence, appear as `message.actor`, and represent the authority behind user-facing calls. |
-| `$player` | `$actor` | — | Session-capable actor class for humans, agents, or tools connected over the wire. A player composes actor identity with session bookkeeping and attached websocket state. |
-| `$wiz` | `$player` | wizard, programmer | Seed administrator player. It carries wizard and programmer flags so the initial world can bootstrap, inspect, and repair code, schema, and seeded objects. |
-| `$guest` | `$player` | — | Reusable temporary player. Bound to a session at auth time; reset via `:on_disfunc` and returned to the free pool when its session is reaped. See [identity.md §I6.4](identity.md#i64-guest-reset-the-on_disfunc-convention). |
-| `$sequenced_log` | `$root` | — | Append-only sequenced log primitive. Owns the runtime-blessed host append/read operations, atomic seq allocation, and durable log storage. Subclassed by `$space` and other coordination shapes. See [sequenced-log.md](sequenced-log.md). |
-| `$space` | `$sequenced_log` | — | Coordination workhorse. Adds dispatch, subscribers, and applied-frame broadcast on top of the inherited log primitive. The v1 reference subclass for `:call`-shaped sequenced coordination. |
-| `$thing` | `$root` | fertile | Simple non-actor base class for persistent objects that primarily hold state. It is fertile so first-light programmers can create ordinary owned objects without a wizard-created personal superclass. Use it when an object should be addressable and programmable but should not itself originate calls. |
-| `$catalog` | `$thing` | — | v1-ops class for installed catalog records. Instances record source provenance, version, alias, owner, and created objects for introspection and uninstall. See [catalogs.md](../discovery/catalogs.md). |
-| `$catalog_registry` | `$space` | own host | v1-ops singleton space that sequences catalog install/update/uninstall operations. Its log is the catalog operations history. See [catalogs.md §CT5](../discovery/catalogs.md#ct5-install). |
+Universal seed objects are present in every world before any catalog is
+installed. They are not demo objects. `$nowhere` is included here because guest
+reset and object recycling need a stable default location even in a world with no
+local demo catalogs installed.
 
-(The "ULID alias" column shows the conventional short form. Seeded deterministic ULID allocation is the target for runtime-created objects, but the current v1 implementation uses the stable IDs declared by seed data and preserves existing IDs on reboot.)
+The current implementation uses the stable corenames below as object IDs and
+preserves existing IDs on reboot. Seeded deterministic ULID allocation remains
+the target for runtime-created objects, but it is not active in v1.
 
-### B2.0 `$system` properties
+| Corename | Kind | Parent | Owner | Flags | Own state / definitions | Own verbs | Purpose |
+|---|---|---|---|---|---|---|---|
+| `$system` | singleton | none | `$wiz` | wizard | `description`; `wizard_actions=[]`; `bootstrap_token_used=false`; `applied_migrations=[]` | `:return_guest(guest)` | Bootstrap object and world registry root. It owns the reserved `#0` identity, carries wizard authority, and anchors world-level metadata. |
+| `$root` | class | `$system` | `$wiz` | — | Defines `name`, `description`, `aliases`, `host_placement` | `:set_value(value)`, `:set_prop(name,value)`, `:describe()`, `:title()`, `:look_self()` | Universal base class for ordinary persistent objects. Most object parent chains terminate here before reaching `$system`. |
+| `$actor` | class | `$root` | `$wiz` | — | Defines `presence_in`, `features`, `features_version`, `focus_list` | `:add_feature(f)`, `:remove_feature(f)`, `:has_feature(f)`, `:wait(timeout_ms?,limit?)`, `:focus(target)`, `:unfocus(target)`, `:focus_list()` | Base class for principals that originate messages and carry actor-scoped features and MCP focus state. |
+| `$player` | class | `$actor` | `$wiz` | — | Defines `session_id`, `home` | `:on_disfunc()`, `:moveto(target)` | Session-capable actor class for humans, agents, and tools connected over the wire. |
+| `$wiz` | instance/class | `$player` | `$wiz` | wizard, programmer | Inherits player state; owns the seed graph | Inherits player/actor/root verbs | Seed administrator player used to bootstrap, inspect, and repair code, schema, and seeded objects. |
+| `$guest` | class | `$player` | `$wiz` | — | Inherits player state | Overrides `:on_disfunc()` | Reusable temporary player class. Guest instances bind to short-lived sessions and return to the free pool on reap. |
+| `$sequenced_log` | class | `$root` | `$wiz` | — | Inherits descriptive slots | Host operations `append(message)`, `read(from,limit)` | Append-only sequenced log base class. `$space` and registry-like coordination objects inherit its sequence/replay shape. |
+| `$space` | class | `$sequenced_log` | `$wiz` | — | Defines `next_seq`, `subscribers`, `last_snapshot_seq`, `features`, `features_version`, `auto_presence` | `:look_self()`, `:replay(from_seq,limit)`, `:add_feature(f)`, `:remove_feature(f)`, `:has_feature(f)` | Coordination base class: one local sequence, applied-frame history, present subscribers, and feature-extended direct verbs. |
+| `$thing` | class | `$root` | `$wiz` | fertile | Inherits descriptive slots | `:can_be_attached_by(actor)` | Simple non-actor base for addressable stateful objects. Fertile so first-light programmers can create ordinary owned objects. |
+| `$catalog` | class | `$thing` | `$wiz` | — | Defines `catalog_name`, `alias`, `version`, `tap`, `objects`, `seeds`, `provenance` | Inherits root/thing verbs | Base class for installed catalog records. Instances record provenance and created refs for introspection and uninstall planning. |
+| `$catalog_registry` | singleton space | `$space` | `$wiz` | — | Own values for `$space` state plus `installed_catalogs=[]` | `:install(manifest,frontmatter,alias,provenance)`, `:list()` | Sequenced registry space for catalog install/update/uninstall operations. See [catalogs.md §CT5](../discovery/catalogs.md#ct5-install). |
+| `$nowhere` | singleton location | `$thing` | `$wiz` | — | Own `description`; inherits descriptive slots | Inherits root/thing verbs | Universal default-home location for disconnected guests, recycled objects, and objects whose home cannot otherwise be resolved. |
 
-| Property | Type | Default | Notes |
-|---|---|---|---|
-| `wizard_actions` | list<map> | `[]` | Audit trail for privileged bootstrap and operational actions. |
-| `bootstrap_token_used` | bool | false | Records consumption of the initial wizard bootstrap token. |
-| `applied_migrations` | list<str> | `[]` | Idempotency ledger for deployment-local boot migrations, including local catalog repair migrations. See [catalogs.md §CT5.4.1](../discovery/catalogs.md#ct541-local-boot-migrations). |
+### B2.1 Common descriptive property definitions
 
-### B2.1 `$root` properties
+The `name`, `description`, and `aliases` property definitions are installed on
+`$root`, `$actor`, `$player`, `$sequenced_log`, `$space`, `$thing`, `$catalog`,
+and `$catalog_registry` so these core classes each carry their own descriptive
+slot definitions. `host_placement` is defined on `$root` and inherited by
+ordinary descendants. `$system` has its own local `description` value because it
+has no ordinary parent chain; `$nowhere` inherits descriptive slots from
+`$thing`.
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
 | `name` | str | `""` | Human-readable. Not unique. |
 | `description` | str | `""` | Long-form description. Surfaced by `:look`-like verbs. |
 | `aliases` | list<str> | `[]` | Alternate names for command/match. |
-| `host_placement` | str \| null | null | Optional host-placement hint. `self` means this object owns its own host; anchored objects route to their anchor's host. Runtime semantics do not depend on this hint in single-host deployments. |
+| `host_placement` | str \| null | null | Defined on `$root`. Optional host-placement hint. `self` means this object owns its own host; anchored objects route to their anchor's host. Runtime semantics do not depend on this hint in single-host deployments. |
 
-### B2.2 `$root` verbs
+### B2.2 `$system` own properties
+
+| Property | Type | Default | Notes |
+|---|---|---|---|
+| `description` | str | non-empty seed text | Local property value on `$system`, since `$system` has no `$root` parent to inherit a `description` slot from. |
+| `wizard_actions` | list<map> | `[]` | Audit trail for privileged bootstrap and operational actions. |
+| `bootstrap_token_used` | bool | false | Records consumption of the initial wizard bootstrap token. |
+| `applied_migrations` | list<str> | `[]` | Idempotency ledger for deployment-local boot migrations, including local catalog repair migrations. See [catalogs.md §CT5.4.1](../discovery/catalogs.md#ct541-local-boot-migrations). |
+
+### B2.3 `$root` verbs
 
 | Verb | Returns | Purpose |
 |---|---|---|
 | `:describe()` rxd | map | Introspection (see [introspection.md](introspection.md)). |
 | `:title()` rxd | str | Short identifying phrase for `:look`-style composition; default returns `this.name`. Subclasses override to add flair (e.g. `$cockatoo:title()` decorates with *"a sulphur-crested cockatoo perched on the mantelpiece"*). MOO/LambdaCore convention. |
 | `:look_self()` rxd | map | Generic object view. Default returns the object's `:title()` and actor-readable `description`. MOO/LambdaCore convention adapted to structured return values. |
-| `:on_event(event)` | — | Default observation handler; no-op. |
+| `:set_value(value)` | any | T0 fixture-style helper for simple property update verbs. |
+| `:set_prop(name, value)` | str, any | T0 fixture-style helper for simple named property update verbs. |
 
-### B2.3 `$actor` additional properties
+### B2.4 `$actor` additional properties
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
 | `presence_in` | list<obj> | `[]` | Spaces the actor is currently in. |
 | `features` | list<obj> | `[]` | Feature objects contributing verbs to this actor. See [features.md](features.md). |
 | `features_version` | int | 0 | Monotonic counter incremented on feature-list changes; used for verb-lookup cache invalidation. |
+| `focus_list` | list<obj> | `[]` | Actor-scoped list of focused objects/spaces for MCP tool discovery and agent attention. |
 
-### B2.3.1 `$actor` feature-management verbs
+### B2.5 `$actor` verbs
 
 | Verb | Args | Purpose |
 |---|---|---|
 | `:add_feature(f)` | obj | Append to `features`; idempotent. See [features.md §FT5](features.md#ft5-adding-and-removing-features). |
 | `:remove_feature(f)` | obj | Remove from `features`. |
 | `:has_feature(f)` rxd | obj | Predicate. |
+| `:wait(timeout_ms?, limit?)` rxd | int?, int? | MCP observation drain for the actor's session queue. Tool-exposed. |
+| `:focus(target)` rxd | obj | Add an object/space to `focus_list`. Tool-exposed. |
+| `:unfocus(target)` rxd | obj | Remove an object/space from `focus_list`. Tool-exposed. |
+| `:focus_list()` rxd | — | Return the current focus list. Tool-exposed. |
 
-### B2.4 `$player` additional properties
+### B2.6 `$player` additional properties
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
 | `session_id` | str \| null | null | Current session (see identity.md §I2). |
-| `home` | obj \| null | null | Where this player returns on `:on_disfunc`. Defaults `$nowhere` when null at reap time. |
+| `home` | obj \| null | `$nowhere` | Where this player returns on `:on_disfunc`. Defaults to `$nowhere` for universal players and guests. |
 
 `attached_sockets` is **not** a persistent property. Connection state is in-memory on the player host (per [identity.md §I2](identity.md#i2-three-layers-actor-session-connection)); persisting socket ids causes orphaned attachments after restart.
 
-### B2.4.1 `$player` verbs
+### B2.7 `$player` verbs
 
 | Verb | Args | Purpose |
 |---|---|---|
 | `:on_disfunc()` | — | Disfunc hook called at session reap. Default body is a no-op; `$guest` overrides. See [identity.md §I6.4](identity.md#i64-guest-reset-the-on_disfunc-convention). |
 | `:moveto(target)` | obj | Move this player to `target.contents`. Used by disfunc bodies. |
 
-### B2.4.2 `$guest` verbs
+### B2.8 `$guest` verbs
 
 `$guest:on_disfunc()` overrides the default to reset state per [identity.md §I6.4](identity.md#i64-guest-reset-the-on_disfunc-convention): eject inventory to each item's `home` (or the disconnect room, then the guest home), move the guest to `home` (or `$nowhere`), clear `description`/`aliases`/`features`, and return to the free pool via `$system:return_guest(this)`.
 
-### B2.5 `$sequenced_log` additional properties
-
-| Property | Type | Default | Notes |
-|---|---|---|---|
-| `next_seq` | int | 1 | The next seq to assign. Reserved; written only by the host append primitive. |
-| `last_snapshot_seq` | int | 0 | Highest seq covered by a snapshot. Used for snapshot triggering and log truncation. |
-
-### B2.6 `$sequenced_log` host operations
+### B2.9 `$sequenced_log` host operations
 
 These are the native log operations that back `$sequenced_log` descendants.
 They are host/repository primitives in the current implementation, not ordinary
@@ -123,16 +139,18 @@ directly on `$sequenced_log`.
 | `append(message)` | any | Native; atomically allocates a seq and persists `(seq, message)`. See [sequenced-log.md §SL2](sequenced-log.md#sl2-the-native-host-operations). |
 | `read(from, limit)` | int, int | Native; paged history read. |
 
-### B2.7 `$space` additional properties
+### B2.10 `$space` additional properties
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
+| `next_seq` | int | 1 | The next seq to assign. Reserved; written only by the host append primitive. |
 | `subscribers` | list<obj> | `[]` | Actors observing this space's applied frames. |
+| `last_snapshot_seq` | int | 0 | Highest seq covered by a snapshot. Used for snapshot triggering and log truncation. |
 | `features` | list<obj> | `[]` | Feature objects contributing verbs to this space. See [features.md](features.md). |
 | `features_version` | int | 0 | Monotonic counter; verb-lookup cache invalidation. |
 | `auto_presence` | bool | false | If true, new sessions automatically enter this space. This is a generic placement/presence policy used by bundled app spaces that should be immediately usable without an explicit `:enter`. |
 
-### B2.8 `$space` verbs
+### B2.11 `$space` verbs
 
 | Verb | Args | Purpose |
 |---|---|---|
@@ -149,21 +167,49 @@ reserved conventions until the full core grows object-level wrappers for them.
 Current presence/catalog verbs update `subscribers` directly under ordinary
 permission checks.
 
-### B2.9 v1-ops catalog registry
+### B2.12 `$thing` verbs
+
+| Verb | Args | Purpose |
+|---|---|---|
+| `:can_be_attached_by(actor)` rxd | obj | Feature-attachment policy hook. Default allows attachment; feature objects override when they need stricter policy. |
+
+### B2.13 `$catalog` additional properties
+
+| Property | Type | Default | Notes |
+|---|---|---|---|
+| `catalog_name` | str | `""` | Manifest catalog name. |
+| `alias` | str | `""` | Local install alias. |
+| `version` | str | `""` | Installed catalog version. |
+| `tap` | str | `""` | Tap or source identifier. |
+| `objects` | map | `{}` | Created class/object refs keyed by manifest-local name. |
+| `seeds` | map | `{}` | Created seed instance refs keyed by manifest-local name. |
+| `provenance` | map | `{}` | Source metadata used for audit and update decisions. |
+
+### B2.14 v1-ops catalog registry
 
 Catalog-capable worlds seed `$catalog` and `$catalog_registry` in addition to
 the v1-core universal classes. `$catalog_registry` has the normal `$space`
-properties (`next_seq`, `subscribers`, `last_snapshot_seq`, `features`,
-`features_version`) plus registry state:
+properties plus registry state:
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
 | `installed_catalogs` | list<map> | `[]` | Installed catalogs with alias, version, provenance, owner, and created-object refs. |
 
-Its native verbs are `:install(manifest, frontmatter, alias, provenance)`,
-`:uninstall(tap, catalog)`, `:update(tap, catalog, ref?, accept_major?)`, and
-`:list()` (`rxd`). All mutating verbs are wizard-only and are called through
+Its current v1 seed verbs are
+`:install(manifest, frontmatter, alias, provenance)` and `:list()` (`rxd`).
+`:uninstall(tap, catalog)` and
+`:update(tap, catalog, ref?, accept_major?)` are reserved catalog-registry verbs
+for the fuller operations surface, but they are not boot-installed yet. All
+mutating verbs are wizard-only and are called through
 `$catalog_registry:call(...)`; direct calls are denied except `:list()`.
+
+### B2.15 `$nowhere`
+
+`$nowhere` is a universal `$thing` singleton, not a demo instance. It has no
+special flags and no own verbs beyond inherited `$root`/`$thing` behavior. It is
+the default `home` for seeded players and guests, and the fallback destination
+for disconnect cleanup and recycle-like flows when no more specific home is
+available.
 
 ---
 
@@ -393,7 +439,7 @@ For the taskspace, no instances exist at boot — tasks are created at runtime b
 
 ## B7. Guest player pool
 
-A pre-seeded pool of `$guest` objects, e.g. `guest_1`..`guest_8`, exists at boot. Each has `home = $nowhere` and `parent = $guest`. When a client presents `auth { token: "guest:<random>" }`, `allocateGuest` assigns one of the unbound guest objects to the new session. The pool refills as sessions are reaped: `$guest:on_disfunc` resets the guest's state and returns it to the free pool via `$system:return_guest(this)` (identity.md §I6.4).
+A pre-seeded pool of `$guest` objects, e.g. `guest_1`..`guest_8`, exists at boot. Guest pool objects are operational seed instances, not universal classes. Each has `parent = $guest`, `owner = $wiz`, `location = $nowhere`, no special flags, a display `name` mirrored into the `name` property, a non-empty `description`, `presence_in = []`, `session_id = null`, and `home = $nowhere`. When a client presents `auth { token: "guest:<random>" }`, `allocateGuest` assigns one of the unbound guest objects to the new session. The pool refills as sessions are reaped: `$guest:on_disfunc` resets the guest's state and returns it to the free pool via `$system:return_guest(this)` (identity.md §I6.4).
 
 For the demo, 8 guests is enough for a small cohort. Real worlds would mint guests on demand or scale the pool to expected concurrent traffic. Each guest's description states that it is a pre-seeded temporary player and exists to give local users or agents a stable first-light actor.
 

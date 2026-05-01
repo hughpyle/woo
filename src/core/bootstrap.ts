@@ -83,7 +83,6 @@ export function mergeHostScopedSeed(stored: SerializedWorld, seed: SerializedWor
 
 export function bootstrap(world: WooWorld, options: BootstrapOptions = {}): WooWorld {
   seedUniversal(world);
-  seedDemoScaffold(world);
   if (options.catalogs !== false) installLocalCatalogs(world, options.catalogs);
   seedGuests(world);
   world.rebuildGuestPool();
@@ -192,6 +191,7 @@ function seedUniversal(world: WooWorld): void {
   world.object("$thing").flags.fertile = true;
   world.createObject({ id: "$catalog", name: "$catalog", parent: "$thing", owner: "$wiz" });
   world.createObject({ id: "$catalog_registry", name: "$catalog_registry", parent: "$space", owner: "$wiz" });
+  world.createObject({ id: "$nowhere", name: "$nowhere", parent: "$thing", owner: "$wiz" });
   reparentSeed(world, "$space", "$sequenced_log");
 
   for (const id of ["$root", "$actor", "$player", "$sequenced_log", "$space", "$thing", "$catalog", "$catalog_registry"]) {
@@ -211,6 +211,7 @@ function seedUniversal(world: WooWorld): void {
   describeSeed(world, "$thing", "Simple non-actor base class for persistent objects that primarily hold state. Use it when an object should be addressable and programmable but should not itself originate calls.");
   describeSeed(world, "$catalog", "Base class for installed catalog records. Catalog instances record provenance, version, alias, created class objects, and seeded instances for introspection and uninstall planning.");
   describeSeed(world, "$catalog_registry", "Sequenced registry space for catalog operations. It records which catalogs are installed, their aliases and provenance, and the object refs each catalog introduced.");
+  describeSeed(world, "$nowhere", "Universal default-home location for disconnected guests, recycled objects, and any object whose home cannot otherwise be resolved. Owned by the wizard for reset operations.");
   seedProp(world, "$system", "wizard_actions", []);
   seedProp(world, "$system", "bootstrap_token_used", false);
   seedProp(world, "$system", "applied_migrations", []);
@@ -276,11 +277,6 @@ function seedUniversal(world: WooWorld): void {
   native(world, "$space", "replay", "replay", "verb :replay(from_seq, limit) rxd { ... }", { directCallable: true });
   native(world, "$catalog_registry", "install", "catalog_registry_install", "verb :install(manifest, frontmatter, alias, provenance) rx { ... }");
   native(world, "$catalog_registry", "list", "catalog_registry_list", "verb :list() rxd { ... }", { directCallable: true });
-}
-
-function seedDemoScaffold(world: WooWorld): void {
-  world.createObject({ id: "$nowhere", name: "$nowhere", parent: "$thing", owner: "$wiz" });
-  describeSeed(world, "$nowhere", "Seed default home for disconnected guests and recycled objects. It is a quiet holding place outside active demo spaces, owned by the wizard for reset operations.");
 }
 
 function seedGuests(world: WooWorld): void {
