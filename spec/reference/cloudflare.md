@@ -36,14 +36,15 @@ The runtime stores the resolved id-to-host map in **Directory** ([§R2](#r2-sing
 
 **Carryable objects do not migrate.** When an object's `location` changes (a player carries a book between rooms, then puts it on a table), neither its host nor its Directory row changes. The book's storage stays on the host that created it; the moving host writes the object's `location` field locally and uses cross-DO RPC to update the source and target container's `contents` cache (see §R1.7). This avoids subtree migration, two-phase storage, and Directory fences for ordinary movement.
 
-**Cross-DO RPC** uses the DO stub returned from `idFromName`. The stub's methods are the inter-host RPC surface (verb dispatch, property read/write, version-checked artifact fetch, and the contents-mirror updates described below).
+**Cross-DO RPC** uses the DO stub returned from `idFromName`. The stub's methods are the inter-host RPC surface (verb dispatch, property read/write, version-checked artifact fetch, and the contents-mirror updates described below). Every awaited cross-DO RPC carries the host wait-for guard from [protocol/hosts.md §3.5](../protocol/hosts.md#35-host-wait-for-graph-and-reentrancy): `correlation_id`, `host_chain`, and `route_class`.
 
 ### R1.7 Contents-mirror invariants
 
-Every container — a room, a table, a mailbox — maintains its own `contents` set as the authoritative inverse of `obj.location`. Across DOs, that invariant is distributed:
+Every container — a room, a table, a mailbox — maintains its own `contents` set as the cached inverse of `obj.location`. Across DOs, that invariant is distributed:
 
 - The **source of truth** is `obj.location` on the object's own DO. Every move primitive writes this field transactionally on the host that owns the object.
-- The **container cache** is `container.contents`, a set of object **ids** (`ObjRef[]`) maintained on the container's host. The mover RPCs the source container's host with `contents.delete(obj_id)` and the target container's host with `contents.add(obj_id)` immediately after writing `obj.location`. The container does not store cached titles, hosts, or display data; only ids.
+- The **container cache** is `container.contents`, a set of object **ids** (`ObjRef[]`) maintained on the container's host. The container does not store cached titles, hosts, or display data; only ids.
+- **Move RPCs use owner-mutation deltas.** The object's owner host writes `obj.location` and returns `{old_location, location}` plus any mirror deltas. It must not synchronously call a container host already present in the request's `host_chain`; doing so would create an `A -> B -> A` wait cycle. The initiating host applies local mirror deltas for containers it owns after the owner write succeeds. Mirror updates to hosts not in the chain may be sent as one-way cache updates; if they fail, cache drift is tolerated.
 - **Rendering enriches at read time.** When a verb such as `:look` walks `contents`, it resolves each member's host via Directory and dispatches `:title()` (and any other display verbs) per-host. Because routes are fixed, a given member's host can be resolved from cache without a Directory round-trip in the common case.
 - **Cache drift is tolerated.** If a push fails, the cache is stale; rendering looks wrong until reconciled. A reconcile sweep — triggered on `:look` or by periodic policy — verifies each cache entry by querying the member's actual `location` (via the member's own host) and prunes ghosts. Routing and correctness are unaffected by cache drift; only rendering is.
 
@@ -264,6 +265,8 @@ Every cross-DO RPC carries:
 ```ts
 interface RpcEnvelope<T> {
   correlation_id: string;        // for idempotent retry + tracing
+  host_chain: string[];          // wait-for-cycle guard, protocol/hosts.md §3.5
+  route_class: "read" | "dispatch" | "owner_mutation" | "mirror" | "broadcast";
   caller_do: ObjRef;             // origin DO (anchor root)
   caller_actor: ObjRef;          // task.actor (sticky)
   caller_progr: ObjRef;          // current frame's progr
@@ -272,6 +275,12 @@ interface RpcEnvelope<T> {
 ```
 
 The receiver verifies `caller_progr` for permission gates; `caller_actor` is recorded in any `applied` frame the call produces.
+
+If the receiver's host id already appears in `host_chain`, accepting the call
+would create a synchronous wait cycle; the receiver rejects before running
+behavior with `E_HOST_CYCLE`. The Worker/DO adapter should normally catch the
+cycle before issuing the fetch; the receiver-side check is the backstop for
+stale or hand-written internal routes.
 
 ---
 

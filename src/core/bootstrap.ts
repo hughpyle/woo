@@ -118,6 +118,7 @@ function mergeSeedObject(current: SerializedObject, seed: SerializedObject): voi
 
   const properties = new Map(current.properties);
   const versions = new Map(current.propertyVersions);
+  const seedVersions = new Map(seed.propertyVersions);
   for (const [name, value] of seed.properties) {
     if (name === "features" && properties.has(name) && Array.isArray(properties.get(name)) && Array.isArray(value)) {
       properties.set(name, mergeUnique(properties.get(name) as string[], value.map(String)));
@@ -130,11 +131,12 @@ function mergeSeedObject(current: SerializedObject, seed: SerializedObject): voi
       continue;
     }
     if (DYNAMIC_HOST_SEED_PROPERTIES.has(name) && properties.has(name)) continue;
+    if (properties.has(name) && Number(versions.get(name) ?? 0) >= Number(seedVersions.get(name) ?? 0)) continue;
     properties.set(name, cloneSerialized(value));
   }
   for (const [name, version] of seed.propertyVersions) {
     if (DYNAMIC_HOST_SEED_PROPERTIES.has(name) && versions.has(name)) continue;
-    versions.set(name, Math.max(Number(versions.get(name) ?? 0), version));
+    if (!versions.has(name) || version > Number(versions.get(name) ?? 0)) versions.set(name, version);
   }
   current.properties = Array.from(properties.entries());
   current.propertyVersions = Array.from(versions.entries());

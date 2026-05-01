@@ -265,10 +265,37 @@ describe("local catalogs", () => {
     expect(world.getProp("the_pinboard", "notes")).toHaveLength(1);
     expect([...world.objects.keys()].filter((id) => id.includes("note"))).not.toContain("n1");
 
+    const addedAgain = await world.call("pinboard-add-2", session.id, "the_pinboard", {
+      actor: session.actor,
+      target: "the_pinboard",
+      verb: "add_note",
+      args: ["Bring the mug too", "yellow", 48, 50, 160, 88]
+    });
+    expect(addedAgain.op).toBe("applied");
+    const appendedNotes = world.getProp("the_pinboard", "notes") as Record<string, unknown>[];
+    expect(appendedNotes).toHaveLength(2);
+    expect(appendedNotes.map((item) => item.id)).toEqual(["n1", "n2"]);
+    expect(appendedNotes[0]).toMatchObject({ text: "Bring the towel to the hot tub", color: "blue" });
+    expect(appendedNotes[1]).toMatchObject({ text: "Bring the mug too", color: "yellow" });
+
+    await world.call("pinboard-add-defaults", session.id, "the_pinboard", {
+      actor: session.actor,
+      target: "the_pinboard",
+      verb: "add_note",
+      args: ["Default-position note", "green"]
+    });
+    const defaultedNotes = world.getProp("the_pinboard", "notes") as Record<string, unknown>[];
+    expect(defaultedNotes).toHaveLength(3);
+    expect(defaultedNotes.map((item) => item.id)).toEqual(["n1", "n2", "n3"]);
+    expect(defaultedNotes[2]).toMatchObject({ text: "Default-position note", color: "green", x: 112, y: 100 });
+
     await world.call("pinboard-move", session.id, "the_pinboard", { actor: session.actor, target: "the_pinboard", verb: "move_note", args: ["n1", 80, 96] });
     await world.call("pinboard-edit", session.id, "the_pinboard", { actor: session.actor, target: "the_pinboard", verb: "edit_note", args: ["n1", "Towel is ready"] });
     const notes = world.getProp("the_pinboard", "notes") as Record<string, unknown>[];
+    expect(notes).toHaveLength(3);
     expect(notes[0]).toMatchObject({ id: "n1", text: "Towel is ready", x: 80, y: 96, updated_by: session.actor });
+    expect(notes[1]).toMatchObject({ id: "n2", text: "Bring the mug too" });
+    expect(notes[2]).toMatchObject({ id: "n3", text: "Default-position note" });
   });
 
   it("seeds the_cockatoo in the chatroom with random-pick squawk", async () => {

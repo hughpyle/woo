@@ -33,6 +33,7 @@ Each row cites its primary doc. This document only adds context not already cove
 | Memory exhaustion | task exceeds memory cap | `$error` `E_MEM` in applied | as behavior failure | applied with error | refactor verb; monotone budget | [vm.md §8.5](vm.md#85-memory-metering) |
 | Wall-time exceeded | task exceeds wall budget | `$error` `E_TIMEOUT` in applied | as behavior failure | applied with error | refactor verb; monotone clock | [vm.md §8.7](vm.md#87-wall-time-budget) |
 | Cross-host RPC timeout | receiver doesn't reply within deadline | `E_TIMEOUT` | originating task aborts; no cleanup of receiver | possible torn target state | retry with same id; gap recovery | [hosts.md §3.4 (6)](../protocol/hosts.md#34-host-rpc-invariants) |
+| Host wait-for cycle | awaited host RPC would re-enter a host already in the request chain | `E_HOST_CYCLE` | RPC rejected before adding the wait edge | no new remote side effects | return deltas, schedule a later message, or refactor to local dispatch | [hosts.md §3.5](../protocol/hosts.md#35-host-wait-for-graph-and-reentrancy) |
 | Receiver crash mid-call | host crashes during behavior | `E_TIMEOUT` to originator | receiver tasks not in `task` table are lost; in-table tasks survive | possibly partial mutations on target | tooling-driven cleanup | [hosts.md §3.4 (5)](../protocol/hosts.md#34-host-rpc-invariants) |
 | Originator crash/hibernation mid-RPC | host disappears while awaiting reply | n/a | uncheckpointed running task is lost; no applied frame returned | local pre-commit state restored by restart | caller retry | [tasks.md §16.3](tasks.md#163-cross-host-rpc) |
 | Network partition | originator can't reach receiver | `E_TIMEOUT` | originator times out; receiver may still apply | receiver may complete | retry; gap recovery covers any duplicate | [hosts.md §3.4 (6)](../protocol/hosts.md#34-host-rpc-invariants) |
@@ -66,13 +67,14 @@ These rules together preserve replay determinism: the log is faithful, the rolle
 
 ## F4. Cross-host failures and the migration invariants
 
-The invariants in [hosts.md §3.4](../protocol/hosts.md#34-host-rpc-invariants) cover the cross-host failure surface:
+The invariants in [hosts.md §3.4](../protocol/hosts.md#34-host-rpc-invariants) and [hosts.md §3.5](../protocol/hosts.md#35-host-wait-for-graph-and-reentrancy) cover the cross-host failure surface:
 
 1. One-task-one-host.
 2. Idempotency via correlation id.
 3. Originator authoritative for transient-host returns.
 4. Bytecode versioning on serialized tasks.
 5. Mid-task host crash leaves only `task`-table-resident state.
+6. No synchronous host cycles; `host_chain` prevents `A -> B -> A` and `A -> A` waits.
 
 The failure-mode table above maps these to concrete observables. Two follow-up notes:
 

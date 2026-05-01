@@ -48,9 +48,7 @@ claims; those remain authoritative on the actor's home host.
 
 The protocol-level invariants that make cross-host execution sound:
 
-**1. Origin owns the continuation.** A task's caller continuation stays on the origin host while a remote dispatch is in flight. The receiver owns only the callee frame it was asked to run and returns a value plus observations.
-
-The corollary: while host A awaits a response from host B, the receiver (B) must not synchronously call back into A — A's host queue is single-threaded, the active task holds it, and the callback would deadlock. Operations on B that need to update A's state (e.g. mirroring a container's contents on the originator after a cross-host move) must instead carry a `suppress` hint identifying the originator, omit the loop-back RPC, and return enough information for the originator to apply the update locally after the response. The move-object RPC carries `suppress_mirror_host` and returns `{old_location, location}`; new cross-host operations that have a similar A→B→A shape must follow the same convention.
+**1. Origin owns the continuation.** A task's caller continuation stays on the origin host while a remote dispatch is in flight. The receiver owns only the callee frame it was asked to run and returns a value plus observations. The wait-for-cycle rule in §3.5 is the corollary: while host A awaits host B, B must not synchronously call back into A.
 
 **2. Idempotency via correlation id.** Every cross-host RPC carries a `correlation_id`. Receivers maintain a recent-replies cache (TTL ~5 minutes) keyed by correlation id. A duplicate request returns the cached reply rather than re-executing. Transient network failures with retries are therefore safe.
 
@@ -69,3 +67,162 @@ The corollary: while host A awaits a response from host B, the receiver (B) must
 | Network partition | Same as receiver crash from originator's view. |
 | Duplicate reply | Originator drops the duplicate (correlation id seen). |
 | Version skew | `E_VERSION` raised; task aborts cleanly. |
+
+**7. No synchronous host cycles.** A host must not issue an awaited RPC that
+would cause the current request's host wait-for graph to contain a cycle. This
+includes the trivial same-host case: a behavior turn may not enqueue another
+behavior turn on its own host and then wait for it. See §3.5.
+
+### 3.5 Host wait-for graph and reentrancy
+
+This is the guardrail that preserves the LambdaMOO execution model after the
+world is split across hosts.
+
+In LambdaMOO, a running task owns one database turn until it returns or
+explicitly suspends. In woo, the database is distributed, but the same
+programming rule remains: while a behavior turn is open, awaited host RPC must
+form an acyclic wait chain. A host already waiting for another host cannot be
+re-entered by that same request.
+
+#### 3.5.1 Definitions
+
+- A **behavior turn** is a queued execution of user-visible behavior on a host:
+  direct verb dispatch, sequenced `$space:call` behavior, parked-task resume, or
+  VM continuation resume.
+- A **synchronous host RPC** is an RPC whose caller cannot complete the current
+  behavior turn until the callee returns.
+- A **wait edge** `A -> B` exists while host `A` is awaiting a synchronous RPC
+  response from host `B`.
+- A **host cycle** exists if adding `A -> B` would make any host reachable from
+  itself. The most common cycle is `A -> B -> A`; same-host self-enqueue is
+  `A -> A`.
+
+Every synchronous host RPC carries:
+
+```ts
+type HostRouteClass =
+  | "read"
+  | "dispatch"
+  | "owner_mutation"
+  | "mirror"
+  | "broadcast";
+
+{
+  correlation_id: string,
+  host_chain: string[],       // hosts already entered by this request, oldest first
+  route_class: HostRouteClass // see §3.5.3
+}
+```
+
+Before a host issues a synchronous RPC to `target_host`, it must check
+`host_chain`. If `target_host` is already present, the runtime must reject the
+operation with `E_HOST_CYCLE` before issuing the RPC. It must not wait for the
+platform to time out, hit a subrequest-depth limit, or deadlock an in-memory
+queue.
+
+The receiving host appends itself to `host_chain` while processing the request.
+The chain is diagnostic as well as protective; logs and traces should include
+it whenever an RPC fails.
+
+#### 3.5.2 Same-host reentrancy
+
+The host queue is not a recursive lock. A behavior turn already running on host
+`H` may call helper code directly, and may dispatch another verb frame through
+the VM's ordinary in-process dispatch path. It may not call the public
+host-entry path for `H` and await the result.
+
+Examples:
+
+- OK: `CALL_VERB` resolves to a local object and the runtime enters
+  `dispatch()` directly, extending the current activation stack.
+- Not OK: native behavior calls `directCall()` or `$space:call()` on the same
+  host through the external queue, then awaits it. That is `H -> H` and must
+  fail with `E_HOST_CYCLE` or use a local dispatch primitive instead.
+- OK: behavior schedules a later message (`FORK`, alarm, or sequenced message)
+  and returns. The later turn is a new request, not a reentrant wait.
+
+#### 3.5.3 Route classes
+
+Host RPC routes must be classified so implementers know which routes can be
+used inside behavior and which are only post-turn effects.
+
+| Route class | Examples | May enqueue behavior? | May mutate authoritative state? | Cycle rule |
+|---|---|---:|---:|---|
+| `read` | remote property read, contents read, title metadata fetch | No | No | Acyclic synchronous RPC only |
+| `dispatch` | remote `CALL_VERB`, direct verb call routed to object host | Yes | Yes, on callee host | Acyclic synchronous RPC only |
+| `owner_mutation` | move object's authoritative `location`, recycle owned object | No user behavior | Yes, on owner host | Acyclic; must not callback into any host in chain |
+| `mirror` | update `container.contents`, subscriber cache, presence mirror | No | Cache only | One-way; if target host is in chain, caller applies locally or defers |
+| `broadcast` | WS/SSE/MCP fanout, metrics, live observation delivery | No | No correctness state | Best-effort; outside behavior correctness path |
+
+No route may be left unclassified. A new internal route without a route class is
+a spec violation because it hides whether it can participate in a wait cycle.
+
+#### 3.5.4 Owner mutation returns deltas
+
+The safe pattern for cross-host mutation is:
+
+1. Caller asks the authoritative owner host to perform one mutation.
+2. Owner writes its local source-of-truth state.
+3. Owner returns facts/deltas needed by other hosts.
+4. Caller applies any cache updates it owns, and forwards or defers other
+   one-way cache updates.
+
+The owner must not synchronously call back into a host already present in
+`host_chain`. This rule is stronger than "avoid deadlock": it keeps the
+direction of authority clear. The owner owns the authoritative write; containers
+and observers own non-authoritative mirrors.
+
+Canonical example: moving an object.
+
+```ts
+// request to object owner
+moveObject(obj, target, { suppress_mirror_hosts: host_chain })
+
+// owner writes:
+obj.location = target
+
+// owner returns:
+{ old_location, location: target, mirror_deltas: [...] }
+```
+
+If `old_location` or `target` is hosted by the caller, the caller applies the
+contents-mirror update locally after the owner write succeeds. If a different
+host owns one of those containers and is not in the chain, the caller or owner
+may send a one-way `mirror` RPC to that host. If delivery fails, the cache may
+drift; routing and source-of-truth state are still correct.
+
+#### 3.5.5 Author implications
+
+Object authors do not get arbitrary synchronous cross-host I/O. They get the
+ordinary language primitives:
+
+- local `CALL_VERB` composes activation frames on the same host;
+- remote `CALL_VERB` is an awaited `dispatch` RPC and may raise
+  `E_HOST_CYCLE` if it would re-enter the wait chain;
+- raw remote property writes remain `E_CROSS_HOST_WRITE`;
+- long-running cross-host coordination is expressed as messages, parked tasks,
+  or sequenced calls, not as callbacks inside an open behavior turn.
+
+Native handlers and host primitives are held to the same rule. They must not
+hide synchronous callbacks behind "convenience" helpers. If a helper would call
+back into the origin host, return a delta or schedule a later message instead.
+
+#### 3.5.6 Observability and conformance
+
+Every rejected cycle emits a structured `host_cycle_rejected` log event with:
+
+- `correlation_id`
+- `route_class`
+- `from_host`
+- `target_host`
+- `host_chain`
+- `actor`, when known
+- `target` / `verb`, when applicable
+
+The conformance suite must include:
+
+1. `A -> B -> A` owner-mutation mirror suppression.
+2. `A -> A` same-host queued self-call rejection.
+3. Acyclic `A -> B -> C` RPC succeeds when each route class permits it.
+4. `E_HOST_CYCLE` surfaces as a behavior failure if attempted from inside a
+   sequenced call and as a direct error if attempted from a direct call.

@@ -585,13 +585,38 @@ describe("woo core", () => {
     const reloaded = createWorldFromSerialized(merged, { persist: false });
 
     expect(reloaded.object("the_chatroom").name).toBe("Living Room");
-    expect(reloaded.getProp("the_chatroom", "name")).toBe("Living Room");
+    expect(reloaded.getProp("the_chatroom", "name")).toBe("Lobby");
     expect(reloaded.getProp("the_chatroom", "subscribers")).toEqual([session.actor]);
     expect(reloaded.getProp("the_chatroom", "next_seq")).toBe(42);
     expect(reloaded.object("the_lamp").location).toBe("the_chatroom");
     expect(reloaded.object("the_chatroom").contents.has("the_lamp")).toBe(true);
     expect(reloaded.object("the_mug").location).toBe("the_chatroom");
     expect(reloaded.object("the_chatroom").contents.has("the_mug")).toBe(true);
+  });
+
+  it("merges fresh host seed without overwriting authored host-state properties", () => {
+    const storedWorld = createWorld();
+    storedWorld.setProp("the_pinboard", "notes", [
+      { id: "n1", text: "keep me", color: "yellow", x: 48, y: 48, w: 180, h: 110, z: 1 }
+    ]);
+    storedWorld.setProp("the_pinboard", "next_note_id", 2);
+    storedWorld.setProp("the_pinboard", "next_z", 2);
+
+    const freshWorld = createWorld();
+    const storedScoped = nonEmptyHostScopedWorld(storedWorld.exportWorld(), "the_pinboard");
+    const freshScoped = nonEmptyHostScopedWorld(freshWorld.exportWorld(), "the_pinboard");
+    expect(storedScoped).not.toBeNull();
+    expect(freshScoped).not.toBeNull();
+
+    const merged = mergeHostScopedSeed(storedScoped!, freshScoped!);
+    const reloaded = createWorldFromSerialized(merged, { persist: false });
+
+    expect(reloaded.getProp("the_pinboard", "notes")).toEqual([
+      { id: "n1", text: "keep me", color: "yellow", x: 48, y: 48, w: 180, h: 110, z: 1 }
+    ]);
+    expect(reloaded.getProp("the_pinboard", "next_note_id")).toBe(2);
+    expect(reloaded.getProp("the_pinboard", "next_z")).toBe(2);
+    expect(reloaded.object("$pinboard").verbs.get("add_note")).toBeDefined();
   });
 
   it("normalizes legacy d permission shorthand while importing worlds", async () => {

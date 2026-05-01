@@ -162,11 +162,19 @@ test("pinboard supports shared text notes", async ({ page }) => {
   await page.locator("[data-pinboard-new-color]").selectOption("blue");
   await page.locator("[data-pinboard-create]").getByRole("button", { name: "Add Note" }).click();
   await expect(page.locator(".pin-note")).toHaveCount(1);
-  await expect(page.locator(".pin-note")).toContainText("Bring the towel to the hot tub");
+  await expect(page.locator(".pinboard-stage")).toContainText("Bring the towel to the hot tub");
 
-  await page.locator("[data-pin-note-text]").fill("Towel is ready");
-  await page.locator("[data-pin-note-text]").blur();
-  await expect(page.locator(".pin-note")).toContainText("Towel is ready");
+  await page.locator("[data-pinboard-new-text]").fill("Bring the mug too");
+  await page.locator("[data-pinboard-new-color]").selectOption("yellow");
+  await page.locator("[data-pinboard-create]").getByRole("button", { name: "Add Note" }).click();
+  await expect(page.locator(".pin-note")).toHaveCount(2);
+  await expect(page.locator(".pinboard-stage")).toContainText("Bring the towel to the hot tub");
+  await expect(page.locator(".pinboard-stage")).toContainText("Bring the mug too");
+
+  await page.locator("[data-pin-note-text]").first().fill("Towel is ready");
+  await page.locator("[data-pin-note-text]").first().blur();
+  await expect(page.locator(".pinboard-stage")).toContainText("Towel is ready");
+  await expect(page.locator(".pinboard-stage")).toContainText("Bring the mug too");
 });
 
 test("chat controls follow room membership", async ({ page }) => {
