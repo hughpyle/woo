@@ -78,6 +78,7 @@ export type CallContext = {
   observations: Observation[];
   observe(event: Observation): void;
   deferHostEffect?(effect: DeferredHostEffect): void;
+  hostMemo?: HostOperationMemo;
 };
 
 export type DeferredHostEffect =
@@ -87,21 +88,32 @@ export type DeferredHostEffect =
 
 export type HostBridge = {
   localHost: string;
-  hostForObject(id: ObjRef): string | null | Promise<string | null>;
-  getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue>;
-  location(objRef: ObjRef): Promise<ObjRef | null>;
+  hostForObject(id: ObjRef, memo?: HostOperationMemo): string | null | Promise<string | null>;
+  getPropChecked(progr: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue>;
+  location(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef | null>;
   dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue>;
   moveObject(objRef: ObjRef, targetRef: ObjRef, options?: { suppressMirrorHost?: string | null }): Promise<MoveObjectResult>;
   mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): Promise<void>;
   setActorPresence(actor: ObjRef, space: ObjRef, present: boolean): Promise<void>;
   setSpaceSubscriber(space: ObjRef, actor: ObjRef, present: boolean): Promise<void>;
-  contents(objRef: ObjRef): Promise<ObjRef[]>;
+  contents(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef[]>;
   // Cross-host MCP reachability (spec/protocol/mcp.md §M3). Asks the host
   // owning each id for tool descriptors covering that id's tool-exposed verbs
   // plus the verbs of its current contents (when id is a $space). Optional —
   // hosts that don't run an MCP gateway can omit it.
   enumerateRemoteTools?(actor: ObjRef, ids: ObjRef[]): Promise<RemoteToolDescriptor[]>;
 };
+
+export type HostOperationMemo = {
+  routes: Map<ObjRef, Promise<string | null>>;
+  // Read promises are scoped to one execution frame. They intentionally behave
+  // like a frame snapshot, not a coherence mechanism after remote mutation.
+  reads: Map<string, Promise<unknown>>;
+};
+
+export function createHostOperationMemo(): HostOperationMemo {
+  return { routes: new Map(), reads: new Map() };
+}
 
 export type MoveObjectResult = {
   oldLocation: ObjRef | null;
@@ -228,12 +240,12 @@ export class WooWorld {
     this.nativeHandlers.set(name, handler);
   }
 
-  async isRemoteObject(objRef: ObjRef): Promise<boolean> {
-    return (await this.remoteHostForObject(objRef)) !== null;
+  async isRemoteObject(objRef: ObjRef, memo?: HostOperationMemo): Promise<boolean> {
+    return (await this.remoteHostForObject(objRef, memo)) !== null;
   }
 
-  private async remoteHostForObject(objRef: ObjRef): Promise<string | null> {
-    const host = await (this.hostBridge?.hostForObject(objRef) ?? null);
+  private async remoteHostForObject(objRef: ObjRef, memo?: HostOperationMemo): Promise<string | null> {
+    const host = await (this.hostBridge?.hostForObject(objRef, memo) ?? null);
     if (!host || host === this.hostBridge?.localHost) return null;
     return host;
   }
@@ -443,10 +455,10 @@ export class WooWorld {
     return this.canBypassPerms(progr) || info.owner === progr || String(info.perms).includes("w");
   }
 
-  async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue> {
-    if (await this.remoteHostForObject(objRef)) {
+  async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue> {
+    if (await this.remoteHostForObject(objRef, memo)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
-      return await this.hostBridge.getPropChecked(progr, objRef, name);
+      return await this.hostBridge.getPropChecked(progr, objRef, name, memo);
     }
     if (!this.canReadProperty(progr, objRef, name)) {
       throw wooError("E_PERM", `${progr} cannot read ${objRef}.${name}`, { progr, obj: objRef, property: name });
@@ -844,6 +856,7 @@ export class WooWorld {
         definer: target,
         message,
         observations,
+        hostMemo: createHostOperationMemo(),
         observe: (event) => {
           observations.push({ ...event, source: event.source ?? target });
         },
@@ -938,6 +951,7 @@ export class WooWorld {
         definer: message.target,
         message,
         observations,
+        hostMemo: createHostOperationMemo(),
         observe: (event) => {
           observations.push({ ...event, source: event.source ?? space.id });
         }
@@ -1016,6 +1030,7 @@ export class WooWorld {
           definer: message.target,
           message,
           observations,
+          hostMemo: createHostOperationMemo(),
           observe: (event) => {
             observations.push({ ...event, source: event.source ?? space.id });
           }
@@ -1068,7 +1083,7 @@ export class WooWorld {
   }
 
   async dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue> {
-    if (await this.remoteHostForObject(target) || (startAt ? await this.remoteHostForObject(startAt) : false)) {
+    if (await this.remoteHostForObject(target, ctx.hostMemo) || (startAt ? await this.remoteHostForObject(startAt, ctx.hostMemo) : false)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
       return await this.hostBridge.dispatch(ctx, target, verbName, args, startAt);
     }
@@ -1206,14 +1221,14 @@ export class WooWorld {
 
   async moveAuthoredObjectChecked(actor: ObjRef, objRef: ObjRef, targetRef: ObjRef, ctx?: CallContext): Promise<void> {
     this.assertCanAuthorObject(actor, objRef);
-    const objRemote = await this.remoteHostForObject(objRef);
+    const objRemote = await this.remoteHostForObject(objRef, ctx?.hostMemo);
     if (ctx?.deferHostEffect && objRemote) {
-      if (!await this.remoteHostForObject(targetRef)) this.object(targetRef);
+      if (!await this.remoteHostForObject(targetRef, ctx.hostMemo)) this.object(targetRef);
       this.mirrorRemoteMoveLocally(objRef, targetRef);
       ctx.deferHostEffect({ kind: "move_object", obj: objRef, target: targetRef, suppress_mirror_host: this.hostBridge?.localHost ?? null });
       return;
     }
-    if (!await this.remoteHostForObject(targetRef)) this.object(targetRef);
+    if (!await this.remoteHostForObject(targetRef, ctx?.hostMemo)) this.object(targetRef);
     await this.moveObjectChecked(objRef, targetRef);
   }
 
@@ -1293,22 +1308,22 @@ export class WooWorld {
     }
   }
 
-  async objectLocationChecked(objRef: ObjRef): Promise<ObjRef | null> {
-    const remote = await this.remoteHostForObject(objRef);
+  async objectLocationChecked(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef | null> {
+    const remote = await this.remoteHostForObject(objRef, memo);
     if (!remote) return this.object(objRef).location;
     if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
-    return await this.hostBridge.location(objRef);
+    return await this.hostBridge.location(objRef, memo);
   }
 
   async observeToSpace(ctx: CallContext, space: ObjRef, event: Observation): Promise<void> {
     const type = assertString(event.type);
     const observation: Observation = { ...event, type, source: event.source ?? space };
-    const remote = await this.remoteHostForObject(space);
+    const remote = await this.remoteHostForObject(space, ctx.hostMemo);
     if (!remote) {
       if (!this.inheritsFrom(space, "$space")) throw wooError("E_TYPE", `${space} is not a space`, space);
     } else {
       try {
-        const subscribers = await this.getPropChecked(ctx.progr, space, "subscribers");
+        const subscribers = await this.getPropChecked(ctx.progr, space, "subscribers", ctx.hostMemo);
         if (Array.isArray(subscribers)) {
           (observation as Record<string, WooValue>)._audience_override = subscribers.filter((item): item is ObjRef => typeof item === "string");
         }
@@ -2158,6 +2173,7 @@ export class WooWorld {
       definer: feature,
       message,
       observations,
+      hostMemo: createHostOperationMemo(),
       observe: () => {
         // Attachment-policy checks are predicates; observations are ignored.
       }
@@ -2437,6 +2453,7 @@ export class WooWorld {
         definer: target,
         message,
         observations,
+        hostMemo: createHostOperationMemo(),
         observe: (event) => {
           observations.push({ ...event, source: event.source ?? hostSpace });
         }
@@ -2849,7 +2866,7 @@ export class WooWorld {
       const homeValue = this.propOrNull(ctx.thisObj, "home");
       const home = typeof homeValue === "string" && this.objects.has(homeValue) ? homeValue : "$nowhere";
       const fallback = this.guestInventoryFallback(ctx.thisObj, home);
-      const carried = await this.objectContents(ctx.thisObj);
+      const carried = await this.objectContents(ctx.thisObj, ctx.hostMemo);
       for (const item of carried) await this.moveObjectChecked(item, this.inventoryEjectTarget(item, fallback));
       await this.moveObjectChecked(ctx.thisObj, home);
       this.setProp(ctx.thisObj, "description", "");
@@ -2950,14 +2967,14 @@ export class WooWorld {
   private async composeRoomLook(ctx: CallContext, room: ObjRef): Promise<Record<string, WooValue>> {
     const startedAt = Date.now();
     const present = await this.chatPresentAsync(room, ctx.progr);
-    const items = (await this.objectContents(room)).filter((item) => !this.isActorForLook(item, present));
+    const items = (await this.objectContents(room, ctx.hostMemo)).filter((item) => !this.isActorForLook(item, present));
     let remoteTitles = 0;
     const contents = await Promise.all(items.map(async (item) => {
-      if (await this.remoteHostForObject(item)) remoteTitles += 1;
+      if (await this.remoteHostForObject(item, ctx.hostMemo)) remoteTitles += 1;
       return {
         id: item,
         title: await this.titleForLook(ctx, room, item),
-        description: await this.propOrNullForActorAsync(ctx.actor, item, "description")
+        description: await this.propOrNullForActorAsync(ctx.actor, item, "description", ctx.hostMemo)
       };
     }));
     const look = {
@@ -2971,10 +2988,10 @@ export class WooWorld {
     return look;
   }
 
-  private async objectContents(objRef: ObjRef): Promise<ObjRef[]> {
-    if (await this.remoteHostForObject(objRef)) {
+  private async objectContents(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef[]> {
+    if (await this.remoteHostForObject(objRef, memo)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
-      return await this.hostBridge.contents(objRef);
+      return await this.hostBridge.contents(objRef, memo);
     }
     return Array.from(this.object(objRef).contents);
   }
@@ -2984,9 +3001,9 @@ export class WooWorld {
     return this.objects.has(item) && this.inheritsFrom(item, "$actor");
   }
 
-  private async propOrNullForActorAsync(actor: ObjRef, objRef: ObjRef, name: string): Promise<WooValue> {
+  private async propOrNullForActorAsync(actor: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue> {
     try {
-      return await this.getPropChecked(actor, objRef, name);
+      return await this.getPropChecked(actor, objRef, name, memo);
     } catch {
       return null;
     }
@@ -3008,7 +3025,7 @@ export class WooWorld {
   private async roomLookText(ctx: CallContext, look: Record<string, WooValue>): Promise<string> {
     const lines = [String(look.description ?? "")];
     const present = Array.isArray(look.present_actors) ? look.present_actors.filter((item): item is ObjRef => typeof item === "string") : [];
-    const presentNames = await Promise.all(present.map((actor) => this.objectDisplayNameAsync(ctx.progr, actor)));
+    const presentNames = await Promise.all(present.map((actor) => this.objectDisplayNameAsync(ctx.progr, actor, ctx.hostMemo)));
     lines.push(`Present: ${presentNames.join(", ") || "nobody"}.`);
     const contents = Array.isArray(look.contents) ? look.contents : [];
     const things = contents
@@ -3025,7 +3042,7 @@ export class WooWorld {
 
   private async roomWho(ctx: CallContext): Promise<WooValue> {
     const present = this.chatPresent(ctx.thisObj);
-    const presentNames = await Promise.all(present.map((actor) => this.objectDisplayNameAsync(ctx.progr, actor)));
+    const presentNames = await Promise.all(present.map((actor) => this.objectDisplayNameAsync(ctx.progr, actor, ctx.hostMemo)));
     ctx.observe({
       type: "who",
       source: ctx.thisObj,
@@ -3046,9 +3063,9 @@ export class WooWorld {
     // very call that is now trying to call back. Until host-queue re-entrancy
     // (or durable awaiting_call parking) lands, fall back to a property read
     // of `name` (cross-host but queue-free) instead of the recursive dispatch.
-    if (await this.remoteHostForObject(item)) {
+    if (await this.remoteHostForObject(item, ctx.hostMemo)) {
       try {
-        const name = await this.getPropChecked(ctx.progr, item, "name");
+        const name = await this.getPropChecked(ctx.progr, item, "name", ctx.hostMemo);
         if (typeof name === "string" && name.length > 0) return name;
       } catch {
         // E_PROPNF / E_PERM — fall through to id.
@@ -3072,10 +3089,10 @@ export class WooWorld {
   // carries `name = id` rather than the authoritative display name, so we
   // always RPC to the owning host when the object is remote — even when a
   // stub happens to be present locally.
-  private async objectDisplayNameAsync(progr: ObjRef, objRef: ObjRef): Promise<string> {
-    if (await this.remoteHostForObject(objRef)) {
+  private async objectDisplayNameAsync(progr: ObjRef, objRef: ObjRef, memo?: HostOperationMemo): Promise<string> {
+    if (await this.remoteHostForObject(objRef, memo)) {
       try {
-        const name = await this.getPropChecked(progr, objRef, "name");
+        const name = await this.getPropChecked(progr, objRef, "name", memo);
         if (typeof name === "string" && name.length > 0) return name;
       } catch {
         // E_PROPNF / E_PERM — fall through to id.
@@ -3090,7 +3107,7 @@ export class WooWorld {
     const room = ctx.thisObj;
     const name = rawName.trim();
     if (!name) throw wooError("E_INVARG", "take requires an object name");
-    const match = await this.matchObjectInCandidatesAsync(ctx, name, await this.objectContents(room));
+    const match = await this.matchObjectInCandidatesAsync(ctx, name, await this.objectContents(room, ctx.hostMemo));
     if (match.status !== "ok") throw wooError("E_INVARG", `I don't see "${name}" here.`, name);
     const item = match.value;
     if (item === ctx.actor || (this.objects.has(item) && this.inheritsFrom(item, "$actor"))) throw wooError("E_PERM", "actors are not carryable", item);
@@ -3108,7 +3125,7 @@ export class WooWorld {
     const room = ctx.thisObj;
     const name = rawName.trim();
     if (!name) throw wooError("E_INVARG", "drop requires an object name");
-    const match = await this.matchObjectInCandidatesAsync(ctx, name, await this.objectContents(ctx.actor));
+    const match = await this.matchObjectInCandidatesAsync(ctx, name, await this.objectContents(ctx.actor, ctx.hostMemo));
     if (match.status !== "ok") throw wooError("E_INVARG", `You are not carrying "${name}".`, name);
     const item = match.value;
     await this.moveObjectChecked(item, room);
@@ -3130,9 +3147,9 @@ export class WooWorld {
   }
 
   private async isPortableFor(ctx: CallContext, objRef: ObjRef): Promise<boolean> {
-    if (!await this.remoteHostForObject(objRef)) return this.isPortable(objRef);
+    if (!await this.remoteHostForObject(objRef, ctx.hostMemo)) return this.isPortable(objRef);
     try {
-      return await this.getPropChecked(ctx.progr, objRef, "portable") === true;
+      return await this.getPropChecked(ctx.progr, objRef, "portable", ctx.hostMemo) === true;
     } catch (err) {
       if (normalizeError(err).code !== "E_PROPNF") throw err;
       return false;
@@ -3345,7 +3362,7 @@ export class WooWorld {
           // A stale contents cache entry should not make matching fail.
         }
         try {
-          const remoteAliases = await this.getPropChecked(ctx.progr, id, "aliases");
+          const remoteAliases = await this.getPropChecked(ctx.progr, id, "aliases", ctx.hostMemo);
           if (Array.isArray(remoteAliases)) aliases.push(...remoteAliases.map((item) => String(item)));
         } catch {
           // Aliases are optional for matching.

@@ -25,6 +25,15 @@ multiple DOs.
 
 Online demo: https://woo.hughpyle.workers.dev/
 
+## Connect an Agent (MCP)
+
+The world exposes an MCP server at `/mcp` (streamable HTTP). Point any MCP
+client at `https://woo.hughpyle.workers.dev/mcp` with header
+`mcp-token: guest:<name>` (or a wizard token). Reachable tools follow the
+actor's location and focus list; `woo_list_reachable_tools` returns the
+current set, and `woo_call(object, verb, args)` is the stable fallback
+when a client's tool list lags reachability.
+
 Current example apps installed from the local build include: a small chat-room
 with many of the LambdaMOO chat behaviors (and a cockatoo); "Dubspace", a
 realtime interactive audio playground; "Pinboard", a shared spatial text-note

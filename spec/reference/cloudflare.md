@@ -38,6 +38,8 @@ The runtime stores the resolved id-to-host map in **Directory** ([§R2](#r2-sing
 
 **Cross-DO RPC** uses the DO stub returned from `idFromName`. The stub's methods are the inter-host RPC surface (verb dispatch, property read/write, version-checked artifact fetch, and the contents-mirror updates described below). Every awaited cross-DO RPC carries the host wait-for guard from [protocol/hosts.md §3.5](../protocol/hosts.md#35-host-wait-for-graph-and-reentrancy): `correlation_id`, `host_chain`, and `route_class`.
 
+**Operation-scoped memoization.** Within one verb execution, the origin host may memoize id-to-host resolutions and read-only cross-DO fetches (`getProp`, `location`, `contents`) by promise. The memo dies with the execution frame; it is not a TTL cache and must not be reused by later calls. Reads inside one execution are therefore a frame-scoped snapshot: if the same frame mutates remote state through dispatch and then repeats a memoized read, the earlier read may be returned. This removes duplicate fetches inside one `:look`, movement, or agent tool resolution without serving stale world state across operations.
+
 ### R1.7 Contents-mirror invariants
 
 Every container — a room, a table, a mailbox — maintains its own `contents` set as the cached inverse of `obj.location`. Across DOs, that invariant is distributed:

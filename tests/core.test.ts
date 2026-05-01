@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { compileVerb, definePropertyVersioned, definePropertyVersionedAs, installVerb, installVerbAs } from "../src/core/authoring";
 import { bootstrap, createWorld, createWorldFromSerialized, mergeHostScopedSeed, nonEmptyHostScopedWorld, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
-import type { CallContext, HostBridge, MoveObjectResult, WooWorld } from "../src/core/world";
+import type { CallContext, HostBridge, HostOperationMemo, MoveObjectResult, WooWorld } from "../src/core/world";
 import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
 
 function message(actor: string, target: string, verb: string, args: unknown[] = []): Message {
@@ -31,6 +31,14 @@ function nativeVerb(name: string, native = "describe", owner = "$wiz"): VerbDef 
   };
 }
 
+function memoizeTestOperation<T>(cache: Map<string, Promise<unknown>>, key: string, load: () => Promise<T>): Promise<T> {
+  const existing = cache.get(key);
+  if (existing) return existing as Promise<T>;
+  const promise = load();
+  cache.set(key, promise as Promise<unknown>);
+  return promise;
+}
+
 function bytecodeVerb(name: string, bytecode: TinyBytecode, owner = "$wiz", perms = "rxd"): VerbDef {
   return {
     kind: "bytecode",
@@ -48,6 +56,8 @@ function bytecodeVerb(name: string, bytecode: TinyBytecode, owner = "$wiz", perm
 }
 
 class LocalHostBridge implements HostBridge {
+  readonly getPropCalls = new Map<string, number>();
+
   constructor(
     readonly localHost: string,
     private readonly worlds: Map<string, WooWorld>,
@@ -58,8 +68,14 @@ class LocalHostBridge implements HostBridge {
     return this.routes.get(id) ?? null;
   }
 
-  async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue> {
-    return await this.worldFor(objRef).getPropChecked(progr, objRef, name);
+  async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue> {
+    const key = `prop:${progr}:${objRef}:${name}`;
+    const read = async () => {
+      this.getPropCalls.set(key, (this.getPropCalls.get(key) ?? 0) + 1);
+      return await this.worldFor(objRef).getPropChecked(progr, objRef, name, memo);
+    };
+    if (!memo) return await read();
+    return await memoizeTestOperation(memo.reads, key, read);
   }
 
   async location(objRef: ObjRef): Promise<ObjRef | null> {
@@ -340,6 +356,57 @@ describe("woo core", () => {
     expect(failedWrite.op).toBe("applied");
     if (failedWrite.op === "applied") expect(failedWrite.observations[0]).toMatchObject({ type: "$error", code: "E_CROSS_HOST_WRITE" });
     expect(remote.getProp("remote_box", "value")).toBe("remote");
+  });
+
+  it("memoizes repeated remote reads within one host operation", async () => {
+    const { world: home, actor } = authedWorld();
+    const remote = createWorld({ catalogs: false });
+    const worlds = new Map<string, WooWorld>([
+      ["home", home],
+      ["remote", remote]
+    ]);
+    const routes = new Map<ObjRef, string>([["remote_box", "remote"]]);
+    const bridge = new LocalHostBridge("home", worlds, routes);
+    home.setHostBridge(bridge);
+    remote.setHostBridge(new LocalHostBridge("remote", worlds, routes));
+
+    remote.createObject({ id: "remote_box", name: "Remote Box", parent: "$thing", owner: "$wiz" });
+    remote.defineProperty("remote_box", {
+      name: "value",
+      defaultValue: "remote",
+      owner: "$wiz",
+      perms: "r",
+      typeHint: "str"
+    });
+    home.createObject({ id: "memo_reader", name: "Memo Reader", parent: "$thing", owner: actor });
+    home.addVerb("memo_reader", {
+      ...bytecodeVerb(
+        "read_twice",
+        {
+          literals: ["remote_box", "value"],
+          num_locals: 0,
+          max_stack: 4,
+          version: 1,
+          ops: [
+            ["PUSH_LIT", 0],
+            ["PUSH_LIT", 1],
+            ["GET_PROP"],
+            ["PUSH_LIT", 0],
+            ["PUSH_LIT", 1],
+            ["GET_PROP"],
+            ["MAKE_LIST", 2],
+            ["RETURN"]
+          ]
+        },
+        actor
+      ),
+      direct_callable: true
+    });
+
+    const result = await home.directCall(undefined, actor, "memo_reader", "read_twice", []);
+    expect(result.op).toBe("result");
+    if (result.op === "result") expect(result.result).toEqual(["remote", "remote"]);
+    expect(bridge.getPropCalls.get(`prop:${actor}:remote_box:value`)).toBe(1);
   });
 
   it("routes mounted-space direct observations to a remote room audience", async () => {

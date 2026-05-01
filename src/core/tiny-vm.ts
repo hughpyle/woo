@@ -440,7 +440,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         case "GET_PROP": {
           const name = assertString(pop());
           const obj = assertObj(pop());
-          push(await current.ctx.world.getPropChecked(current.ctx.progr, obj, name));
+          push(await current.ctx.world.getPropChecked(current.ctx.progr, obj, name, current.ctx.hostMemo));
           break;
         }
         case "SET_PROP": {
@@ -812,7 +812,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       }
       case "location": {
         if (builtinArgs.length !== 1) throw wooError("E_INVARG", "location expects one object");
-        return await frame.ctx.world.objectLocationChecked(assertObj(builtinArgs[0]));
+        return await frame.ctx.world.objectLocationChecked(assertObj(builtinArgs[0]), frame.ctx.hostMemo);
       }
       case "task_perms":
         if (builtinArgs.length !== 0) throw wooError("E_INVARG", "task_perms expects no arguments");

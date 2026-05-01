@@ -43,14 +43,14 @@ import type { MetricEvent, ObjRef, Observation, RemoteToolDescriptor, Session, W
 import { directedRecipients, wooError } from "../core/types";
 import type { AppliedFrame, DirectResultFrame, ErrorFrame, LiveEventFrame, Message } from "../core/types";
 import type { SerializedWorld } from "../core/repository";
-import { normalizeError, type ParkedTaskRun } from "../core/world";
+import { createHostOperationMemo, normalizeError, type ParkedTaskRun } from "../core/world";
 import { CFObjectRepository } from "./cf-repository";
 import { McpGateway } from "../mcp/gateway";
 import { signInternalRequest, verifyInternalRequest } from "./internal-auth";
 
 // Re-import WooWorld type. Note `import type` must reach the world module
 // without dragging Node-only deps into the Worker bundle.
-import type { CallContext, DeferredHostEffect, HostBridge, MoveObjectResult, WooWorld } from "../core/world";
+import type { CallContext, DeferredHostEffect, HostBridge, HostOperationMemo, MoveObjectResult, WooWorld } from "../core/world";
 
 export interface Env {
   WOO: DurableObjectNamespace;
@@ -338,7 +338,7 @@ export class PersistentObjectDO {
   }
 
   private installHostBridge(world: WooWorld, localHost: string): void {
-    const hostForObject = async (id: ObjRef): Promise<string | null> => {
+    const hostForObjectUncached = async (id: ObjRef): Promise<string | null> => {
       const cached = this.routeCache.get(id);
       if (cached) return cached;
       const route = world.objectRoutes().find((item) => item.id === id);
@@ -349,23 +349,35 @@ export class PersistentObjectDO {
       if (localHost === WORLD_HOST && world.objects.has(id)) return localHost;
       return await this.resolveObjectHost(id, WORLD_HOST);
     };
+    const hostForObject = async (id: ObjRef, memo?: HostOperationMemo): Promise<string | null> => {
+      if (!memo) return await hostForObjectUncached(id);
+      return await memoizeHostOperation(memo.routes, id, () => hostForObjectUncached(id));
+    };
     const bridge: HostBridge = {
       localHost,
       hostForObject,
-      getPropChecked: async (progr, objRef, name) => {
-        const host = await hostForObject(objRef);
-        if (!host || host === localHost) return await world.getPropChecked(progr, objRef, name);
-        const response = await this.forwardInternalChecked<{ value: WooValue }>(host, "/__internal/remote-get-prop", { progr, obj: objRef, name });
-        return response.value;
+      getPropChecked: async (progr, objRef, name, memo) => {
+        const read = async (): Promise<WooValue> => {
+          const host = await hostForObject(objRef, memo);
+          if (!host || host === localHost) return await world.getPropChecked(progr, objRef, name, memo);
+          const response = await this.forwardInternalChecked<{ value: WooValue }>(host, "/__internal/remote-get-prop", { progr, obj: objRef, name });
+          return response.value;
+        };
+        if (memo) return await memoizeHostOperation(memo.reads, `prop:${progr}:${objRef}:${name}`, read);
+        return await read();
       },
-      location: async (objRef) => {
-        const host = await hostForObject(objRef);
-        if (!host || host === localHost) return world.object(objRef).location;
-        const response = await this.forwardInternalChecked<{ location: ObjRef | null }>(host, "/__internal/remote-location", { obj: objRef });
-        return response.location;
+      location: async (objRef, memo) => {
+        const read = async (): Promise<ObjRef | null> => {
+          const host = await hostForObject(objRef, memo);
+          if (!host || host === localHost) return world.object(objRef).location;
+          const response = await this.forwardInternalChecked<{ location: ObjRef | null }>(host, "/__internal/remote-location", { obj: objRef });
+          return response.location;
+        };
+        if (memo) return await memoizeHostOperation(memo.reads, `location:${objRef}`, read);
+        return await read();
       },
       dispatch: async (ctx, target, verbName, args, startAt) => {
-        const host = await hostForObject(startAt ?? target);
+        const host = await hostForObject(startAt ?? target, ctx.hostMemo);
         if (!host || host === localHost) return await world.hostDispatch(ctx, target, verbName, args, startAt);
         const response = await this.forwardInternalChecked<{
           result: WooValue;
@@ -454,11 +466,15 @@ export class PersistentObjectDO {
         }
         await this.forwardInternalChecked(host, "/__internal/space-subscriber", { space, actor, present });
       },
-      contents: async (objRef) => {
-        const host = await hostForObject(objRef);
-        if (!host || host === localHost) return world.contentsOf(objRef);
-        const response = await this.forwardInternalChecked<{ contents: ObjRef[] }>(host, "/__internal/contents", { obj: objRef });
-        return response.contents;
+      contents: async (objRef, memo) => {
+        const read = async (): Promise<ObjRef[]> => {
+          const host = await hostForObject(objRef, memo);
+          if (!host || host === localHost) return world.contentsOf(objRef);
+          const response = await this.forwardInternalChecked<{ contents: ObjRef[] }>(host, "/__internal/contents", { obj: objRef });
+          return response.contents;
+        };
+        if (memo) return await memoizeHostOperation(memo.reads, `contents:${objRef}`, read);
+        return await read();
       },
       enumerateRemoteTools: async (actor, ids) => {
         // Group ids by owning host, RPC each, merge.
@@ -789,6 +805,7 @@ export class PersistentObjectDO {
           definer: String(rawCtx.definer ?? target) as ObjRef,
           message,
           observations,
+          hostMemo: createHostOperationMemo(),
           observe: (event) => {
             observations.push({ ...event, source: event.source ?? String(rawCtx.space ?? "#-1") });
           },
@@ -1235,6 +1252,14 @@ export class PersistentObjectDO {
 }
 
 // ---- module-scoped helpers ----
+
+function memoizeHostOperation<T>(cache: Map<string, Promise<unknown>>, key: string, load: () => Promise<T>): Promise<T> {
+  const existing = cache.get(key);
+  if (existing) return existing as Promise<T>;
+  const promise = load();
+  cache.set(key, promise as Promise<unknown>);
+  return promise;
+}
 
 function taskResultSpace(result: ParkedTaskRun): ObjRef {
   const serialized = result.task.serialized as unknown;
