@@ -516,6 +516,19 @@ function receiveLiveEvent(observation: any) {
     return;
   }
   if (isPinboardObservation(observation)) {
+    // Auto-open the pinboard window when this client's own actor enters the
+    // board — covers the chat-room "enter pinboard" command, an MCP agent
+    // that called pinboard:enter under this session, etc. The board is a
+    // focus surface, not a place you travel to (catalogs/pinboard/DESIGN.md);
+    // opening the UI is the chat-side analogue of mounting the board.
+    if (
+      observation?.type === "pinboard_entered" &&
+      String(observation?.actor ?? "") === state.actor &&
+      state.tab !== "pinboard"
+    ) {
+      state.tab = "pinboard";
+      render();
+    }
     void refresh();
     return;
   }
