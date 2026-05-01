@@ -234,6 +234,7 @@ function broadcastApplied(frame: AppliedFrame, originator?: WebSocket): void {
     ws.send(JSON.stringify(visibleFrame));
   }
   broadcastAppliedSse(frame);
+  mcpGateway.routeAppliedFrame(frame);
 }
 
 function broadcastTaskResult(result: ParkedTaskRun): void {
@@ -254,6 +255,7 @@ function broadcastLiveEvents(result: DirectResultFrame): void {
   result.observations.forEach((observation, index) => {
     broadcastLiveEvent({ op: "event", observation }, result.audience!, result.observationAudiences?.[index] ?? result.audienceActors);
   });
+  mcpGateway.routeLiveEvents(result);
 }
 
 function broadcastLiveEvent(frame: LiveEventFrame, audience: ObjRef, audienceActors?: ObjRef[]): void {

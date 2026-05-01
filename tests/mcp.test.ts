@@ -13,7 +13,7 @@ describe("McpHost", () => {
     const world = bootstrapWorld();
     const session = world.auth("guest:mcp-list");
     const host = new McpHost(world);
-    host.registerActor(session.actor);
+    host.bindSession(session.id, session.actor);
 
     // Walk into the chatroom so its verbs and contents are in scope.
     const entered = await world.directCall(undefined, session.actor, "the_chatroom", "enter", []);
@@ -46,34 +46,90 @@ describe("McpHost", () => {
     expect(new Set(tools.map((t) => t.name)).size).toBe(tools.length);
   });
 
-  it("routes a direct verb call's observations into the actor queue and drains via wait", async () => {
+  it("returns own-call observations inline only — wait queue is for external events", async () => {
     const world = bootstrapWorld();
-    const session = world.auth("guest:mcp-direct");
+    const session = world.auth("guest:mcp-self");
     const host = new McpHost(world);
-    host.registerActor(session.actor);
+    host.bindSession(session.id, session.actor);
 
     // Walk into the chatroom first so its verbs become reachable.
     const entered = await world.directCall(undefined, session.actor, "the_chatroom", "enter", []);
     expect(entered.op).toBe("result");
-    if (entered.op === "result") host.routeDirectResult(entered);
 
     const sayTool = host.enumerateTools(session.actor).find((t) => t.object === "the_chatroom" && t.verb === "say")!;
     expect(sayTool).toBeDefined();
     const sayResult = await host.invokeTool(session.actor, session.id, sayTool, ["hello, world"]);
     expect(sayResult.observations.some((o) => o.type === "said")).toBe(true);
 
+    // The own-call observations are NOT also enqueued — wait should drain empty.
     const waitTool = host.enumerateTools(session.actor).find((t) => t.object === session.actor && t.verb === "wait")!;
     const waited = await host.invokeTool(session.actor, session.id, waitTool, [0, 64]);
-    const drained = (waited.result as { observations: Observation[]; more: boolean; queue_depth: number });
+    const drained = waited.result as { observations: Observation[]; more: boolean; queue_depth: number };
+    expect(drained.observations.length).toBe(0);
     expect(drained.more).toBe(false);
-    expect(Array.isArray(drained.observations)).toBe(true);
+  });
+
+  it("routes external broadcast observations into other sessions' queues but not the originator's", async () => {
+    const world = bootstrapWorld();
+    const alice = world.auth("guest:mcp-alice");
+    const bob = world.auth("guest:mcp-bob");
+    const host = new McpHost(world);
+    host.bindSession(alice.id, alice.actor);
+    host.bindSession(bob.id, bob.actor);
+
+    // Both walk into the chatroom so they share presence.
+    await world.directCall(undefined, alice.actor, "the_chatroom", "enter", []);
+    await world.directCall(undefined, bob.actor, "the_chatroom", "enter", []);
+
+    // Alice says hello — direct result. Route as external from Alice's session.
+    const said = await world.directCall(undefined, alice.actor, "the_chatroom", "say", ["hi everyone"]);
+    expect(said.op).toBe("result");
+    if (said.op !== "result") return;
+    host.routeLiveEvents(said, alice.id);
+
+    const waitTool = host.enumerateTools(bob.actor).find((t) => t.object === bob.actor && t.verb === "wait")!;
+    // Bob sees Alice's said observation in his queue.
+    const bobDrain = (await host.invokeTool(bob.actor, bob.id, waitTool, [0, 64])).result as { observations: Observation[] };
+    expect(bobDrain.observations.some((o) => o.type === "said" && o.actor === alice.actor)).toBe(true);
+
+    // Alice does NOT see her own observation in her queue.
+    const aliceWait = host.enumerateTools(alice.actor).find((t) => t.object === alice.actor && t.verb === "wait")!;
+    const aliceDrain = (await host.invokeTool(alice.actor, alice.id, aliceWait, [0, 64])).result as { observations: Observation[] };
+    expect(aliceDrain.observations.some((o) => o.type === "said" && o.actor === alice.actor)).toBe(false);
+  });
+
+  it("isolates per-session queues when two sessions share one gateway/host", async () => {
+    const world = bootstrapWorld();
+    const gateway = new McpGateway(world);
+    const host = gateway.host;
+    const alice = world.auth("guest:mcp-iso-alice");
+    const bob = world.auth("guest:mcp-iso-bob");
+    gateway.bindActorSession(alice.id, alice.actor);
+    gateway.bindActorSession(bob.id, bob.actor);
+
+    // Enqueue a per-actor observation for Alice and a different one for Bob.
+    const ping: Observation = { type: "ping", actor: alice.actor, source: alice.actor, ts: Date.now() } as Observation;
+    const pong: Observation = { type: "pong", actor: bob.actor, source: bob.actor, ts: Date.now() } as Observation;
+    host.routeLiveEvents({
+      op: "result", result: null, observations: [ping, pong],
+      audience: "the_chatroom",
+      audienceActors: [alice.actor, bob.actor],
+      observationAudiences: [[alice.actor], [bob.actor]]
+    }, null);
+
+    const waitForActor = host.enumerateTools(alice.actor).find((t) => t.object === alice.actor && t.verb === "wait")!;
+    const aliceDrain = (await host.invokeTool(alice.actor, alice.id, waitForActor, [0, 64])).result as { observations: Observation[] };
+    const bobDrain = (await host.invokeTool(bob.actor, bob.id, waitForActor, [0, 64])).result as { observations: Observation[] };
+
+    expect(aliceDrain.observations.map((o) => o.type)).toEqual(["ping"]);
+    expect(bobDrain.observations.map((o) => o.type)).toEqual(["pong"]);
   });
 
   it("invokes a sequenced tool through the enclosing space and returns applied", async () => {
     const world = bootstrapWorld();
     const session = world.auth("guest:mcp-seq");
     const host = new McpHost(world);
-    host.registerActor(session.actor);
+    host.bindSession(session.id, session.actor);
 
     const create = host.enumerateTools(session.actor).find((t) => t.object === "the_taskspace" && t.verb === "create_task")!;
     expect(create).toBeDefined();
@@ -89,8 +145,8 @@ describe("McpHost", () => {
     const world = bootstrapWorld();
     const session = world.auth("guest:mcp-focus");
     const host = new McpHost(world);
-    host.registerActor(session.actor);
-    host.refreshToolList(session.actor); // seed snapshot
+    host.bindSession(session.id, session.actor);
+    host.refreshToolList(session.id, session.actor); // seed snapshot
 
     const create = host.enumerateTools(session.actor).find((t) => t.object === "the_taskspace" && t.verb === "create_task")!;
     const created = await host.invokeTool(session.actor, session.id, create, ["Focus me", "test"]);
@@ -122,20 +178,20 @@ describe("McpHost", () => {
     const world = bootstrapWorld();
     const session = world.auth("guest:mcp-batch");
     const host = new McpHost(world);
-    host.registerActor(session.actor);
+    host.bindSession(session.id, session.actor);
 
     // Synthesize observations destined for this actor by routing a fake direct
-    // result whose audience targets only this actor.
+    // result whose audience targets only this actor (origin = null = broadcast).
     const synthetic = (n: number): Observation => ({ type: "ping", source: session.actor, n: n as unknown as WooValue, ts: Date.now() } as Observation);
     const observations = Array.from({ length: 80 }, (_, i) => synthetic(i));
-    host.routeDirectResult({
+    host.routeLiveEvents({
       op: "result",
       result: null,
       observations,
       audience: "the_chatroom",
       audienceActors: [session.actor],
       observationAudiences: observations.map(() => [session.actor])
-    });
+    }, null);
 
     const waitTool = host.enumerateTools(session.actor).find((t) => t.object === session.actor && t.verb === "wait")!;
     const first = await host.invokeTool(session.actor, session.id, waitTool, [0, 50]);

@@ -13,6 +13,7 @@ import { McpHost, type McpTool } from "./host";
 
 export type McpServerOptions = {
   world: WooWorld;
+  host: McpHost;
   actor: ObjRef;
   sessionId: string;
   serverName?: string;
@@ -25,11 +26,10 @@ export type McpServerInstance = {
 };
 
 export function createMcpServer(options: McpServerOptions): McpServerInstance {
-  const { world, actor, sessionId } = options;
-  const host = new McpHost(world);
-  host.registerActor(actor);
+  const { actor, sessionId, host } = options;
+  host.bindSession(sessionId, actor);
   // Seed the snapshot so the first list_changed only fires after a real shift.
-  host.refreshToolList(actor);
+  host.refreshToolList(sessionId, actor);
 
   const server = new Server(
     {
@@ -84,7 +84,6 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
         observations: result.observations
       };
       if (result.applied) structured.applied = result.applied;
-      // Refresh tool list snapshot in case the call moved the actor / focused something.
       refreshTools();
       return {
         content: [{ type: "text" as const, text: summary }],
@@ -92,11 +91,15 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
         isError: false
       };
     } catch (err) {
-      const code = (err as Error & { code?: string }).code ?? "E_INTERNAL";
-      const message = (err as Error).message ?? String(err);
+      const enriched = err as Error & { code?: string; value?: unknown; trace?: unknown };
+      const code = enriched.code ?? "E_INTERNAL";
+      const message = enriched.message ?? String(err);
+      const errorPayload: Record<string, unknown> = { code, message };
+      if (enriched.value !== undefined) errorPayload.value = enriched.value;
+      if (enriched.trace !== undefined) errorPayload.trace = enriched.trace;
       return {
         content: [{ type: "text" as const, text: `${code}: ${message}` }],
-        structuredContent: { error: { code, message } },
+        structuredContent: { error: errorPayload },
         isError: true
       };
     }

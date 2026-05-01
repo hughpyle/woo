@@ -15,6 +15,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createWorld } from "../core/bootstrap";
 import { parseAutoInstallCatalogs } from "../core/local-catalogs";
+import { McpHost } from "./host";
 import { createMcpServer } from "./server";
 
 async function main(): Promise<void> {
@@ -27,8 +28,10 @@ async function main(): Promise<void> {
     catalogs: parseAutoInstallCatalogs(process.env.WOO_AUTO_INSTALL_CATALOGS)
   });
   const session = world.auth(token);
+  const host = new McpHost(world);
   const { server } = createMcpServer({
     world,
+    host,
     actor: session.actor,
     sessionId: session.id,
     serverName: "woo",

@@ -843,6 +843,7 @@ export class PersistentObjectDO {
         // socket gone; webSocketClose will clean up
       }
     }
+    this.mcpGateway?.routeAppliedFrame(frame);
   }
 
   private broadcastTaskResult(world: WooWorld, result: ParkedTaskRun): void {
@@ -865,6 +866,7 @@ export class PersistentObjectDO {
       const frame: LiveEventFrame = { op: "event", observation };
       this.broadcastLiveEvent(world, frame, result.audience!, result.observationAudiences?.[index] ?? result.audienceActors);
     });
+    this.mcpGateway?.routeLiveEvents(result);
   }
 
   private broadcastLiveEvent(world: WooWorld, frame: LiveEventFrame, audience: ObjRef, audienceActors?: ObjRef[]): void {

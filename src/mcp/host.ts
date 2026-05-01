@@ -1,10 +1,10 @@
-// MCP host — per-actor observation queue, working set (focus list), and
-// reachable-scope/tool-list computation against a WooWorld.
+// MCP host — singleton per WooWorld. Registers $actor:wait/focus/etc. native
+// handlers ONCE at construction; per-MCP-session state (observation queue,
+// pending waiters) lives in a Map keyed by Mcp-Session-Id.
 //
-// Implements the runtime side of spec/protocol/mcp.md §M3 (reachability),
-// §M4 (wait queue), and §M2 (verb-to-tool mapping with route classification).
-// The transport (stdio/HTTP) lives in src/mcp/server.ts; this module is
-// transport-agnostic.
+// Implements spec/protocol/mcp.md §M3 (reachability), §M4 (wait queue),
+// and §M2 (verb-to-tool mapping with route classification). Transport
+// (stdio/HTTP) lives in src/mcp/server.ts; this module is transport-agnostic.
 
 import type { CallContext, NativeHandler, WooWorld } from "../core/world";
 import type { AppliedFrame, DirectResultFrame, ObjRef, Observation, WooValue } from "../core/types";
@@ -16,7 +16,8 @@ const MAX_LIMIT = 256;
 const FOCUS_LIST_CAP = 32;
 const MAX_TIMEOUT_MS = 30_000;
 
-type ActorQueue = {
+type SessionQueue = {
+  actor: ObjRef;
   observations: Observation[];
   lostSinceMark: number;
   firstLostTs: number | null;
@@ -45,31 +46,40 @@ export type McpInvocationResult = {
   applied?: { space: ObjRef; seq: number; ts: number };
 };
 
+// `actor_wait` runs through the standard verb-dispatch path, which doesn't
+// thread the MCP session id through CallContext. McpHost.invokeTool sets this
+// before dispatching the wait verb so the native handler can find the right
+// per-session queue. Single-threaded JS makes this safe.
+let CURRENT_WAIT_SESSION_ID: string | null = null;
+
 export class McpHost {
-  private queues = new Map<ObjRef, ActorQueue>();
+  private queues = new Map<string, SessionQueue>();
   private listChangedListeners = new Set<(actor: ObjRef) => void>();
-  private toolListSnapshot = new Map<ObjRef, string>();
+  private toolListSnapshot = new Map<string, string>();
 
   constructor(private world: WooWorld) {
+    // Native handlers register ONCE per world. Subsequent McpHost instances on
+    // the same world would clobber per-session queues — McpGateway owns one
+    // singleton McpHost per world to avoid that footgun.
     this.installNativeHandlers();
   }
 
   // ----- session lifecycle -----
 
-  registerActor(actor: ObjRef): void {
-    if (!this.queues.has(actor)) this.queues.set(actor, makeQueue());
+  bindSession(sessionId: string, actor: ObjRef): void {
+    if (!this.queues.has(sessionId)) this.queues.set(sessionId, makeQueue(actor));
   }
 
-  unregisterActor(actor: ObjRef): void {
-    const queue = this.queues.get(actor);
+  unbindSession(sessionId: string): void {
+    const queue = this.queues.get(sessionId);
     if (!queue) return;
     for (const waiter of queue.waiters) {
       if (waiter.timer) clearTimeout(waiter.timer);
       waiter.resolve();
     }
     queue.waiters.clear();
-    this.queues.delete(actor);
-    this.toolListSnapshot.delete(actor);
+    this.queues.delete(sessionId);
+    this.toolListSnapshot.delete(sessionId);
   }
 
   onToolListChanged(listener: (actor: ObjRef) => void): () => void {
@@ -77,40 +87,51 @@ export class McpHost {
     return () => { this.listChangedListeners.delete(listener); };
   }
 
-  // ----- observation routing -----
+  // ----- external observation routing (broadcast-side fan-out) -----
 
-  // Push observations from a direct-call result into the per-actor queues
-  // selected by the call's audience (spec/semantics/events.md §12.7).
-  routeDirectResult(result: DirectResultFrame): void {
+  // Called by the runtime's broadcastApplied path (dev-server / worker DO).
+  // For each MCP session whose actor has presence in the frame's space — and
+  // who isn't the originator — enqueue the applied frame's observations.
+  routeAppliedFrame(frame: AppliedFrame, originSessionId?: string | null): void {
+    if (!frame.observations.length) return;
+    for (const [sessionId, queue] of this.queues) {
+      if (originSessionId && sessionId === originSessionId) continue;
+      if (!this.actorSubscribes(queue.actor, frame.space)) continue;
+      for (const observation of frame.observations) this.enqueueFor(sessionId, observation);
+    }
+  }
+
+  // Called by the runtime's broadcastLiveEvents path. For each observation,
+  // enqueue to every session whose actor is in the audience (per-observation
+  // audience hint, with a presence fallback). Skip the originating session;
+  // its own observations travel back via the call result.
+  routeLiveEvents(result: DirectResultFrame, originSessionId?: string | null): void {
     const observations = result.observations ?? [];
     for (let i = 0; i < observations.length; i++) {
       const observation = observations[i];
       const audience = result.observationAudiences?.[i] ?? result.audienceActors ?? this.implicitAudience(observation, result.audience ?? null);
       if (!audience) continue;
-      for (const actor of audience) this.enqueueFor(actor, observation);
-    }
-  }
-
-  // Push applied-frame observations to subscribers of the frame's space.
-  routeAppliedFrame(frame: AppliedFrame): void {
-    const subscribers = this.subscriberList(frame.space);
-    if (!subscribers.length) return;
-    for (const observation of frame.observations) {
-      for (const actor of subscribers) {
-        if (!this.queues.has(actor)) continue;
-        this.enqueueFor(actor, observation);
+      const audienceSet = new Set(audience);
+      for (const [sessionId, queue] of this.queues) {
+        if (originSessionId && sessionId === originSessionId) continue;
+        if (!audienceSet.has(queue.actor)) continue;
+        this.enqueueFor(sessionId, observation);
       }
     }
   }
 
   private implicitAudience(observation: Observation, fallback: ObjRef | null): ObjRef[] | null {
     const directed = directedRecipients(observation);
-    if (directed.to) {
-      return directed.from ? [directed.to, directed.from] : [directed.to];
-    }
+    if (directed.to) return directed.from ? [directed.to, directed.from] : [directed.to];
     if (typeof observation.to === "string") return [observation.to];
     if (!fallback) return null;
     return this.subscriberList(fallback);
+  }
+
+  private actorSubscribes(actor: ObjRef, space: ObjRef): boolean {
+    if (!this.world.objects.has(space)) return false;
+    const subs = this.subscriberList(space);
+    return subs.includes(actor);
   }
 
   private subscriberList(space: ObjRef): ObjRef[] {
@@ -119,8 +140,8 @@ export class McpHost {
     return Array.isArray(raw) ? raw.filter((item): item is ObjRef => typeof item === "string") : [];
   }
 
-  private enqueueFor(actor: ObjRef, observation: Observation): void {
-    const queue = this.queues.get(actor);
+  private enqueueFor(sessionId: string, observation: Observation): void {
+    const queue = this.queues.get(sessionId);
     if (!queue) return;
     if (queue.observations.length >= QUEUE_HARD_CAP) {
       queue.lostSinceMark += 1;
@@ -149,16 +170,31 @@ export class McpHost {
     const actorObj = this.world.objects.has(actor) ? this.world.object(actor) : null;
     if (actorObj?.location && this.world.objects.has(actorObj.location)) add(actorObj.location, "location");
     if (actorObj?.location && this.world.objects.has(actorObj.location)) {
-      for (const id of this.world.object(actorObj.location).contents) add(id, "contents");
+      for (const id of this.world.object(actorObj.location).contents) {
+        if (this.actorCanSee(actor, id)) add(id, "contents");
+      }
     }
-    if (actorObj) for (const id of actorObj.contents) add(id, "inventory");
+    if (actorObj) for (const id of actorObj.contents) {
+      if (this.actorCanSee(actor, id)) add(id, "inventory");
+    }
     const presence = actorObj ? this.world.propOrNull(actor, "presence_in") : null;
     if (Array.isArray(presence)) for (const id of presence) {
       if (typeof id === "string") add(id, "presence");
     }
     const focusList = this.focusListOf(actor);
-    for (const id of focusList) add(id, "focus");
+    for (const id of focusList) {
+      if (this.actorCanSee(actor, id)) add(id, "focus");
+    }
     return Array.from(seen, ([id, origin]) => ({ id, origin }));
+  }
+
+  // Visibility check used by reachability and focus. The actor must be able to
+  // see the object at all — minimum bar is being able to read its name (the
+  // standard `:describe` surface does this). canReadProperty already short-
+  // circuits for wizards via its internal canBypassPerms call.
+  private actorCanSee(actor: ObjRef, target: ObjRef): boolean {
+    if (!this.world.objects.has(target)) return false;
+    return this.world.canReadProperty(actor, target, "name");
   }
 
   enumerateTools(actor: ObjRef): McpTool[] {
@@ -188,17 +224,16 @@ export class McpHost {
     return tools;
   }
 
-  // Compute a stable digest of the current tool list for change detection.
   private toolListDigest(actor: ObjRef): string {
     const tools = this.enumerateTools(actor);
     return tools.map((tool) => `${tool.name}@${tool.object}:${tool.verb}:${tool.direct ? "d" : "s"}`).sort().join("|");
   }
 
-  refreshToolList(actor: ObjRef): boolean {
+  refreshToolList(sessionId: string, actor: ObjRef): boolean {
     const digest = this.toolListDigest(actor);
-    const previous = this.toolListSnapshot.get(actor);
+    const previous = this.toolListSnapshot.get(sessionId);
     if (digest === previous) return false;
-    this.toolListSnapshot.set(actor, digest);
+    this.toolListSnapshot.set(sessionId, digest);
     if (previous !== undefined) {
       for (const listener of this.listChangedListeners) listener(actor);
     }
@@ -222,9 +257,6 @@ export class McpHost {
         cursor = obj.parent;
       }
     };
-    // Walk the parent chain first, then merge attached feature verbs (per
-    // semantics/features.md): features supply additional verbs the consumer
-    // may not define itself. Conversational chat verbs ride on $conversational.
     collect(id);
     const features = this.featureListOf(id);
     for (const feature of features) collect(feature);
@@ -277,19 +309,32 @@ export class McpHost {
 
   async invokeTool(actor: ObjRef, sessionId: string, tool: McpTool, args: WooValue[]): Promise<McpInvocationResult> {
     if (tool.direct) {
-      const result = await this.world.directCall(undefined, actor, tool.object, tool.verb, args);
-      if (result.op === "error") throw fromError(result.error);
-      this.routeDirectResult(result);
-      this.refreshToolList(actor);
-      return { result: result.result, observations: result.observations };
+      // For wait we need session-scoped queue access. Thread the sessionId
+      // through a module-scoped slot; the registered native handler reads it.
+      const previous = CURRENT_WAIT_SESSION_ID;
+      CURRENT_WAIT_SESSION_ID = sessionId;
+      try {
+        const result = await this.world.directCall(undefined, actor, tool.object, tool.verb, args);
+        if (result.op === "error") throw fromError(result.error);
+        // Self observations are returned in the call result; do NOT route them
+        // back into this session's queue — that would deliver them twice.
+        // Other sessions' queues do see them via the normal broadcast path
+        // (dev-server / DO call McpHost.routeLiveEvents with originSessionId).
+        this.refreshToolList(sessionId, actor);
+        return { result: result.result, observations: result.observations };
+      } finally {
+        CURRENT_WAIT_SESSION_ID = previous;
+      }
     }
     const space = tool.enclosingSpace ?? this.enclosingSpaceFor(tool.object);
     if (!space) throw wooError("E_INVARG", `verb ${tool.object}:${tool.verb} has no enclosing space for sequenced dispatch`);
     const message = { actor, target: tool.object, verb: tool.verb, args };
     const frame = await this.world.call(undefined, sessionId, space, message);
     if (frame.op === "error") throw fromError(frame.error);
-    this.routeAppliedFrame(frame);
-    this.refreshToolList(actor);
+    // Sequenced calls broadcast through broadcastApplied; broadcast wiring
+    // already routes that into MCP queues for *other* sessions. Don't enqueue
+    // here.
+    this.refreshToolList(sessionId, actor);
     const errObs = frame.observations.find((o) => o.type === "$error");
     return {
       result: errObs ? null : true,
@@ -310,12 +355,18 @@ export class McpHost {
   private async handleWait(ctx: CallContext, args: WooValue[]): Promise<WooValue> {
     const timeoutMs = Math.max(0, Math.min(MAX_TIMEOUT_MS, toInt(args[0], 0)));
     const limit = Math.max(1, Math.min(MAX_LIMIT, toInt(args[1], DEFAULT_LIMIT)));
-    const actor = ctx.thisObj;
-    this.registerActor(actor);
-    const queue = this.queues.get(actor)!;
+    const sessionId = CURRENT_WAIT_SESSION_ID;
+    if (!sessionId) {
+      // Outside MCP context (e.g., REST directCall hits the verb). Return an
+      // empty drain rather than throwing — the verb is still well-formed,
+      // there's just no MCP session to source observations from.
+      return emptyDrain();
+    }
+    const queue = this.queues.get(sessionId);
+    if (!queue) return emptyDrain();
     if (queue.observations.length === 0 && timeoutMs > 0) {
       await new Promise<void>((resolve) => {
-        const waiter: ActorQueue["waiters"] extends Set<infer T> ? T : never = {
+        const waiter: SessionQueue["waiters"] extends Set<infer T> ? T : never = {
           resolve,
           timer: setTimeout(() => {
             queue.waiters.delete(waiter);
@@ -346,12 +397,12 @@ export class McpHost {
     const target = String(args[0] ?? "");
     if (!target || !this.world.objects.has(target)) throw wooError("E_INVARG", `focus target not found: ${target}`);
     const actor = ctx.thisObj;
+    if (!this.actorCanSee(actor, target)) throw wooError("E_PERM", `focus target not visible: ${target}`);
     const list = this.focusListOf(actor);
     if (!list.includes(target)) {
       list.push(target);
       while (list.length > FOCUS_LIST_CAP) list.shift();
       this.world.setProp(actor, "focus_list", list);
-      this.refreshToolList(actor);
     }
     return list as unknown as WooValue;
   }
@@ -361,7 +412,6 @@ export class McpHost {
     const actor = ctx.thisObj;
     const list = this.focusListOf(actor).filter((id) => id !== target);
     this.world.setProp(actor, "focus_list", list);
-    this.refreshToolList(actor);
     return list as unknown as WooValue;
   }
 
@@ -370,13 +420,18 @@ export class McpHost {
   }
 
   private focusListOf(actor: ObjRef): ObjRef[] {
+    if (!this.world.objects.has(actor)) return [];
     const raw = this.world.propOrNull(actor, "focus_list");
     return Array.isArray(raw) ? raw.filter((item): item is ObjRef => typeof item === "string") : [];
   }
 }
 
-function makeQueue(): ActorQueue {
-  return { observations: [], lostSinceMark: 0, firstLostTs: null, waiters: new Set() };
+function makeQueue(actor: ObjRef): SessionQueue {
+  return { actor, observations: [], lostSinceMark: 0, firstLostTs: null, waiters: new Set() };
+}
+
+function emptyDrain(): WooValue {
+  return { observations: [] as unknown as WooValue, more: false, queue_depth: 0 } as unknown as WooValue;
 }
 
 function toInt(value: WooValue | undefined, fallback: number): number {
@@ -432,6 +487,9 @@ function jsonSchemaForHint(hint: string): Record<string, unknown> {
 
 function fromError(error: { code: string; message?: string; value?: unknown; trace?: unknown }): Error {
   const err = new Error(`${error.code}: ${error.message ?? ""}`);
-  (err as Error & { code?: string }).code = error.code;
+  const enriched = err as Error & { code?: string; value?: unknown; trace?: unknown };
+  enriched.code = error.code;
+  if (error.value !== undefined) enriched.value = error.value;
+  if (error.trace !== undefined) enriched.trace = error.trace;
   return err;
 }
