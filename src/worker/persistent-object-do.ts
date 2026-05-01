@@ -45,6 +45,7 @@ import type { AppliedFrame, DirectResultFrame, ErrorFrame, LiveEventFrame, Messa
 import type { SerializedWorld } from "../core/repository";
 import { normalizeError, type ParkedTaskRun } from "../core/world";
 import { CFObjectRepository } from "./cf-repository";
+import { McpGateway } from "../mcp/gateway";
 
 // Re-import WooWorld type. Note `import type` must reach the world module
 // without dragging Node-only deps into the Worker bundle.
@@ -69,6 +70,7 @@ export class PersistentObjectDO {
   private world: WooWorld | null = null;
   private routeCache = new Map<ObjRef, string>();
   private routesRegistered = false;
+  private mcpGateway: McpGateway | null = null;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -120,6 +122,13 @@ export class PersistentObjectDO {
         return jsonResponse({ ok: true, ts: Date.now(), objects: world.objects.size });
       }
 
+      // MCP streamable-HTTP transport (spec/protocol/mcp.md). Only on the
+      // gateway host: agent sessions live here alongside human WebSockets.
+      if (gatewayHost && pathname === "/mcp") {
+        const gateway = this.getMcpGateway(world);
+        return await gateway.handle(request);
+      }
+
       const protocol = await handleRestProtocolRequest(workerRestRequest(request, pathname), {
         world,
         authenticateToken: (token) => this.authenticateToken(world, token),
@@ -160,6 +169,11 @@ export class PersistentObjectDO {
    */
   private durableHostKey(): string {
     return this.state.id.name ?? WORLD_HOST;
+  }
+
+  private getMcpGateway(world: WooWorld): McpGateway {
+    if (!this.mcpGateway) this.mcpGateway = new McpGateway(world, { serverName: "woo" });
+    return this.mcpGateway;
   }
 
   private async getWorld(hostKey = this.durableHostKey()): Promise<WooWorld> {
