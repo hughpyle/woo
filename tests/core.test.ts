@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { compileVerb, definePropertyVersioned, definePropertyVersionedAs, installVerb, installVerbAs } from "../src/core/authoring";
 import { bootstrap, createWorld, createWorldFromSerialized, mergeHostScopedSeed, nonEmptyHostScopedWorld, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
-import type { CallContext, HostBridge, HostOperationMemo, MoveObjectResult, WooWorld } from "../src/core/world";
+import type { CallContext, HostBridge, HostObjectSummary, HostOperationMemo, MoveObjectResult, WooWorld } from "../src/core/world";
 import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
 
 function message(actor: string, target: string, verb: string, args: unknown[] = []): Message {
@@ -57,6 +57,7 @@ function bytecodeVerb(name: string, bytecode: TinyBytecode, owner = "$wiz", perm
 
 class LocalHostBridge implements HostBridge {
   readonly getPropCalls = new Map<string, number>();
+  readonly describeCalls = new Map<string, number>();
 
   constructor(
     readonly localHost: string,
@@ -73,6 +74,21 @@ class LocalHostBridge implements HostBridge {
     const read = async () => {
       this.getPropCalls.set(key, (this.getPropCalls.get(key) ?? 0) + 1);
       return await this.worldFor(objRef).getPropChecked(progr, objRef, name, memo);
+    };
+    if (!memo) return await read();
+    return await memoizeTestOperation(memo.reads, key, read);
+  }
+
+  async describeObject(nameActor: ObjRef, readActor: ObjRef, objRef: ObjRef, memo?: HostOperationMemo): Promise<HostObjectSummary> {
+    const key = `describe:${nameActor}:${readActor}:${objRef}`;
+    const read = async () => {
+      this.describeCalls.set(key, (this.describeCalls.get(key) ?? 0) + 1);
+      const world = this.worldFor(objRef);
+      return {
+        name: world.object(objRef).name,
+        description: world.propOrNullForActor(readActor, objRef, "description"),
+        aliases: world.propOrNullForActor(readActor, objRef, "aliases")
+      };
     };
     if (!memo) return await read();
     return await memoizeTestOperation(memo.reads, key, read);
@@ -407,6 +423,40 @@ describe("woo core", () => {
     expect(result.op).toBe("result");
     if (result.op === "result") expect(result.result).toEqual(["remote", "remote"]);
     expect(bridge.getPropCalls.get(`prop:${actor}:remote_box:value`)).toBe(1);
+  });
+
+  it("bundles remote look descriptions into one host read per object", async () => {
+    const { world: home, actor } = authedWorld();
+    const remote = createWorld({ catalogs: false });
+    const worlds = new Map<string, WooWorld>([
+      ["home", home],
+      ["remote", remote]
+    ]);
+    const routes = new Map<ObjRef, string>([["remote_lamp", "remote"]]);
+    const bridge = new LocalHostBridge("home", worlds, routes);
+    home.setHostBridge(bridge);
+    remote.setHostBridge(new LocalHostBridge("remote", worlds, routes));
+
+    remote.createObject({ id: "remote_lamp", name: "Remote Lamp", parent: "$thing", owner: "$wiz" });
+    remote.setProp("remote_lamp", "description", "A lamp hosted on a different object host.");
+    home.object("the_chatroom").contents.add("remote_lamp");
+
+    const entered = await home.directCall(undefined, actor, "the_chatroom", "enter", []);
+    expect(entered.op).toBe("result");
+    const result = await home.directCall(undefined, actor, "the_chatroom", "look", []);
+    expect(result.op).toBe("result");
+    if (result.op === "result") {
+      const look = result.result as { contents: Array<{ id: string; title: string; description: string }> };
+      expect(look.contents.find((item) => item.id === "remote_lamp")).toMatchObject({
+        title: "Remote Lamp",
+        description: "A lamp hosted on a different object host."
+      });
+    }
+    const describeKey = Array.from(bridge.describeCalls.keys()).find((key) => key.endsWith(`:${actor}:remote_lamp`));
+    expect(describeKey).toBeDefined();
+    expect(bridge.describeCalls.get(describeKey!)).toBe(1);
+    expect(Array.from(bridge.getPropCalls.keys()).some((key) => key.endsWith(":remote_lamp:name"))).toBe(false);
+    expect(Array.from(bridge.getPropCalls.keys()).some((key) => key.endsWith(":remote_lamp:description"))).toBe(false);
   });
 
   it("routes mounted-space direct observations to a remote room audience", async () => {

@@ -158,6 +158,31 @@ describe("McpHost", () => {
     expect(new Set(tools.map((t) => t.name)).size).toBe(tools.length);
   });
 
+  it("lists reachable tools with bounded default scope and explicit expansion", async () => {
+    const world = bootstrapWorld();
+    const session = world.auth("guest:mcp-list-scopes");
+    const host = new McpHost(world);
+    host.bindSession(session.id, session.actor);
+
+    const entered = await world.directCall(undefined, session.actor, "the_chatroom", "enter", []);
+    expect(entered.op).toBe("result");
+
+    const active = await host.listTools(session.actor);
+    expect(active.scope).toBe("active");
+    expect(active.tools.some((t) => t.object === "the_chatroom" && t.verb === "say")).toBe(true);
+    expect(active.tools.some((t) => t.object === "the_cockatoo" && t.verb === "squawk")).toBe(false);
+
+    const here = await host.listTools(session.actor, { scope: "here", query: "squawk" });
+    expect(here.tools.map((t) => `${t.object}:${t.verb}`)).toContain("the_cockatoo:squawk");
+
+    const first = await host.listTools(session.actor, { scope: "all", limit: 1 });
+    expect(first.tools.length).toBe(1);
+    expect(first.nextCursor).toBe("1");
+    const second = await host.listTools(session.actor, { scope: "all", limit: 1, cursor: first.nextCursor ?? undefined });
+    expect(second.tools.length).toBe(1);
+    expect(second.tools[0].name).not.toBe(first.tools[0].name);
+  });
+
   it("returns own-call observations inline only — wait queue is for external events", async () => {
     const world = bootstrapWorld();
     const session = world.auth("guest:mcp-self");
@@ -590,7 +615,17 @@ describe("McpGateway", () => {
       method: "tools/list"
     }, { "mcp-session-id": sessionId! }));
     const listBody = await list.json() as { result: { tools: Array<{ name: string }> } };
-    expect(listBody.result.tools.some((tool) => tool.name === "remote_widget__ping")).toBe(true);
+    expect(listBody.result.tools.some((tool) => tool.name === "remote_widget__ping")).toBe(false);
+
+    const hereList = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 22,
+      method: "tools/call",
+      params: { name: "woo_list_reachable_tools", arguments: { scope: "here" } }
+    }, { "mcp-session-id": sessionId! }));
+    const hereBody = await hereList.json() as { result: { isError?: boolean; structuredContent?: { result?: { tools?: Array<{ name: string }> } } } };
+    expect(hereBody.result.isError).not.toBe(true);
+    expect(hereBody.result.structuredContent?.result?.tools?.some((tool) => tool.name === "remote_widget__ping")).toBe(true);
 
     const call = await gateway.handle(jsonRpcRequest("http://t/mcp", {
       jsonrpc: "2.0",

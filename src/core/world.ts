@@ -90,6 +90,7 @@ export type HostBridge = {
   localHost: string;
   hostForObject(id: ObjRef, memo?: HostOperationMemo): string | null | Promise<string | null>;
   getPropChecked(progr: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue>;
+  describeObject?(nameActor: ObjRef, readActor: ObjRef, objRef: ObjRef, memo?: HostOperationMemo): Promise<HostObjectSummary>;
   location(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef | null>;
   dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue>;
   moveObject(objRef: ObjRef, targetRef: ObjRef, options?: { suppressMirrorHost?: string | null }): Promise<MoveObjectResult>;
@@ -102,6 +103,12 @@ export type HostBridge = {
   // plus the verbs of its current contents (when id is a $space). Optional —
   // hosts that don't run an MCP gateway can omit it.
   enumerateRemoteTools?(actor: ObjRef, ids: ObjRef[]): Promise<RemoteToolDescriptor[]>;
+};
+
+export type HostObjectSummary = {
+  name: WooValue | null;
+  description: WooValue | null;
+  aliases: WooValue | null;
 };
 
 export type HostOperationMemo = {
@@ -2971,11 +2978,7 @@ export class WooWorld {
     let remoteTitles = 0;
     const contents = await Promise.all(items.map(async (item) => {
       if (await this.remoteHostForObject(item, ctx.hostMemo)) remoteTitles += 1;
-      return {
-        id: item,
-        title: await this.titleForLook(ctx, room, item),
-        description: await this.propOrNullForActorAsync(ctx.actor, item, "description", ctx.hostMemo)
-      };
+      return await this.lookEntryFor(ctx, room, item);
     }));
     const look = {
       id: room,
@@ -3004,6 +3007,32 @@ export class WooWorld {
   private async propOrNullForActorAsync(actor: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue> {
     try {
       return await this.getPropChecked(actor, objRef, name, memo);
+    } catch {
+      return null;
+    }
+  }
+
+  private async lookEntryFor(ctx: CallContext, room: ObjRef, item: ObjRef): Promise<Record<string, WooValue>> {
+    const summary = await this.objectSummaryForLook(ctx, item);
+    if (summary) {
+      return {
+        id: item,
+        title: titleFromSummary(item, summary),
+        description: summary.description
+      };
+    }
+    return {
+      id: item,
+      title: await this.titleForLook(ctx, room, item),
+      description: await this.propOrNullForActorAsync(ctx.actor, item, "description", ctx.hostMemo)
+    };
+  }
+
+  private async objectSummaryForLook(ctx: CallContext, item: ObjRef): Promise<HostObjectSummary | null> {
+    if (!await this.remoteHostForObject(item, ctx.hostMemo)) return null;
+    if (!this.hostBridge?.describeObject) return null;
+    try {
+      return await this.hostBridge.describeObject(ctx.progr, ctx.actor, item, ctx.hostMemo);
     } catch {
       return null;
     }
@@ -3519,6 +3548,10 @@ function verbAliasMatches(pattern: string, name: string): boolean {
 
 function addUnique<T>(items: T[], item: T): T[] {
   return items.includes(item) ? items : [...items, item];
+}
+
+function titleFromSummary(fallback: ObjRef, summary: HostObjectSummary): string {
+  return typeof summary.name === "string" && summary.name.length > 0 ? summary.name : fallback;
 }
 
 function runtimeObjectScope(value: ObjRef): string {

@@ -9,7 +9,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { wooError, type ObjRef, type Observation, type WooValue } from "../core/types";
 import type { WooWorld } from "../core/world";
-import { McpHost, type McpInvocationResult, type McpTool } from "./host";
+import { McpHost, type McpInvocationResult, type McpTool, type McpToolListOptions, type McpToolScope } from "./host";
 
 export type McpServerOptions = {
   world: WooWorld;
@@ -70,7 +70,7 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
 
   const toolsByName = new Map<string, McpTool>();
   const refreshTools = async (): Promise<McpTool[]> => {
-    const tools = await host.enumerateTools(actor);
+    const { tools } = await host.listTools(actor, { scope: "active", limit: 64 });
     toolsByName.clear();
     for (const tool of tools) toolsByName.set(tool.name, tool);
     return tools;
@@ -93,12 +93,32 @@ export function createMcpServer(options: McpServerOptions): McpServerInstance {
   const stableTools = new Map<string, StableTool>([
     ["woo_list_reachable_tools", {
       name: "woo_list_reachable_tools",
-      description: "List the current dynamic woo object tools reachable by this actor.",
-      inputSchema: { type: "object", properties: {} },
-      invoke: async () => {
-        const tools = await refreshTools();
+      description: "List dynamic woo object tools reachable by this actor, with scoped pagination.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          scope: { type: "string", enum: ["active", "here", "focus", "object", "space", "all"] },
+          object: { type: "string", description: "woo object reference for object/space scopes" },
+          query: { type: "string", description: "case-insensitive match against tool name, object, verb, aliases, or description" },
+          limit: { type: "integer" },
+          cursor: { type: "string" },
+          include_schema: { type: "boolean", description: "include each tool's JSON input schema" }
+        }
+      },
+      invoke: async (params) => {
+        const includeSchema = booleanParam(params, "include_schema", false);
+        const page = await host.listTools(actor, toolListOptionsFromParams(params));
         return {
-          result: tools.map((tool) => toolSummary(tool)) as WooValue,
+          result: {
+            scope: page.scope,
+            object: page.object ?? null,
+            query: page.query ?? null,
+            limit: page.limit,
+            cursor: page.cursor,
+            next_cursor: page.nextCursor,
+            total: page.total,
+            tools: page.tools.map((tool) => toolSummary(tool, includeSchema))
+          } as WooValue,
           observations: []
         };
       }
@@ -277,9 +297,9 @@ function summarizeResult(result: WooValue, observations: Observation[]): string 
   }
 }
 
-function toolSummary(tool: McpTool): WooValue {
+function toolSummary(tool: McpTool, includeSchema = false): WooValue {
   const properties = ((tool.inputSchema as Record<string, unknown>).properties ?? {}) as Record<string, unknown>;
-  return {
+  const summary: Record<string, unknown> = {
     name: tool.name,
     object: tool.object,
     verb: tool.verb,
@@ -288,7 +308,9 @@ function toolSummary(tool: McpTool): WooValue {
     enclosing_space: tool.enclosingSpace,
     args: Object.keys(properties),
     description: tool.description
-  } as WooValue;
+  };
+  if (includeSchema) summary.input_schema = tool.inputSchema;
+  return summary as WooValue;
 }
 
 function actorControlTool(actor: ObjRef, verb: string): McpTool {
@@ -324,11 +346,47 @@ function numberParam(params: Record<string, unknown>, name: string, fallback: nu
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function booleanParam(params: Record<string, unknown>, name: string, fallback: boolean): boolean {
+  const value = params[name];
+  return typeof value === "boolean" ? value : fallback;
+}
+
 function arrayParam(params: Record<string, unknown>, name: string): WooValue[] {
   const value = params[name];
   if (value === undefined) return [];
   if (!Array.isArray(value)) throw wooError("E_INVARG", `${name} must be an array`);
   return value as WooValue[];
+}
+
+function toolListOptionsFromParams(params: Record<string, unknown>): McpToolListOptions {
+  return {
+    scope: scopeParam(params, "scope"),
+    object: optionalStringParam(params, "object"),
+    query: optionalStringParam(params, "query"),
+    limit: optionalNumberParam(params, "limit"),
+    cursor: optionalStringParam(params, "cursor")
+  };
+}
+
+function scopeParam(params: Record<string, unknown>, name: string): McpToolScope | undefined {
+  const value = params[name];
+  if (value === undefined) return undefined;
+  if (value === "active" || value === "here" || value === "focus" || value === "object" || value === "space" || value === "all") return value;
+  throw wooError("E_INVARG", `${name} must be one of active, here, focus, object, space, all`);
+}
+
+function optionalStringParam(params: Record<string, unknown>, name: string): string | undefined {
+  const value = params[name];
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") throw wooError("E_INVARG", `${name} must be a string`);
+  return value;
+}
+
+function optionalNumberParam(params: Record<string, unknown>, name: string): number | undefined {
+  const value = params[name];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) throw wooError("E_INVARG", `${name} must be a number`);
+  return value;
 }
 
 function wooValueSchema(): Record<string, unknown> {

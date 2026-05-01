@@ -378,7 +378,7 @@ export class PersistentObjectDO {
           const host = await hostForObject(objRef, memo);
           if (!host || host === localHost) {
             return {
-              name: world.propOrNullForActor(nameActor, objRef, "name"),
+              name: world.object(objRef).name,
               description: world.propOrNullForActor(readActor, objRef, "description"),
               aliases: world.propOrNullForActor(readActor, objRef, "aliases")
             };
@@ -796,11 +796,10 @@ export class PersistentObjectDO {
       }
 
       if (request.method === "POST" && pathname === "/__internal/remote-describe") {
-        const nameActor = String(body.name_actor ?? "") as ObjRef;
         const readActor = String(body.read_actor ?? "") as ObjRef;
         const obj = String(body.obj ?? "") as ObjRef;
         return jsonResponse({
-          name: world.propOrNullForActor(nameActor, obj, "name"),
+          name: world.object(obj).name,
           description: world.propOrNullForActor(readActor, obj, "description"),
           aliases: world.propOrNullForActor(readActor, obj, "aliases")
         });

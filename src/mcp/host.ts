@@ -22,8 +22,11 @@ export type McpBroadcastHooks = {
 const QUEUE_HARD_CAP = 4096;
 const DEFAULT_LIMIT = 64;
 const MAX_LIMIT = 256;
+const DEFAULT_TOOL_PAGE_LIMIT = 40;
+const MAX_TOOL_PAGE_LIMIT = 200;
 const FOCUS_LIST_CAP = 32;
 const MAX_TIMEOUT_MS = 30_000;
+const OBJECT_VERB_SEP = "\u0000";
 
 type SessionQueue = {
   actor: ObjRef;
@@ -47,6 +50,27 @@ export type McpTool = {
   inputSchema: Record<string, unknown>;
   direct: boolean;
   enclosingSpace: ObjRef | null;
+};
+
+export type McpToolScope = "active" | "here" | "focus" | "object" | "space" | "all";
+
+export type McpToolListOptions = {
+  scope?: McpToolScope;
+  object?: ObjRef;
+  query?: string;
+  limit?: number;
+  cursor?: string;
+};
+
+export type McpToolListPage = {
+  scope: McpToolScope;
+  object?: ObjRef;
+  query?: string;
+  limit: number;
+  cursor: string | null;
+  nextCursor: string | null;
+  total: number;
+  tools: McpTool[];
 };
 
 export type McpInvocationResult = {
@@ -234,14 +258,43 @@ export class McpHost {
     return false;
   }
 
-  async enumerateTools(actor: ObjRef): Promise<McpTool[]> {
+  async listTools(actor: ObjRef, options: McpToolListOptions = {}): Promise<McpToolListPage> {
+    const scope = options.scope ?? "active";
+    const limit = clampInt(options.limit, 1, MAX_TOOL_PAGE_LIMIT, DEFAULT_TOOL_PAGE_LIMIT);
+    const offset = parseCursor(options.cursor);
+    const filtered = await this.enumerateToolsForScope(actor, scope, options.object, options.query);
+    const tools = filtered.slice(offset, offset + limit);
+    const nextOffset = offset + tools.length;
+    return {
+      scope,
+      object: options.object,
+      query: options.query,
+      limit,
+      cursor: options.cursor ?? null,
+      nextCursor: nextOffset < filtered.length ? String(nextOffset) : null,
+      total: filtered.length,
+      tools
+    };
+  }
+
+  async enumerateTools(actor: ObjRef, options: McpToolListOptions = {}): Promise<McpTool[]> {
+    const scope = options.scope ?? "all";
+    const filtered = await this.enumerateToolsForScope(actor, scope, options.object, options.query);
+    if (options.limit === undefined && options.cursor === undefined) return filtered;
+    const limit = clampInt(options.limit, 1, MAX_TOOL_PAGE_LIMIT, filtered.length || DEFAULT_TOOL_PAGE_LIMIT);
+    const offset = parseCursor(options.cursor);
+    return filtered.slice(offset, offset + limit);
+  }
+
+  private async enumerateToolsForScope(actor: ObjRef, scope: McpToolScope, object: ObjRef | undefined, query: string | undefined): Promise<McpTool[]> {
+    const plan = await this.toolScopePlan(actor, scope, object);
     const tools: McpTool[] = [];
     const usedNames = new Set<string>();
     const seenObjectVerb = new Set<string>();
 
-    // Local enumeration: tools for objects this host knows about.
-    for (const { id } of this.reachable(actor)) {
+    for (const id of plan.selectedIds) {
       if (this.isOtherActor(actor, id)) continue;
+      if (!this.world.objects.has(id)) continue;
       for (const verb of this.tooledVerbsFor(actor, id)) {
         const tool = this.assembleTool(id, {
           verb: verb.name,
@@ -252,32 +305,127 @@ export class McpHost {
           enclosingSpace: this.enclosingSpaceFor(id)
         }, usedNames);
         tools.push(tool);
-        seenObjectVerb.add(`${id} ${verb.name}`);
+        seenObjectVerb.add(`${id}${OBJECT_VERB_SEP}${verb.name}`);
       }
     }
 
-    // Cross-host enumeration (spec/protocol/mcp.md §M3): for every reachable
-    // entry that lives on a remote host, ask that host for tool descriptors
-    // covering the entry plus its current contents. Merge with name-dedup so
-    // seeded contents that exist locally don't double up.
-    const remoteIds = await this.collectRemoteScopeIds(actor);
     const bridge = this.world.getHostBridge();
-    if (remoteIds.length > 0 && bridge?.enumerateRemoteTools) {
-      let descriptors: RemoteToolDescriptor[] = [];
-      try {
-        descriptors = await bridge.enumerateRemoteTools(actor, remoteIds);
-      } catch {
-        // Best-effort; if a host is unreachable its tools just don't appear.
-      }
+    const addRemoteDescriptors = (descriptors: RemoteToolDescriptor[], filterToSelected: boolean): void => {
       for (const d of descriptors) {
-        const key = `${d.object} ${d.verb}`;
+        if (filterToSelected && !plan.selectedIds.has(d.object)) continue;
+        const key = `${d.object}${OBJECT_VERB_SEP}${d.verb}`;
         if (seenObjectVerb.has(key)) continue;
         seenObjectVerb.add(key);
         tools.push(this.assembleTool(d.object, d, usedNames));
       }
+    };
+    if (bridge?.enumerateRemoteTools) {
+      let selectedDescriptors: RemoteToolDescriptor[] = [];
+      try {
+        if (plan.remoteIds.length > 0) selectedDescriptors = await bridge.enumerateRemoteTools(actor, plan.remoteIds);
+      } catch {
+        // Best-effort; if a host is unreachable its tools just don't appear.
+      }
+      addRemoteDescriptors(selectedDescriptors, true);
+
+      let expandedDescriptors: RemoteToolDescriptor[] = [];
+      try {
+        if (plan.remoteExpandedIds.length > 0) expandedDescriptors = await bridge.enumerateRemoteTools(actor, plan.remoteExpandedIds);
+      } catch {
+        // Best-effort; if a host is unreachable its tools just don't appear.
+      }
+      addRemoteDescriptors(expandedDescriptors, false);
     }
 
-    return tools;
+    return filterTools(tools, query);
+  }
+
+  private async toolScopePlan(
+    actor: ObjRef,
+    scope: McpToolScope,
+    object: ObjRef | undefined
+  ): Promise<{ selectedIds: Set<ObjRef>; remoteIds: ObjRef[]; remoteExpandedIds: ObjRef[] }> {
+    const selectedIds = new Set<ObjRef>();
+    const remoteCandidates = new Set<ObjRef>();
+    const remoteExpandCandidates = new Set<ObjRef>();
+    const actorObj = this.world.objects.has(actor) ? this.world.object(actor) : null;
+    const currentLocation = actorObj?.location ?? null;
+    const presence = this.stringListProp(actor, "presence_in");
+    const focus = this.focusListOf(actor);
+    const reachable = this.reachable(actor);
+    const reachableIds = new Set(reachable.map((entry) => entry.id));
+
+    const add = (id: ObjRef | null | undefined, remoteCandidate = true): void => {
+      if (!id) return;
+      selectedIds.add(id);
+      if (remoteCandidate) remoteCandidates.add(id);
+    };
+    const addIfReachable = (id: ObjRef | null | undefined): void => {
+      if (!id) return;
+      if (id === actor || reachableIds.has(id) || presence.includes(id) || focus.includes(id)) add(id);
+    };
+    const addContents = (space: ObjRef | null | undefined): void => {
+      if (!space || !this.world.objects.has(space) || !this.descendsFrom(space, "$space")) return;
+      for (const child of this.world.object(space).contents) {
+        if (this.isOtherActor(actor, child)) continue;
+        if (this.actorCanSee(actor, child)) add(child, false);
+      }
+    };
+    const expandRemoteContents = (space: ObjRef | null | undefined): void => {
+      if (space) remoteExpandCandidates.add(space);
+    };
+
+    switch (scope) {
+      case "active":
+        add(actor, false);
+        add(currentLocation);
+        if (actorObj) for (const id of actorObj.contents) addIfReachable(id);
+        for (const id of presence) add(id);
+        for (const id of focus) add(id);
+        break;
+      case "here":
+        add(currentLocation);
+        addContents(currentLocation);
+        expandRemoteContents(currentLocation);
+        break;
+      case "focus":
+        for (const id of focus) add(id);
+        break;
+      case "object":
+        if (object) addIfReachable(object);
+        break;
+      case "space": {
+        const target = object ?? currentLocation;
+        addIfReachable(target);
+        addContents(target);
+        expandRemoteContents(target);
+        break;
+      }
+      case "all":
+        for (const { id } of reachable) add(id);
+        for (const id of presence) {
+          add(id);
+        }
+        for (const id of focus) {
+          add(id);
+        }
+        expandRemoteContents(currentLocation);
+        break;
+    }
+
+    const remoteIdsRaw: ObjRef[] = [];
+    for (const id of remoteCandidates) {
+      if (id === actor) continue;
+      if (await this.world.isRemoteObject(id)) remoteIdsRaw.push(id);
+    }
+    const remoteExpandedIds: ObjRef[] = [];
+    for (const id of remoteExpandCandidates) {
+      if (id === actor) continue;
+      if (await this.world.isRemoteObject(id)) remoteExpandedIds.push(id);
+    }
+    const expanded = new Set(remoteExpandedIds);
+    const remoteIds = remoteIdsRaw.filter((id) => !expanded.has(id));
+    return { selectedIds, remoteIds, remoteExpandedIds };
   }
 
   // Computes tool descriptors for the given ids — the remote-side counterpart
@@ -293,7 +441,7 @@ export class McpHost {
       if (!this.world.objects.has(id)) return;
       if (!this.actorCanSee(actor, id)) return;
       for (const verb of this.tooledVerbsFor(actor, id)) {
-        const key = `${id} ${verb.name}`;
+        const key = `${id}${OBJECT_VERB_SEP}${verb.name}`;
         if (seen.has(key)) continue;
         seen.add(key);
         out.push({
@@ -623,10 +771,37 @@ export class McpHost {
   }
 
   private focusListOf(actor: ObjRef): ObjRef[] {
-    if (!this.world.objects.has(actor)) return [];
-    const raw = this.world.propOrNull(actor, "focus_list");
+    return this.stringListProp(actor, "focus_list");
+  }
+
+  private stringListProp(obj: ObjRef, name: string): ObjRef[] {
+    if (!this.world.objects.has(obj)) return [];
+    const raw = this.world.propOrNull(obj, name);
     return Array.isArray(raw) ? raw.filter((item): item is ObjRef => typeof item === "string") : [];
   }
+}
+
+function filterTools(tools: McpTool[], query: string | undefined): McpTool[] {
+  const normalized = (query ?? "").trim().toLowerCase();
+  if (!normalized) return tools;
+  return tools.filter((tool) => {
+    if (tool.name.toLowerCase().includes(normalized)) return true;
+    if (tool.object.toLowerCase().includes(normalized)) return true;
+    if (tool.verb.toLowerCase().includes(normalized)) return true;
+    if (tool.description.toLowerCase().includes(normalized)) return true;
+    return tool.aliases.some((alias) => alias.toLowerCase().includes(normalized));
+  });
+}
+
+function parseCursor(cursor: string | undefined): number {
+  if (!cursor) return 0;
+  const parsed = Number.parseInt(cursor, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function clampInt(value: number | undefined, min: number, max: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
 function makeQueue(actor: ObjRef): SessionQueue {

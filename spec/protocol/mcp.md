@@ -38,12 +38,25 @@ A small stable control plane exists for MCP clients whose tool metadata can lag 
 
 | Tool | Purpose |
 |---|---|
-| `woo_list_reachable_tools()` | Returns the current dynamic object-tool descriptors: name, canonical object, verb, route, args, and description. |
+| `woo_list_reachable_tools(scope?, object?, query?, limit?, cursor?, include_schema?)` | Returns a paged, scoped listing of dynamic object-tool descriptors: name, canonical object, verb, route, args, and description. Defaults to the bounded `active` scope. |
 | `woo_call(object, verb, args?)` | Finds the currently reachable dynamic tool for `<object>:<verb>` and invokes it through the normal direct/sequenced route. `args` is a positional list of arbitrary JSON woo values, not a string-only argv. |
 | `woo_focus(target)` / `woo_unfocus(target)` | Stable protocol wrappers around the actor's `$actor:focus` / `$actor:unfocus` verbs. |
 | `woo_wait(timeout_ms?, limit?)` | Stable protocol wrapper around the actor's `$actor:wait` verb. |
 
 The wrappers exist because some MCP clients discover tools once, cache aggressively, or route calls through deferred metadata. A stale dynamic name like `the_pinboard__list_notes` may not be in the client's current cache even though `the_pinboard:list_notes` is reachable. `woo_call` gives the agent a canonical escape hatch without requiring the gateway to hardcode catalog objects or expose hidden verbs.
+
+`woo_list_reachable_tools` is one discovery primitive, not a family of per-object helpers. Its `scope` is one of:
+
+| Scope | Meaning |
+|---|---|
+| `active` | Bounded default: actor, current location, inventory, presence spaces, and focused objects. Does not expand every room/space contents entry. |
+| `here` | Current location plus visible non-actor contents. |
+| `focus` | Focused objects only. |
+| `object` | One reachable object named by `object`. |
+| `space` | One reachable space named by `object`, or current location if omitted, plus visible non-actor contents. |
+| `all` | All directly reachable categories: actor, current location, current-location contents, inventory, presence spaces, and focused objects. It does not expand every presence/focus space's contents; use `space` for that deliberate scan. |
+
+The result shape is `{scope, object, query, limit, cursor, next_cursor, total, tools}`. `query` is a case-insensitive filter over tool name, object, verb, aliases, and description. `include_schema` asks the server to include the JSON input schema in each summary; it is off by default to keep discovery compact.
 
 ### M2.1 Verb-to-tool mapping
 
@@ -134,13 +147,13 @@ The dynamic tool set at any moment is computed against the actor's **reachable s
 6. **Working set.** Objects the actor has explicitly added to its scope via `$actor:focus(target)` (§M3.1). This is how task refs returned from `the_taskspace:list_tasks()` become callable: the agent calls `focus(t-7)` and `t-7`'s verbs (`claim`, `set_status`, `add_subtask`) join the tool list. Bounded; capped per implementation policy (default 32 entries).
 7. **Catalog-visible singletons.** Objects the catalog registry advertises as visible to this actor's class/role (per [discovery/catalogs.md](../discovery/catalogs.md)). v1-ops typically surfaces nothing here for ordinary actors; wizard actors get whatever wizard-discoverable singletons the catalog declares. There is no hardcoded list of "universal corenames" in the protocol — visibility is data-driven from the catalog registry, not from the MCP spec.
 
-Full tool enumeration is **lazy**. The gateway enumerates dynamic tools when the client calls `tools/list`, `woo_list_reachable_tools`, or a canonical `woo_call(object, verb, args?)` that needs to resolve one reachable object. Ordinary tool calls do not force a full cross-host enumeration after they run.
+Full tool enumeration is **lazy** and **not the default**. Standard MCP `tools/list` returns stable control tools plus a bounded `active` dynamic projection. `woo_list_reachable_tools` uses the same bounded default unless the agent explicitly asks for `here`, `focus`, `object`, `space`, or `all`. A canonical `woo_call(object, verb, args?)` resolves only the requested reachable object/verb. Ordinary tool calls do not force a full cross-host enumeration after they run.
 
 After a tool call, the gateway may compute a cheap local reachability signal (location, inventory, presence spaces, working set, local object versions). If that signal changes, it sends `notifications/tools/list_changed` only to MCP sessions bound to that actor. A change to Alice's tool list must not notify Bob's session; otherwise one actor's move/focus can force every connected agent to re-enumerate cross-host tools. The notification is a hint, not a freshness barrier: clients that tolerate stale tool lists for one turn can ignore it; clients that don't should re-list before their next decision or use `woo_list_reachable_tools` / `woo_call`.
 
 Containment cycles and re-entrant rooms (a room as the contents of another room — see the chat catalog's hot tub) are walked once; the algorithm is a BFS bounded by the reachability set's natural boundary (objects not in any of the seven categories above).
 
-Reachability spans hosts. When a category-2/3/5 entry resolves to a remote $space (per [hosts.md §3](hosts.md#3-hosts-and-execution-model)) the gateway asks that host for its current contents/membership and merges the result with locally-known entries. Per-instance verbs on dynamically-created objects (a `$task` minted at runtime on the taskspace's host, a `$cockatoo` cloned into a chat room) therefore appear in the tool list as soon as the object exists — the agent does not need to know which DO owns what. The same rule applies to `woo_call(object, verb, args?)`: targeted resolution must search the remote contribution for the actor's reachable spaces/focus set, not only the gateway's local object ids. The remote host is responsible for applying the actor's read-permission filter before returning its contribution; the gateway trusts that filter (same-deployment trust, [hosts.md §3.3](hosts.md#33-trust-model-across-hosts)). Cross-host reachability lookups are best-effort cached for the duration of one tool-list computation; subsequent `tools/list` requests re-fetch.
+Reachability spans hosts. When a selected scope entry resolves to a remote $space (per [hosts.md §3](hosts.md#3-hosts-and-execution-model)) the gateway asks that host for tool descriptors and merges the result with locally-known entries. Scopes that expand space contents (`here`, `space`, `all`) include per-instance verbs on dynamically-created objects (a `$task` minted at runtime on the taskspace's host, a `$cockatoo` cloned into a chat room). The bounded `active` scope asks the same host but filters the response back to the selected objects, so a taskspace containing hundreds of tasks does not become hundreds of MCP tools by default. The same rule applies to `woo_call(object, verb, args?)`: targeted resolution must search the remote contribution for the actor's reachable spaces/focus set, not only the gateway's local object ids. The remote host is responsible for applying the actor's read-permission filter before returning its contribution; the gateway trusts that filter (same-deployment trust, [hosts.md §3.3](hosts.md#33-trust-model-across-hosts)). Cross-host reachability lookups are best-effort cached for the duration of one tool-list computation; subsequent `tools/list` requests re-fetch.
 
 ### M3.1 Working set: `$actor:focus`
 
