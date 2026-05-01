@@ -16,7 +16,9 @@ This spec assumes the MCP client supports dynamic tool lists (`notifications/too
 agent ──(MCP)──► woo MCP gateway ──(internal)──► gateway DO / actor's host
 ```
 
-One MCP connection binds to one woo session, which binds to one actor. The session is established the same way a REST or WS session is ([../identity/auth.md](../identity/auth.md)): the agent presents a token (`bearer:<...>`, `apikey:<...>`, or — for development — `wizard:<bootstrap-token>`), the gateway resolves it to a session and an actor, and that pair is the trust boundary for the duration of the connection.
+One MCP connection binds to one woo session, which binds to one actor. The session is established the same way a REST or WS session is ([../identity/auth.md](../identity/auth.md)): the agent presents a token (`guest:<...>`, `bearer:<...>`, `apikey:<...>`, or — for development — `wizard:<bootstrap-token>`), the gateway resolves it to a session and an actor, and that pair is the trust boundary for the duration of the connection.
+
+For Streamable HTTP, the first request carries that woo token in `Mcp-Token`. Clients that only expose bearer-token configuration may instead send `Authorization: Bearer <woo-token>`; the bearer envelope is transport syntax, not a separate woo token class. Subsequent requests carry `Mcp-Session-Id`.
 
 - One actor per connection. Multi-actor multiplexing is not in v1-ops.
 - The connection's **caller authority** is the actor's identity. Inside the VM, a verb's `progr` ([../semantics/permissions.md](../semantics/permissions.md)) is the verb owner — set at compile time and carried in every frame. The MCP gateway does not invent `progr`; it dispatches calls under the actor's identity, and verb dispatch then derives `progr` from the verb being called per the standard rule. MCP does not elevate authority; an agent connected as `$guest_42` can do exactly what a browser-attached `$guest_42` can do.

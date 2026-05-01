@@ -268,7 +268,26 @@ describe("McpGateway", () => {
     expect(closed.status).toBe(204);
   });
 
-  it("rejects requests without a session and without Mcp-Token", async () => {
+  it("initializes a session via Authorization bearer for Codex-style MCP clients", async () => {
+    const world = bootstrapWorld();
+    const gateway = new McpGateway(world);
+
+    const init = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "codex", version: "0.0.0" }
+      }
+    }, { authorization: "Bearer guest:mcp-codex" }));
+
+    expect(init.ok).toBe(true);
+    expect((init.headers.get("mcp-session-id") ?? "").length).toBeGreaterThan(0);
+  });
+
+  it("rejects requests without a session and without an auth token", async () => {
     const world = bootstrapWorld();
     const gateway = new McpGateway(world);
     const response = await gateway.handle(new Request("http://t/mcp", { method: "POST", body: "{}" }));

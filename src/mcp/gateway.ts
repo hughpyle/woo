@@ -3,10 +3,12 @@
 // only register once. Each MCP session binds a queue inside that host and
 // gets its own server + transport.
 //
-// First-request auth uses the `Mcp-Token` header (one of the woo token
-// classes: guest:, bearer:, apikey:, wizard:). The server resolves it to a
-// woo session, generates an Mcp-Session-Id, and binds a McpHost queue to it.
-// Subsequent requests carry Mcp-Session-Id.
+// First-request auth uses either the `Mcp-Token` header or, for MCP clients
+// that only expose bearer-token configuration, `Authorization: Bearer <token>`.
+// The token value is one of the woo token classes: guest:, bearer:, apikey:,
+// wizard:. The server resolves it to a woo session, generates an
+// Mcp-Session-Id, and binds a McpHost queue to it. Subsequent requests carry
+// Mcp-Session-Id.
 
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -17,6 +19,7 @@ import { McpHost } from "./host";
 
 const MCP_TOKEN_HEADER = "mcp-token";
 const MCP_SESSION_HEADER = "mcp-session-id";
+const AUTHORIZATION_HEADER = "authorization";
 
 type SessionEntry = {
   woo: Session;
@@ -51,11 +54,11 @@ export class McpGateway {
 
     if (!entry) {
       if (request.method !== "POST") {
-        return jsonError(401, "E_NOSESSION", "mcp gateway requires Mcp-Session-Id (or POST + Mcp-Token to initialize)");
+        return jsonError(401, "E_NOSESSION", "mcp gateway requires Mcp-Session-Id (or POST + auth token to initialize)");
       }
-      const token = headers.get(MCP_TOKEN_HEADER);
+      const token = authTokenFromHeaders(headers);
       if (!token) {
-        return jsonError(401, "E_NOSESSION", "first MCP request must include Mcp-Token header");
+        return jsonError(401, "E_NOSESSION", "first MCP request must include Mcp-Token or Authorization: Bearer <token>");
       }
       try {
         const woo = this.world.auth(token);
@@ -126,6 +129,16 @@ export class McpGateway {
 
     return { woo, server, transport };
   }
+}
+
+function authTokenFromHeaders(headers: Headers): string | null {
+  const explicit = headers.get(MCP_TOKEN_HEADER)?.trim();
+  if (explicit) return explicit;
+  const authorization = headers.get(AUTHORIZATION_HEADER)?.trim();
+  if (!authorization) return null;
+  const match = /^bearer\s+(.+)$/i.exec(authorization);
+  const token = match?.[1]?.trim();
+  return token && token.length > 0 ? token : null;
 }
 
 function jsonError(status: number, code: string, message: string): Response {
