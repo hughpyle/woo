@@ -114,6 +114,7 @@ const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", 
 const taskStatuses = ["open", "claimed", "in_progress", "blocked", "done"] as const;
 const directThrottle = new Map<string, number>();
 const pendingDirect = new Map<string, (result: any) => void>();
+const pendingFrameErrors = new Map<string, (error: any) => void>();
 const pendingTaskSelections = new Set<string>();
 const reconnectBaseDelayMs = 500;
 const reconnectMaxDelayMs = 5000;
@@ -167,6 +168,7 @@ function connect() {
       requestReplay(socket);
     }
     if (frame.op === "applied") {
+      if (typeof frame.id === "string") pendingFrameErrors.delete(frame.id);
       const pinboardAnimations = capturePinboardAnimations(frame.observations ?? []);
       forgetLiveControls(frame.observations ?? []);
       rememberTaskObservations(frame.observations ?? [], typeof frame.id === "string" ? frame.id : undefined);
@@ -182,6 +184,7 @@ function connect() {
     }
     if (frame.op === "result") {
       const handler = pendingDirect.get(frame.id);
+      if (typeof frame.id === "string") pendingFrameErrors.delete(frame.id);
       if (handler) {
         pendingDirect.delete(frame.id);
         handler(frame.result);
@@ -201,8 +204,12 @@ function connect() {
       await refresh();
     }
     if (frame.op === "error") {
-      if (typeof frame.id === "string") pendingDirect.delete(frame.id);
-      if (typeof frame.id === "string") pendingTaskSelections.delete(frame.id);
+      const errorHandler = typeof frame.id === "string" ? pendingFrameErrors.get(frame.id) : undefined;
+      if (typeof frame.id === "string") {
+        pendingDirect.delete(frame.id);
+        pendingFrameErrors.delete(frame.id);
+        pendingTaskSelections.delete(frame.id);
+      }
       if (frame.error?.code === "E_NOSESSION") {
         clearSession();
         if (socket.readyState === WebSocket.OPEN) sendSocket(socket, { op: "auth", token: "guest:local" });
@@ -210,13 +217,15 @@ function connect() {
       }
       state.observations.unshift({ error: frame.error });
       trimObservations();
-      render();
+      if (errorHandler) errorHandler(frame.error);
+      else render();
     }
   });
   socket.addEventListener("close", () => {
     if (state.socket !== socket) return;
     stopHeartbeat();
     pendingDirect.clear();
+    pendingFrameErrors.clear();
     pendingTaskSelections.clear();
     scheduleReconnect();
   });
@@ -484,10 +493,21 @@ function call(space: string, target: string, verb: string, args: any[] = []) {
   return id;
 }
 
-function direct(target: string, verb: string, args: any[] = [], onResult?: (result: any) => void) {
+function callWithError(space: string, target: string, verb: string, args: any[] = [], onError?: (error: any) => void) {
+  const id = crypto.randomUUID();
+  if (onError) pendingFrameErrors.set(id, onError);
+  if (!sendFrame({ op: "call", id, space, message: { target, verb, args } })) pendingFrameErrors.delete(id);
+  return id;
+}
+
+function direct(target: string, verb: string, args: any[] = [], onResult?: (result: any) => void, onError?: (error: any) => void) {
   const id = crypto.randomUUID();
   if (onResult) pendingDirect.set(id, onResult);
-  if (!sendFrame({ op: "direct", id, target, verb, args })) pendingDirect.delete(id);
+  if (onError) pendingFrameErrors.set(id, onError);
+  if (!sendFrame({ op: "direct", id, target, verb, args })) {
+    pendingDirect.delete(id);
+    pendingFrameErrors.delete(id);
+  }
   return id;
 }
 
@@ -1209,9 +1229,9 @@ function enterChat() {
   direct(room, "enter", [], (result) => {
     setCurrentChatRoom(room);
     setChatPresent(result);
-    if (result?.look_deferred === true) direct(room, "look", [], applyLookResult);
+    if (result?.look_deferred === true) direct(room, "look", [], applyLookResult, receiveChatError);
     if (state.tab === "chat") render();
-  });
+  }, receiveChatError);
 }
 
 function isChatObservation(observation: any) {
@@ -1431,6 +1451,20 @@ function receiveChatEvent(observation: any, shouldRender = true) {
   }, shouldRender);
 }
 
+function receiveChatError(error: any) {
+  pushChatLine({
+    kind: "error",
+    text: chatErrorText(error),
+    ts: Date.now()
+  });
+}
+
+function chatErrorText(error: any): string {
+  if (typeof error?.message === "string" && error.message.trim()) return error.message;
+  if (typeof error?.code === "string" && error.code.trim()) return error.code;
+  return "That didn't work.";
+}
+
 function chatLineKind(observation: any): ChatLine["kind"] {
   const type = String(observation?.type ?? "");
   if (type === "cockatoo_squawk" || type === "cockatoo_muffled" || type === "cockatoo_taught" || type === "cockatoo_gagged" || type === "cockatoo_ungagged" || type === "cockatoo_fed" || type === "cockatoo_pluck" || type === "cockatoo_shake") return "system";
@@ -1546,6 +1580,9 @@ function renderChatLine(line: ChatLine) {
   if (line.kind === "huh") {
     return `<div class="chat-line system"><span class="chat-time">${escapeHtml(time)}</span><span>I don't understand "${escapeHtml(line.text ?? "")}".</span></div>`;
   }
+  if (line.kind === "error") {
+    return `<div class="chat-line error"><span class="chat-time">${escapeHtml(time)}</span><span>${escapeHtml(line.text ?? "That didn't work.")}</span></div>`;
+  }
   if (line.kind === "entered" || line.kind === "left") {
     const text = line.text ?? `${actorLabel(line.actor)} ${line.kind === "entered" ? "entered" : "left"}.`;
     return `<div class="chat-line system"><span class="chat-time">${escapeHtml(time)}</span><span>${escapeHtml(text)}</span></div>`;
@@ -1576,7 +1613,7 @@ function bindChat() {
     direct(room, "leave", [], (result) => {
       setChatPresent(result);
       if (state.tab === "chat") render();
-    });
+    }, receiveChatError);
   });
   document.querySelector<HTMLButtonElement>("[data-chat-look]")?.addEventListener("click", refreshChatLook);
   document.querySelectorAll<HTMLButtonElement>("[data-chat-recipient]").forEach((button) => {
@@ -1608,7 +1645,7 @@ function focusChatInput() {
 function sendChatInput(text: string) {
   const room = chatRoom();
   if (!room) return;
-  direct(room, "command_plan", [text], (plan) => executeChatPlan(plan, text));
+  direct(room, "command_plan", [text], (plan) => executeChatPlan(plan, text), receiveChatError);
 }
 
 function executeChatPlan(plan: any, originalText: string) {
@@ -1620,11 +1657,11 @@ function executeChatPlan(plan: any, originalText: string) {
   if (!target || !verb) return;
   if (route === "sequenced") {
     const space = String(plan.space ?? chatRoom());
-    if (space) call(space, target, verb, args);
+    if (space) callWithError(space, target, verb, args, receiveChatError);
     return;
   }
   if (route === "direct") {
-    direct(target, verb, args, (result) => renderChatCommandResult(plan, result, originalText));
+    direct(target, verb, args, (result) => renderChatCommandResult(plan, result, originalText), receiveChatError);
   }
 }
 
@@ -1657,14 +1694,14 @@ function renderChatCommandResult(plan: any, result: any, originalText: string) {
     const room = result.room;
     setCurrentChatRoom(room);
     setChatPresent(result);
-    if (result.look_deferred === true) direct(room, "look", [], applyLookResult);
+    if (result.look_deferred === true) direct(room, "look", [], applyLookResult, receiveChatError);
     void refresh();
     return;
   }
   if (verb === "enter") {
     if (target) setCurrentChatRoom(target);
     setChatPresent(result);
-    if (result?.look_deferred === true && target) direct(target, "look", [], applyLookResult);
+    if (result?.look_deferred === true && target) direct(target, "look", [], applyLookResult, receiveChatError);
     void refresh();
     return;
   }
@@ -1679,7 +1716,7 @@ function renderChatCommandResult(plan: any, result: any, originalText: string) {
 function refreshChatLook() {
   const room = chatRoom();
   if (!room) return;
-  direct(room, "look", [], applyLookResult);
+  direct(room, "look", [], applyLookResult, receiveChatError);
 }
 
 function applyLookResult(result: any) {
@@ -2956,7 +2993,7 @@ class DubAudio {
   private triggerVoice(voice: string, step: number) {
     if (voice === "kick") this.kick();
     if (voice === "snare") this.noiseHit(0.18, 900, 0.08);
-    if (voice === "hat") this.noiseHit(0.05, 7000, 0.035);
+    if (voice === "hat") this.noiseHit(0.05, 7000, 0.10);
     if (voice === "tone") this.tone(toneTrackFreq(step));
   }
 
