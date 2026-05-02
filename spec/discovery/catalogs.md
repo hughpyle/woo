@@ -262,6 +262,29 @@ properties that older worlds are missing, including generic `auto_presence` and
 `host_placement` metadata. These are catalog data values; runtime code must not
 branch on the seeded object names that happen to receive them.
 
+### CT5.4.2 Catalog status and drift diagnostics
+
+Catalog status is a **read-only plan**, not a repair. Operator tooling may ask
+the runtime to compare the live world against the manifest it would install or
+repair from. The result reports:
+
+- installed catalog record, alias, tap, installed version, and manifest version;
+- pending local boot migration IDs for bundled `@local` catalogs;
+- manifest drift: missing catalog objects, missing properties, verb source or
+  metadata drift, parent drift, missing seed objects, and missing feature
+  attachments;
+- `needs_repair`, a summary boolean derived from the issues list.
+
+`GET /api/catalogs` returns the ordinary installed catalog list plus a `local`
+section for bundled catalogs known to the deployment. Remote GitHub tap status
+uses the same comparison shape after the host has fetched a candidate manifest.
+
+The diagnostic must not mutate the world and must not require catalog-specific
+runtime branches. It is allowed to recompile manifest verb source for comparison,
+because compile diagnostics are exactly what update/repair would encounter.
+Repair/update remains an explicit sequenced operation through
+`$catalog_registry`.
+
 ### CT5.5 Manifest shape
 
 ```jsonc

@@ -1,9 +1,14 @@
 import { BUNDLED_CATALOGS } from "../generated/bundled-catalogs";
-import { installCatalogManifest, repairCatalogManifest, type CatalogManifest } from "./catalog-installer";
+import { catalogManifestStatus, installCatalogManifest, repairCatalogManifest, type CatalogManifest, type CatalogManifestStatus } from "./catalog-installer";
 import type { ObjRef, WooValue } from "./types";
 import type { WooWorld } from "./world";
 
 export type LocalCatalogName = string;
+export type LocalCatalogStatus = CatalogManifestStatus & {
+  local: true;
+  migrations: Array<{ id: string; applied: boolean }>;
+  pending_migrations: string[];
+};
 
 const LOCAL_CATALOGS = new Map(BUNDLED_CATALOGS.map((entry) => [entry.manifest.name, entry.manifest] as const));
 const LOCAL_CATALOG_SOURCE_MIGRATION = "2026-04-30-source-catalog-verbs";
@@ -44,6 +49,44 @@ const LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION = "2026-05-02-prog-editor-nowh
 
 export const DEFAULT_LOCAL_CATALOGS = bundledCatalogAliases();
 
+const LOCAL_CATALOG_MIGRATION_INDEX: Array<{ id: string; only?: string }> = [
+  { id: LOCAL_CATALOG_SOURCE_MIGRATION },
+  { id: LOCAL_CATALOG_PLACEMENT_MIGRATION },
+  { id: LOCAL_CATALOG_CHAT_COCKATOO_MIGRATION },
+  { id: LOCAL_CATALOG_CHAT_LOOK_CONTENTS_MIGRATION },
+  { id: LOCAL_CATALOG_CHAT_COMMAND_PARSER_MIGRATION },
+  { id: LOCAL_CATALOG_DUBSPACE_CONTROL_GUARDS_MIGRATION },
+  { id: LOCAL_CATALOG_DUBSPACE_MOUNTED_CONTROLS_MIGRATION, only: "dubspace" },
+  { id: LOCAL_CATALOG_ROOM_LOOK_SELF_MIGRATION },
+  { id: LOCAL_CATALOG_CHAT_THREE_ROOM_MIGRATION },
+  { id: LOCAL_CATALOG_CHAT_OBSERVATION_OUTPUT_MIGRATION },
+  { id: LOCAL_CATALOG_CHAT_ROOM_CONTENTS_REPAIR_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_AGENT_TOOL_EXPOSURE_REPAIR_MIGRATION },
+  { id: LOCAL_CATALOG_CHAT_NAVIGATION_TOOL_EXPOSURE_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_COCKATOO_TOOL_EXPOSURE_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_CHAT_NOWHERE_PORTABLES_REPAIR_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_TASKSPACE_VERBS_REPAIR_MIGRATION, only: "taskspace" },
+  { id: LOCAL_CATALOG_PINBOARD_LOOK_OBSERVATION_MIGRATION, only: "pinboard" },
+  { id: LOCAL_CATALOG_PINBOARD_ACTIVITY_TEXT_MIGRATION, only: "pinboard" },
+  { id: LOCAL_CATALOG_PINBOARD_VIEWPORT_PRESENCE_MIGRATION, only: "pinboard" },
+  { id: LOCAL_CATALOG_PINBOARD_FREE_COORDS_MIGRATION, only: "pinboard" },
+  { id: LOCAL_CATALOG_DUBSPACE_SOURCE_PRESENCE_MIGRATION, only: "dubspace" },
+  { id: LOCAL_CATALOG_PINBOARD_SOURCE_PRESENCE_MIGRATION, only: "pinboard" },
+  { id: LOCAL_CATALOG_PINBOARD_PINS_MODEL_MIGRATION, only: "pinboard" },
+  { id: LOCAL_CATALOG_PINBOARD_NOTES_TO_PINS_MIGRATION, only: "pinboard" },
+  { id: LOCAL_CATALOG_PINBOARD_V02_REPAIR_MIGRATION, only: "pinboard" },
+  { id: LOCAL_CATALOG_PINBOARD_V02_DATA_REPAIR_MIGRATION, only: "pinboard" },
+  { id: LOCAL_CATALOG_CHAT_SOURCE_MOVEMENT_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_CHAT_ROOM_EXIT_MODEL_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_CHAT_EXIT_PRIVILEGE_REPAIR_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_CHAT_EXIT_ALIAS_REPAIR_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_CHAT_STALE_CLASS_VERBS_REPAIR_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_CHAT_LOOK_SKIP_PRESENCE_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION, only: "taskspace" },
+  { id: LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION, only: "prog" },
+  { id: LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION, only: "prog" }
+];
+
 export function bundledCatalogAliases(): string[] {
   return sortCatalogNames(Array.from(LOCAL_CATALOGS.keys()));
 }
@@ -60,7 +103,7 @@ export function parseAutoInstallCatalogs(value: string | undefined): string[] {
 export function installLocalCatalogs(world: WooWorld, names: readonly string[] = DEFAULT_LOCAL_CATALOGS): void {
   const sorted = sortCatalogNames(names);
   for (const name of sorted) installLocalCatalog(world, name);
-  runLocalCatalogMigrations(world, sorted);
+  runLocalCatalogMigrations(world, localMigrationCatalogNames(world, sorted));
 }
 
 export function installLocalCatalog(world: WooWorld, name: string): void {
@@ -77,6 +120,27 @@ export function installLocalCatalog(world: WooWorld, name: string): void {
     ref_resolved_sha: "unversioned"
   };
   installCatalogManifest(world, manifest, { tap: "@local", alias: name, actor: "$wiz", provenance });
+}
+
+export function localCatalogStatuses(world: WooWorld, names: readonly string[] = DEFAULT_LOCAL_CATALOGS): LocalCatalogStatus[] {
+  return sortCatalogNames(names).map((name) => {
+    if (!isLocalCatalogName(name)) throw new Error(`unknown local catalog: ${name}`);
+    const migrations = LOCAL_CATALOG_MIGRATION_INDEX
+      .filter((migration) => !migration.only || migration.only === name)
+      .map((migration) => ({ id: migration.id, applied: migrationApplied(world, migration.id) }));
+    const base = catalogManifestStatus(world, LOCAL_CATALOGS.get(name)!, {
+      tap: "@local",
+      alias: name,
+      actor: "$wiz",
+      allowImplementationHints: true
+    });
+    return {
+      ...base,
+      local: true,
+      migrations,
+      pending_migrations: migrations.filter((migration) => !migration.applied).map((migration) => migration.id)
+    };
+  });
 }
 
 function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): void {
@@ -115,6 +179,12 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): v
   runTaskspaceListTasksGuardMigration(world, names);
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION, { reconcileSeedHooks: true, only: "prog" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION, { reconcileSeedHooks: true, only: "prog" });
+}
+
+function localMigrationCatalogNames(world: WooWorld, requested: readonly string[]): string[] {
+  const selected = new Set(requested);
+  for (const name of installedLocalCatalogNames(world)) selected.add(name);
+  return sortCatalogNames(Array.from(selected));
 }
 
 function runLocalCatalogMigration(world: WooWorld, names: readonly string[], id: string, options: { allowImplementationHints?: boolean; reconcileSeedHooks?: boolean; rehomeNowhereSeedObjects?: boolean; reconcileClassVerbs?: boolean; only?: string } = {}): void {
@@ -223,6 +293,21 @@ function localCatalogInstalled(world: WooWorld, name: string): boolean {
     const item = record as Record<string, WooValue>;
     return item.alias === name || item.catalog === name;
   });
+}
+
+function installedLocalCatalogNames(world: WooWorld): string[] {
+  if (!world.objects.has("$catalog_registry")) return [];
+  const raw = world.propOrNull("$catalog_registry", "installed_catalogs");
+  if (!Array.isArray(raw)) return [];
+  const names = new Set<string>();
+  for (const record of raw) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    const item = record as Record<string, WooValue>;
+    if (item.tap !== "@local") continue;
+    if (typeof item.catalog === "string" && LOCAL_CATALOGS.has(item.catalog)) names.add(item.catalog);
+    if (typeof item.alias === "string" && LOCAL_CATALOGS.has(item.alias)) names.add(item.alias);
+  }
+  return Array.from(names);
 }
 
 function migrationApplied(world: WooWorld, id: string): boolean {

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { installVerb } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
 import { installCatalogManifest, updateCatalogManifest, type CatalogManifest as RuntimeCatalogManifest } from "../src/core/catalog-installer";
-import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
+import { bundledCatalogAliases, installLocalCatalogs, localCatalogStatuses } from "../src/core/local-catalogs";
 import type { VerbDef } from "../src/core/types";
 
 type CatalogManifest = {
@@ -559,6 +559,58 @@ describe("local catalogs", () => {
     expect(world.propOrNull("the_pinboard", "notes")).toBeNull();
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-pinboard-v02-repair");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-pinboard-v02-data-repair");
+  });
+
+  it("reports local catalog drift and pending boot migrations without mutating", () => {
+    const world = createWorld();
+    const listNotes = world.ownVerbExact("$pinboard", "list_notes")!;
+    const installed = installVerb(world, "$pinboard", "list_notes", `verb :list_notes() rxd {
+  return this.notes;
+}`, listNotes.version);
+    expect(installed.ok).toBe(true);
+    const migrations = (world.getProp("$system", "applied_migrations") as string[])
+      .filter((id) => id !== "2026-05-02-pinboard-v02-repair" && id !== "2026-05-02-pinboard-v02-data-repair");
+    world.setProp("$system", "applied_migrations", migrations);
+
+    const status = localCatalogStatuses(world, ["pinboard"]).find((item) => item.catalog === "pinboard")!;
+
+    expect(status.installed).toBe(true);
+    expect(status.needs_repair).toBe(true);
+    expect(status.pending_migrations).toEqual(expect.arrayContaining(["2026-05-02-pinboard-v02-repair", "2026-05-02-pinboard-v02-data-repair"]));
+    expect(status.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "verb_drift", object: "$pinboard", verb: "list_notes" })
+    ]));
+    expect(world.ownVerbExact("$pinboard", "list_notes")?.source).toContain("return this.notes");
+    expect(world.getProp("$system", "applied_migrations")).not.toContain("2026-05-02-pinboard-v02-repair");
+  });
+
+  it("runs local repairs for installed catalogs even when auto-install is empty", () => {
+    const world = createWorld();
+    const migrations = (world.getProp("$system", "applied_migrations") as string[])
+      .filter((id) => ![
+        "2026-05-02-pinboard-v02-repair",
+        "2026-05-02-pinboard-v02-data-repair",
+        "2026-05-02-chat-look-skip-presence"
+      ].includes(id));
+    world.setProp("$system", "applied_migrations", migrations);
+
+    const chatLook = world.ownVerbExact("$conversational", "look")!;
+    world.addVerb("$conversational", { ...chatLook, skip_presence_check: false, version: chatLook.version + 1 });
+    const listNotes = world.ownVerbExact("$pinboard", "list_notes")!;
+    const installed = installVerb(world, "$pinboard", "list_notes", `verb :list_notes() rxd {
+  return this.notes;
+}`, listNotes.version);
+    expect(installed.ok).toBe(true);
+    world.setProp("the_pinboard", "notes", [
+      { id: "n11", text: "hello", color: "yellow", x: 4, y: 8, w: 160, h: 90, z: 7, author: "$wiz", updated_by: "$wiz" }
+    ]);
+
+    installLocalCatalogs(world, []);
+
+    expect(world.ownVerbExact("$conversational", "look")?.skip_presence_check).toBe(true);
+    expect(world.ownVerbExact("$pinboard", "list_notes")?.source).toContain("contents(this)");
+    expect(world.propOrNull("the_pinboard", "notes")).toBeNull();
+    expect(Array.from(world.object("the_pinboard").contents).some((id) => world.isDescendantOf(id, "$pin"))).toBe(true);
   });
 
   it("seeds the_cockatoo in the chatroom with random-pick squawk", async () => {

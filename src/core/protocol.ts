@@ -11,6 +11,7 @@ import {
   type Observation,
   type WooValue
 } from "./types";
+import { localCatalogStatuses } from "./local-catalogs";
 import { normalizeError, type ParkedTaskRun, type WooWorld } from "./world";
 
 const MAX_WS_FRAME_BYTES = 256 * 1024;
@@ -102,7 +103,7 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
 
     if (request.method === "GET" && request.pathname === "/api/catalogs") {
       const session = host.requireSession(request);
-      return jsonProtocol(world.state(session.actor).catalogs);
+      return jsonProtocol({ ...world.state(session.actor).catalogs, local: localCatalogStatuses(world) });
     }
 
     if (request.method === "GET" && request.pathname === "/api/object") {

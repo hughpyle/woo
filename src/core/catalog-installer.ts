@@ -115,6 +115,29 @@ export type InstalledCatalogRecord = {
   migration_state?: CatalogMigrationState;
 };
 
+export type CatalogStatusIssue = {
+  severity: "info" | "warning" | "error";
+  kind: string;
+  message: string;
+  object?: ObjRef;
+  verb?: string;
+  property?: string;
+  expected?: WooValue;
+  actual?: WooValue;
+};
+
+export type CatalogManifestStatus = {
+  tap: string;
+  catalog: string;
+  alias: string;
+  installed: boolean;
+  manifest_version: string;
+  installed_version: string | null;
+  version_match: boolean;
+  needs_repair: boolean;
+  issues: CatalogStatusIssue[];
+};
+
 const DYNAMIC_SEED_PROPERTIES = new Set([
   "next_seq",
   "subscribers",
@@ -142,6 +165,197 @@ export type UpdateCatalogOptions = InstallCatalogOptions & {
   acceptMajor?: boolean;
   migration?: CatalogMigrationManifest | null;
 };
+
+export function catalogManifestStatus(world: WooWorld, manifest: CatalogManifest, options: InstallCatalogOptions = {}): CatalogManifestStatus {
+  const tap = options.tap ?? "@local";
+  const alias = options.alias ?? manifest.name;
+  const allowImplementationHints = options.allowImplementationHints ?? tap === "@local";
+  const records = installedCatalogs(world);
+  const record = records.find((item) => item.alias === alias || (item.tap === tap && item.catalog === manifest.name)) ?? null;
+  const issues: CatalogStatusIssue[] = [];
+  if (!record) {
+    issues.push({
+      severity: "warning",
+      kind: "not_installed",
+      message: `catalog is not installed: ${tap}:${manifest.name} as ${alias}`
+    });
+  } else if (record.version !== manifest.version) {
+    issues.push({
+      severity: "warning",
+      kind: "version_mismatch",
+      message: `installed version ${record.version} differs from manifest version ${manifest.version}`,
+      expected: manifest.version,
+      actual: record.version
+    });
+  }
+
+  const owner = record?.owner ?? options.actor ?? "$wiz";
+  const localObjects = new Map<string, ObjRef>();
+  const localSeeds = new Map<string, ObjRef>();
+  const objectDefs = [...(manifest.classes ?? []), ...(manifest.features ?? [])];
+  for (const def of objectDefs) localObjects.set(def.local_name, def.local_name);
+  for (const hook of manifest.seed_hooks ?? []) {
+    if (hook.kind === "create_instance") localSeeds.set(hook.as, hook.as);
+  }
+
+  for (const def of objectDefs) {
+    if (!world.objects.has(def.local_name)) {
+      issues.push({
+        severity: "error",
+        kind: "missing_object",
+        object: def.local_name,
+        message: `catalog object is missing: ${def.local_name}`
+      });
+      continue;
+    }
+    try {
+      const expectedParent = resolveObjectRef(world, def.parent, localObjects, localSeeds, records);
+      const actualParent = world.object(def.local_name).parent;
+      if (actualParent !== expectedParent) {
+        issues.push({
+          severity: "warning",
+          kind: "parent_drift",
+          object: def.local_name,
+          message: `${def.local_name} parent differs from manifest`,
+          expected: expectedParent,
+          actual: actualParent
+        });
+      }
+    } catch (err) {
+      issues.push(catalogStatusErrorIssue("unresolved_parent", def.local_name, err));
+    }
+
+    for (const property of def.properties ?? []) {
+      const actual = world.object(def.local_name).propertyDefs.get(property.name);
+      if (!actual) {
+        issues.push({
+          severity: "warning",
+          kind: "missing_property",
+          object: def.local_name,
+          property: property.name,
+          message: `${def.local_name}.${property.name} property definition is missing`
+        });
+        continue;
+      }
+      const expectedDefault = property.default ?? null;
+      if (
+        actual.perms !== (property.perms ?? "rw") ||
+        actual.typeHint !== (property.type ?? null) ||
+        stableStringify(actual.defaultValue) !== stableStringify(expectedDefault)
+      ) {
+        issues.push({
+          severity: "warning",
+          kind: "property_drift",
+          object: def.local_name,
+          property: property.name,
+        message: `${def.local_name}.${property.name} property definition differs from manifest`,
+          expected: { perms: property.perms ?? "rw", type_hint: property.type ?? null, default: expectedDefault } as WooValue,
+          actual: { perms: actual.perms, type_hint: actual.typeHint ?? null, default: actual.defaultValue } as WooValue
+        });
+      }
+    }
+
+    for (const verb of def.verbs ?? []) {
+      const actual = world.ownVerbExact(def.local_name, verb.name);
+      if (!actual) {
+        issues.push({
+          severity: "warning",
+          kind: "missing_verb",
+          object: def.local_name,
+          verb: verb.name,
+          message: `${def.local_name}:${verb.name} verb is missing`
+        });
+        continue;
+      }
+      try {
+        const expected = compileCatalogVerbDef(def.local_name, verb, owner, actual.version, allowImplementationHints);
+        const drift = catalogVerbDrift(actual, expected);
+        if (drift.length > 0) {
+          issues.push({
+            severity: "warning",
+            kind: "verb_drift",
+            object: def.local_name,
+            verb: verb.name,
+            message: `${def.local_name}:${verb.name} differs from manifest (${drift.join(", ")})`,
+            expected: catalogVerbSummary(expected),
+            actual: catalogVerbSummary(actual)
+          });
+        }
+      } catch (err) {
+        issues.push(catalogStatusErrorIssue("verb_compile_error", def.local_name, err, verb.name));
+      }
+    }
+  }
+
+  for (const hook of manifest.seed_hooks ?? []) {
+    if (hook.kind === "create_instance") {
+      if (!world.objects.has(hook.as)) {
+        issues.push({
+          severity: "warning",
+          kind: "missing_seed",
+          object: hook.as,
+          message: `catalog seed object is missing: ${hook.as}`
+        });
+        continue;
+      }
+      try {
+        const expectedParent = resolveObjectRef(world, hook.class, localObjects, localSeeds, records);
+        const actualParent = world.object(hook.as).parent;
+        if (actualParent !== expectedParent) {
+          issues.push({
+            severity: "warning",
+            kind: "seed_parent_drift",
+            object: hook.as,
+            message: `${hook.as} parent differs from seed hook`,
+            expected: expectedParent,
+            actual: actualParent
+          });
+        }
+      } catch (err) {
+        issues.push(catalogStatusErrorIssue("unresolved_seed_parent", hook.as, err));
+      }
+      continue;
+    }
+    if (hook.kind === "attach_feature") {
+      const consumer = resolveMaybeObjectRef(world, hook.consumer, localObjects, localSeeds, records);
+      const feature = resolveMaybeObjectRef(world, hook.feature, localObjects, localSeeds, records);
+      if (consumer && feature && !featureListValue(world.propOrNull(consumer, "features")).includes(feature)) {
+        issues.push({
+          severity: "warning",
+          kind: "feature_drift",
+          object: consumer,
+          message: `${consumer} is missing feature ${feature}`,
+          expected: feature
+        });
+      }
+      continue;
+    }
+    const object = resolveMaybeObjectRef(world, hook.object, localObjects, localSeeds, records);
+    const parent = resolveMaybeObjectRef(world, hook.parent, localObjects, localSeeds, records);
+    if (object && parent && world.object(object).parent !== parent) {
+      issues.push({
+        severity: "warning",
+        kind: "seed_parent_drift",
+        object,
+        message: `${object} parent differs from seed hook`,
+        expected: parent,
+        actual: world.object(object).parent
+      });
+    }
+  }
+
+  return {
+    tap,
+    catalog: manifest.name,
+    alias,
+    installed: record !== null,
+    manifest_version: manifest.version,
+    installed_version: record?.version ?? null,
+    version_match: record?.version === manifest.version,
+    needs_repair: issues.some((issue) => issue.kind !== "not_installed"),
+    issues
+  };
+}
 
 export function installCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: InstallCatalogOptions = {}): InstalledCatalogRecord {
   const actor = options.actor ?? "$wiz";
@@ -937,6 +1151,66 @@ function stableStringify(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function catalogVerbDrift(actual: VerbDef, expected: VerbDef): string[] {
+  const drift: string[] = [];
+  if (actual.kind !== expected.kind) drift.push("kind");
+  if (actual.kind === "native" && expected.kind === "native" && actual.native !== expected.native) drift.push("native");
+  if (actual.source !== expected.source) drift.push("source");
+  if (actual.source_hash !== expected.source_hash) drift.push("source_hash");
+  if (stableStringify(actual.aliases ?? []) !== stableStringify(expected.aliases ?? [])) drift.push("aliases");
+  if (actual.perms !== expected.perms) drift.push("perms");
+  if (stableStringify(actual.arg_spec ?? {}) !== stableStringify(expected.arg_spec ?? {})) drift.push("arg_spec");
+  if (actual.direct_callable !== expected.direct_callable) drift.push("direct_callable");
+  if (actual.skip_presence_check !== expected.skip_presence_check) drift.push("skip_presence_check");
+  if (actual.tool_exposed !== expected.tool_exposed) drift.push("tool_exposed");
+  if (Object.keys(actual.line_map ?? {}).length === 0) drift.push("line_map");
+  return drift;
+}
+
+function catalogVerbSummary(verb: VerbDef): Record<string, WooValue> {
+  return {
+    kind: verb.kind,
+    aliases: (verb.aliases ?? []) as unknown as WooValue,
+    perms: verb.perms,
+    arg_spec: (verb.arg_spec ?? {}) as WooValue,
+    direct_callable: verb.direct_callable === true,
+    skip_presence_check: verb.skip_presence_check === true,
+    tool_exposed: verb.tool_exposed === true,
+    source_hash: verb.source_hash,
+    native: verb.kind === "native" ? verb.native : null
+  };
+}
+
+function catalogStatusErrorIssue(kind: string, object: ObjRef, err: unknown, verb?: string): CatalogStatusIssue {
+  const error = err && typeof err === "object" && "message" in err ? String((err as { message: unknown }).message) : String(err);
+  return {
+    severity: "error",
+    kind,
+    object,
+    verb,
+    message: error
+  };
+}
+
+function resolveMaybeObjectRef(
+  world: WooWorld,
+  ref: string,
+  localObjects: Map<string, ObjRef>,
+  localSeeds: Map<string, ObjRef>,
+  installed: InstalledCatalogRecord[]
+): ObjRef | null {
+  try {
+    const resolved = resolveObjectRef(world, ref, localObjects, localSeeds, installed);
+    return world.objects.has(resolved) ? resolved : null;
+  } catch {
+    return null;
+  }
+}
+
+function featureListValue(value: WooValue): ObjRef[] {
+  return Array.isArray(value) ? value.filter((item): item is ObjRef => typeof item === "string") : [];
 }
 
 function installedCatalogs(world: WooWorld): InstalledCatalogRecord[] {
