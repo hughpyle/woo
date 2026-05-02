@@ -560,6 +560,7 @@ const VALID_BUILTINS = new Set([
   "moveto",
   "chparent",
   "has_flag",
+  "isa",
   "random",
   "contents",
   "location",
