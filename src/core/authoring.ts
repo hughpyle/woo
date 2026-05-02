@@ -557,6 +557,7 @@ const VALID_BUILTINS = new Set([
   "now",
   "create",
   "move",
+  "moveto",
   "chparent",
   "has_flag",
   "random",

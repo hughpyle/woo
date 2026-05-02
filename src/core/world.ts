@@ -86,6 +86,10 @@ export type CallContext = {
   observe(event: Observation): void;
   deferHostEffect?(effect: DeferredHostEffect): void;
   hostMemo?: HostOperationMemo;
+  /** Per-call set of `${obj}->${target}` markers used by movetoChecked to
+   * prevent infinite recursion when an `obj:moveto` verb calls back into
+   * `moveto(this, target)` to delegate the actual move to the core. */
+  movetoStack?: Set<string>;
 };
 
 export type DeferredHostEffect =
@@ -2234,6 +2238,93 @@ export class WooWorld {
     this.assertCanAuthorObject(actor, objRef);
     this.object(targetRef);
     this.moveObject(objRef, targetRef);
+  }
+
+  /** Receiver-driven move: the `obj:moveto` / `target:acceptable` /
+   * `:exitfunc` / `:enterfunc` chain from `spec/semantics/moveto.md`.
+   * Distinct from `moveAuthoredObjectChecked`, which is the trusted-
+   * authoring forced move. `movetoChecked` is the user-level path:
+   *
+   *  - authority: caller (`ctx.progr`) must control `obj` (owner or wizard);
+   *  - cross-host writes are barred at the receiver;
+   *  - `obj:moveto(target)` is dispatched once per (obj, target) pair via
+   *    a per-call marker set so that a verb that delegates with
+   *    `moveto(this, target)` falls through to the core path instead of
+   *    looping;
+   *  - `target:acceptable(obj)` gates the move; falsy returns raise E_PERM,
+   *    errors propagate;
+   *  - `:exitfunc` / `:enterfunc` errors are swallowed (post-move hooks
+   *    must not fail the move per the LambdaMOO contract).
+   */
+  async movetoChecked(ctx: CallContext, objRef: ObjRef, targetRef: ObjRef): Promise<WooValue> {
+    this.assertCanMoveto(ctx.progr, objRef);
+    if (await this.remoteHostForObject(objRef, ctx.hostMemo) || await this.remoteHostForObject(targetRef, ctx.hostMemo)) {
+      throw wooError("E_CROSS_HOST_WRITE", `moveto requires shared host: ${objRef} -> ${targetRef}`, { obj: objRef, target: targetRef });
+    }
+    this.object(objRef);
+    this.object(targetRef);
+
+    if (!ctx.movetoStack) ctx.movetoStack = new Set<string>();
+    const marker = `${objRef}->${targetRef}`;
+    const fresh = !ctx.movetoStack.has(marker);
+    ctx.movetoStack.add(marker);
+
+    if (fresh) {
+      try {
+        return await this.dispatch({ ...ctx, caller: ctx.thisObj, callerPerms: ctx.progr }, objRef, "moveto", [targetRef]);
+      } catch (err) {
+        if (!isErrorValue(err) || err.code !== "E_VERBNF") throw err;
+        // No `:moveto` verb on `obj` or its ancestors — fall through to the
+        // direct chain. The marker is intentionally retained: a future
+        // recursive moveto in the same call frame will skip the verb path.
+      }
+    }
+
+    await this.invokeAcceptableHook(ctx, targetRef, objRef);
+
+    const oldLocation = this.object(objRef).location;
+    if (oldLocation && this.objects.has(oldLocation)) {
+      await this.invokeContainerHookSwallow(ctx, oldLocation, "exitfunc", [objRef]);
+    }
+
+    await this.moveObjectChecked(objRef, targetRef);
+
+    if (this.objects.has(targetRef)) {
+      await this.invokeContainerHookSwallow(ctx, targetRef, "enterfunc", [objRef]);
+    }
+
+    return targetRef;
+  }
+
+  private assertCanMoveto(progr: ObjRef, objRef: ObjRef): void {
+    if (this.isWizard(progr)) return;
+    const obj = this.object(objRef);
+    if (obj.owner === progr) return;
+    throw wooError("E_PERM", `${progr} cannot moveto ${objRef}`, { progr, obj: objRef });
+  }
+
+  private async invokeAcceptableHook(ctx: CallContext, targetRef: ObjRef, objRef: ObjRef): Promise<void> {
+    let result: WooValue;
+    try {
+      result = await this.dispatch({ ...ctx, caller: ctx.thisObj, callerPerms: ctx.progr }, targetRef, "acceptable", [objRef]);
+    } catch (err) {
+      if (isErrorValue(err) && err.code === "E_VERBNF") return; // no acceptable → permitted
+      throw err;
+    }
+    if (!result) {
+      throw wooError("E_PERM", "rejected by :acceptable", { obj: objRef, target: targetRef });
+    }
+  }
+
+  private async invokeContainerHookSwallow(ctx: CallContext, target: ObjRef, name: "enterfunc" | "exitfunc", args: WooValue[]): Promise<void> {
+    try {
+      await this.dispatch({ ...ctx, caller: ctx.thisObj, callerPerms: ctx.progr }, target, name, args);
+    } catch (err) {
+      if (isErrorValue(err) && err.code === "E_VERBNF") return; // hook absent
+      // Per the spec, post-move hooks must not fail the move. Swallow
+      // and continue. Wizards reading transcripts will still see the
+      // error trace from the failed sub-call.
+    }
   }
 
   async moveAuthoredObjectChecked(actor: ObjRef, objRef: ObjRef, targetRef: ObjRef, ctx?: CallContext): Promise<void> {
