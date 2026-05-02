@@ -174,6 +174,22 @@ type BehaviorSavepoint = {
   persistence: PersistenceDirtyState;
 };
 
+type VerbEditorSession = {
+  actor: ObjRef;
+  target: ObjRef;
+  kind: "verb";
+  descriptor: WooValue;
+  slot: number | null;
+  expected_version: number | null;
+  buffer: string;
+  dirty: boolean;
+  diagnostics: WooValue[];
+  started_at: number;
+  updated_at: number;
+  previous_location: ObjRef | null;
+  surface_class: ObjRef;
+};
+
 type PersistenceDirtyState = {
   dirtyObjects: Set<ObjRef>;
   deletedObjects: Set<ObjRef>;
@@ -1583,6 +1599,160 @@ export class WooWorld {
     throw wooError("E_NOT_IMPLEMENTED", "programmer trace is deferred to v1.1");
   }
 
+  async editorInvoke(ctx: CallContext, editorRef: ObjRef, targetRef: ObjRef, descriptor: WooValue, opts: WooValue, surfaceClass: ObjRef): Promise<WooValue> {
+    this.assertProgrammerActor(ctx.actor, surfaceClass);
+    if (await this.remoteHostForObject(editorRef) || await this.remoteHostForObject(targetRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `editor sessions and target installs must share a host: ${editorRef} -> ${targetRef}`, { editor: editorRef, target: targetRef });
+    }
+    this.assertEditorObject(editorRef);
+    const options = progOptions(opts);
+    const existing = this.editorSessionOrNull(editorRef, ctx.actor);
+    let replacedPrevious: Record<string, WooValue> | null = null;
+    if (existing) {
+      if (existing.dirty && (existing.target !== targetRef || !valuesEqual(existing.descriptor, descriptor))) {
+        throw wooError("E_INVARG", "dirty editor session already active; save, pause, or abort it first", this.editorSessionSummary(existing) as WooValue);
+      }
+      if (existing.target === targetRef && valuesEqual(existing.descriptor, descriptor)) {
+        const now = Date.now();
+        await this.moveEditorActor(ctx, editorRef, existing.previous_location);
+        await this.observeToSpace(ctx, editorRef, { type: "editor_entered", actor: ctx.actor, editor: editorRef, target: targetRef, slot: existing.slot, ts: now });
+        return { ...this.editorSessionSummary(existing), resumed: true, editor: editorRef };
+      }
+      replacedPrevious = this.editorSessionSummary(existing);
+    }
+
+    const listed = assertMap(this.programmerListVerb(ctx.actor, targetRef, descriptor, { include_source: true }, surfaceClass));
+    const source = listed.source;
+    if (typeof source !== "string") throw wooError("E_PERM", `${ctx.actor} cannot read source for ${targetRef}:${String(descriptor)}`, { actor: ctx.actor, target: targetRef, descriptor });
+    const now = Date.now();
+    const previousLocation = replacedPrevious && typeof replacedPrevious.previous_location === "string"
+      ? replacedPrevious.previous_location
+      : await this.objectLocationChecked(ctx.actor, ctx.hostMemo);
+    const session: VerbEditorSession = {
+      actor: ctx.actor,
+      target: targetRef,
+      kind: "verb",
+      descriptor: cloneValue(descriptor),
+      slot: typeof listed.slot === "number" ? listed.slot : null,
+      expected_version: optionNullableInt(options, "expected_version") ?? (typeof listed.version === "number" ? listed.version : null),
+      buffer: source,
+      dirty: false,
+      diagnostics: [],
+      started_at: now,
+      updated_at: now,
+      previous_location: previousLocation,
+      surface_class: surfaceClass
+    };
+    this.setEditorSession(editorRef, ctx.actor, session);
+    await this.moveEditorActor(ctx, editorRef, previousLocation);
+    await this.observeToSpace(ctx, editorRef, { type: "editor_entered", actor: ctx.actor, editor: editorRef, target: targetRef, slot: session.slot, ts: now });
+    const response: Record<string, WooValue> = { ...this.editorSessionSummary(session), resumed: false, editor: editorRef };
+    if (replacedPrevious) response.replaced_previous = replacedPrevious as WooValue;
+    return response;
+  }
+
+  editorWhat(ctx: CallContext, editorRef: ObjRef): WooValue {
+    return this.editorSessionSummary(this.requireEditorSession(editorRef, ctx.actor)) as WooValue;
+  }
+
+  editorView(ctx: CallContext, editorRef: ObjRef, opts: WooValue): WooValue {
+    const session = this.requireEditorSession(editorRef, ctx.actor);
+    const options = progOptions(opts);
+    const numbered = optionBool(options, "line_numbers", false);
+    const lines = splitEditorLines(session.buffer);
+    return {
+      ...this.editorSessionSummary(session),
+      buffer: session.buffer,
+      lines: numbered ? lines.map((text, index) => ({ line: index + 1, text })) : lines
+    } as WooValue;
+  }
+
+  editorReplace(ctx: CallContext, editorRef: ObjRef, text: string): WooValue {
+    const session = this.requireEditorSession(editorRef, ctx.actor);
+    session.buffer = text;
+    session.dirty = true;
+    session.updated_at = Date.now();
+    session.diagnostics = [];
+    this.setEditorSession(editorRef, ctx.actor, session);
+    return this.editorSessionSummary(session) as WooValue;
+  }
+
+  editorInsert(ctx: CallContext, editorRef: ObjRef, line: number, text: string): WooValue {
+    const session = this.requireEditorSession(editorRef, ctx.actor);
+    const lines = splitEditorLines(session.buffer);
+    const index = Math.floor(line) - 1;
+    if (index < 0 || index > lines.length) throw wooError("E_RANGE", `insert line out of range: ${line}`, { line, max: lines.length + 1 });
+    lines.splice(index, 0, text);
+    session.buffer = lines.join("\n");
+    session.dirty = true;
+    session.updated_at = Date.now();
+    session.diagnostics = [];
+    this.setEditorSession(editorRef, ctx.actor, session);
+    return this.editorSessionSummary(session) as WooValue;
+  }
+
+  editorDelete(ctx: CallContext, editorRef: ObjRef, start: number, end: number | null): WooValue {
+    const session = this.requireEditorSession(editorRef, ctx.actor);
+    const lines = splitEditorLines(session.buffer);
+    const first = Math.floor(start);
+    const last = end === null ? first : Math.floor(end);
+    if (first < 1 || last < first || last > lines.length) throw wooError("E_RANGE", "delete line range out of range", { start, end: end ?? start, max: lines.length });
+    lines.splice(first - 1, last - first + 1);
+    session.buffer = lines.join("\n");
+    session.dirty = true;
+    session.updated_at = Date.now();
+    session.diagnostics = [];
+    this.setEditorSession(editorRef, ctx.actor, session);
+    return this.editorSessionSummary(session) as WooValue;
+  }
+
+  async editorDryRun(ctx: CallContext, editorRef: ObjRef): Promise<WooValue> {
+    const session = this.requireEditorSession(editorRef, ctx.actor);
+    const result = assertMap(await this.programmerInstallVerb(ctx.actor, session.target, session.descriptor, session.buffer, {
+      dry_run: true,
+      expected_version: session.expected_version
+    }, session.surface_class));
+    session.diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : [];
+    session.updated_at = Date.now();
+    this.setEditorSession(editorRef, ctx.actor, session);
+    return result as WooValue;
+  }
+
+  async editorSave(ctx: CallContext, editorRef: ObjRef): Promise<WooValue> {
+    const session = this.requireEditorSession(editorRef, ctx.actor);
+    const result = assertMap(await this.programmerInstallVerb(ctx.actor, session.target, session.descriptor, session.buffer, {
+      expected_version: session.expected_version
+    }, session.surface_class));
+    session.diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : [];
+    session.updated_at = Date.now();
+    if (result.ok !== true) {
+      this.setEditorSession(editorRef, ctx.actor, session);
+      return result as WooValue;
+    }
+    this.deleteEditorSession(editorRef, ctx.actor);
+    const destination = this.editorReturnLocation(session);
+    await this.moveEditorActor(ctx, destination, null);
+    await this.observeToSpace(ctx, editorRef, { type: "editor_saved", actor: ctx.actor, editor: editorRef, target: session.target, slot: session.slot, version: typeof result.version === "number" ? result.version : null, ts: Date.now() });
+    return { ...result, exited_to: destination } as WooValue;
+  }
+
+  async editorPause(ctx: CallContext, editorRef: ObjRef): Promise<WooValue> {
+    const session = this.requireEditorSession(editorRef, ctx.actor);
+    const destination = this.editorReturnLocation(session);
+    await this.moveEditorActor(ctx, destination, null);
+    session.updated_at = Date.now();
+    this.setEditorSession(editorRef, ctx.actor, session);
+    return { ...this.editorSessionSummary(session), paused: true, exited_to: destination } as WooValue;
+  }
+
+  async editorAbort(ctx: CallContext, editorRef: ObjRef): Promise<WooValue> {
+    const session = this.requireEditorSession(editorRef, ctx.actor);
+    this.deleteEditorSession(editorRef, ctx.actor);
+    const destination = this.editorReturnLocation(session);
+    await this.moveEditorActor(ctx, destination, null);
+    return { ...this.editorSessionSummary(session), aborted: true, exited_to: destination } as WooValue;
+  }
+
   private authoringInspect(actor: ObjRef, objRef: ObjRef, opts: WooValue, policy: { includeSourceAllowed: boolean; requireProgrammer: boolean; programmerSurface?: ObjRef }): WooValue {
     if (policy.requireProgrammer) this.assertProgrammerActor(actor, policy.programmerSurface ?? actor);
     const options = progOptions(opts);
@@ -1726,6 +1896,94 @@ export class WooWorld {
     if (actor === surfaceClass) throw wooError("E_PERM", "builder class surface required", { actor, surface: surfaceClass });
     if (this.inheritsFrom(actor, surfaceClass)) return;
     throw wooError("E_PERM", "builder class surface required", { actor, surface: surfaceClass });
+  }
+
+  private assertEditorObject(editorRef: ObjRef): void {
+    if (!this.isEditorObject(editorRef)) throw wooError("E_TYPE", "editor must be space-like and define a private sessions property", { editor: editorRef });
+  }
+
+  private isEditorObject(editorRef: ObjRef): boolean {
+    return this.inheritsFrom(editorRef, "$space") && this.editorSessionPropertyInfo(editorRef) !== null;
+  }
+
+  private editorSessionPropertyInfo(editorRef: ObjRef): PropertyDef | null {
+    let current: ObjRef | null = editorRef;
+    while (current) {
+      const obj = this.object(current);
+      const def = obj.propertyDefs.get("sessions");
+      if (def) return def.perms === "" ? def : null;
+      current = obj.parent;
+    }
+    return null;
+  }
+
+  private editorSessionMap(editorRef: ObjRef): Record<string, WooValue> {
+    this.assertEditorObject(editorRef);
+    const raw = this.propOrNull(editorRef, "sessions");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return raw as Record<string, WooValue>;
+  }
+
+  private editorSessionOrNull(editorRef: ObjRef, actor: ObjRef): VerbEditorSession | null {
+    const raw = this.editorSessionMap(editorRef)[actor];
+    return raw === undefined ? null : parseVerbEditorSession(raw);
+  }
+
+  private requireEditorSession(editorRef: ObjRef, actor: ObjRef): VerbEditorSession {
+    const session = this.editorSessionOrNull(editorRef, actor);
+    if (!session) throw wooError("E_INVARG", `${actor} has no active editor session in ${editorRef}`, { actor, editor: editorRef });
+    return session;
+  }
+
+  private setEditorSession(editorRef: ObjRef, actor: ObjRef, session: VerbEditorSession): void {
+    const sessions = this.editorSessionMap(editorRef);
+    sessions[actor] = serializeVerbEditorSession(session) as WooValue;
+    this.setProp(editorRef, "sessions", sessions as WooValue);
+  }
+
+  private deleteEditorSession(editorRef: ObjRef, actor: ObjRef): void {
+    const sessions = this.editorSessionMap(editorRef);
+    delete sessions[actor];
+    this.setProp(editorRef, "sessions", sessions as WooValue);
+  }
+
+  private editorSessionSummary(session: VerbEditorSession): Record<string, WooValue> {
+    return {
+      actor: session.actor,
+      target: session.target,
+      kind: session.kind,
+      descriptor: cloneValue(session.descriptor),
+      slot: session.slot,
+      expected_version: session.expected_version,
+      dirty: session.dirty,
+      diagnostics: cloneValue(session.diagnostics as WooValue) as WooValue[],
+      started_at: session.started_at,
+      updated_at: session.updated_at,
+      previous_location: session.previous_location,
+      surface_class: session.surface_class
+    };
+  }
+
+  private editorReturnLocation(session: VerbEditorSession): ObjRef {
+    if (session.previous_location && this.objects.has(session.previous_location)) return session.previous_location;
+    const home = this.objects.has(session.actor) ? this.propOrNull(session.actor, "home") : null;
+    return typeof home === "string" && this.objects.has(home) ? home : "$nowhere";
+  }
+
+  private async moveEditorActor(ctx: CallContext, destination: ObjRef, previousLocation: ObjRef | null): Promise<void> {
+    this.object(destination);
+    const actor = ctx.actor;
+    const current = await this.objectLocationChecked(actor, ctx.hostMemo);
+    if (current && current !== destination && this.objects.has(current) && this.isSpaceLike(current)) {
+      await this.updatePresenceChecked(actor, current, false, ctx);
+    }
+    if (this.isSpaceLike(destination)) {
+      await this.updatePresenceChecked(actor, destination, true, ctx);
+    }
+    await this.moveObjectChecked(actor, destination);
+    if (previousLocation && previousLocation !== destination && this.objects.has(actor) && this.objects.has(previousLocation) && this.isSpaceLike(previousLocation)) {
+      await this.updatePresenceChecked(actor, previousLocation, false, ctx);
+    }
   }
 
   private resolveVerbWithWalk(actor: ObjRef, objRef: ObjRef, name: string, walk: Record<string, WooValue>[]): ResolvedVerb {
@@ -2150,6 +2408,7 @@ export class WooWorld {
 
   private recycleObjectLocal(objRef: ObjRef): void {
     const obj = this.object(objRef);
+    this.scrubEditorSessionsForObject(objRef);
     const parent = obj.parent;
     const location = obj.location;
     if (parent && this.objects.has(parent)) {
@@ -2163,6 +2422,35 @@ export class WooWorld {
     this.objects.delete(objRef);
     this.deletePersistedObject(objRef);
     this.persist();
+  }
+
+  private scrubEditorSessionsForObject(objRef: ObjRef): void {
+    for (const [editorRef] of this.objects) {
+      if (editorRef === objRef || !this.isEditorObject(editorRef)) continue;
+      const raw = this.propOrNull(editorRef, "sessions");
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const sessions = raw as Record<string, WooValue>;
+      const next: Record<string, WooValue> = { ...sessions };
+      let changed = false;
+      for (const [actor, value] of Object.entries(sessions)) {
+        if (actor === objRef) {
+          delete next[actor];
+          changed = true;
+          continue;
+        }
+        try {
+          const session = parseVerbEditorSession(value);
+          if (session.actor === objRef || session.target === objRef) {
+            delete next[actor];
+            changed = true;
+          }
+        } catch {
+          // Leave malformed session values untouched; the editor verbs will
+          // report their normal parse error if someone tries to resume them.
+        }
+      }
+      if (changed) this.setProp(editorRef, "sessions", next as WooValue);
+    }
   }
 
   private assertCanCreateObject(progr: ObjRef, parent: ObjRef, owner: ObjRef): void {
@@ -4638,6 +4926,49 @@ function typeHintForValue(value: WooValue): string {
   if (typeof value === "number") return Number.isInteger(value) ? "int" : "num";
   if (Array.isArray(value)) return "list";
   return "map";
+}
+
+function parseVerbEditorSession(value: WooValue): VerbEditorSession {
+  const raw = assertMap(value);
+  const diagnostics = Array.isArray(raw.diagnostics) ? raw.diagnostics : [];
+  if (raw.kind !== "verb") throw wooError("E_TYPE", "unsupported editor session kind", raw.kind);
+  return {
+    actor: assertObj(raw.actor),
+    target: assertObj(raw.target),
+    kind: "verb",
+    descriptor: cloneValue(raw.descriptor),
+    slot: typeof raw.slot === "number" && Number.isInteger(raw.slot) ? raw.slot : null,
+    expected_version: typeof raw.expected_version === "number" && Number.isInteger(raw.expected_version) ? raw.expected_version : null,
+    buffer: assertString(raw.buffer),
+    dirty: raw.dirty === true,
+    diagnostics: cloneValue(diagnostics as WooValue) as WooValue[],
+    started_at: typeof raw.started_at === "number" ? raw.started_at : 0,
+    updated_at: typeof raw.updated_at === "number" ? raw.updated_at : 0,
+    previous_location: typeof raw.previous_location === "string" ? raw.previous_location : null,
+    surface_class: assertObj(raw.surface_class)
+  };
+}
+
+function serializeVerbEditorSession(session: VerbEditorSession): Record<string, WooValue> {
+  return {
+    actor: session.actor,
+    target: session.target,
+    kind: session.kind,
+    descriptor: cloneValue(session.descriptor),
+    slot: session.slot,
+    expected_version: session.expected_version,
+    buffer: session.buffer,
+    dirty: session.dirty,
+    diagnostics: cloneValue(session.diagnostics as WooValue) as WooValue[],
+    started_at: session.started_at,
+    updated_at: session.updated_at,
+    previous_location: session.previous_location,
+    surface_class: session.surface_class
+  };
+}
+
+function splitEditorLines(buffer: string): string[] {
+  return buffer.length === 0 ? [] : buffer.split(/\r?\n/);
 }
 
 export function normalizeError(err: unknown): ErrorValue {

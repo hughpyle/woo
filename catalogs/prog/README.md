@@ -47,6 +47,7 @@ reparent a helper actor, object factory, catalog instance, or trusted agent to
 - dry-run verb source installs for diagnostics
 - install verb source for real
 - adjust property definitions/perms
+- enter a room-like verb editor for collaborative source edits
 - trace later invocations
 
 Programmer authority is the dangerous capability: installed verbs capture
@@ -99,6 +100,7 @@ The catalog ships once these are in place:
    - `programmer_set_verb_info(id, descriptor, opts)` — metadata-only edit for
      aliases, arg spec, direct/tool exposure, and permission bits
    - `programmer_set_property_info(id, name, opts)`
+   - `edit_verb(id, descriptor, opts)` — door into `the_verb_editor`
    - `programmer_trace(id, verb, opts)` — v1.1
 
 2. **LambdaCore-aligned command semantics**:
@@ -156,7 +158,25 @@ The catalog ships once these are in place:
 | `install_verb(id, descriptor, source, opts?)` | Check and install source atomically. `opts.dry_run=true` returns diagnostics and would-install metadata without mutation. |
 | `set_verb_info(id, descriptor, opts?)` | Metadata-only edit for aliases, arg spec, exposure flags, and perms. |
 | `set_property_info(id, name, opts?)` | Define/update property metadata, perms, defaults, and type hints. |
+| `edit_verb(id, descriptor, opts?)` | Enter the verb editor room for a per-actor source-buffer session. |
 | `trace(id, verb_name, opts?)` | Next-N-invocations source-span trace. v1.1. |
+
+### Editor tools
+
+These tools are visible on `the_verb_editor` only while the actor is in the
+editor room.
+
+| verb | role |
+| --- | --- |
+| `what()` | Summarize the current edit session. |
+| `view(opts?)` / `list(opts?)` | Return the current buffer, optionally line-numbered. |
+| `replace(text)` | Replace the whole buffer. |
+| `insert(line, text)` | Insert one line before a 1-based line number. |
+| `delete(start, end?)` | Delete a 1-based inclusive line range. |
+| `dry_run()` | Validate the buffer through the normal install path without mutation. |
+| `save()` | Install the buffer if the expected version still matches, then leave. |
+| `pause()` | Leave the editor while keeping the session. |
+| `abort()` | Discard the session and leave. |
 
 ## Why `install_verb(..., {dry_run: true})` exists
 
@@ -231,6 +251,11 @@ The eventual rich authoring environment is an editor room, not a workshop or a
 second backend. A `$verb_editor` is room-like: actors enter it, use ordinary
 room/player communication while there, and hold per-actor edit sessions that
 point at target objects and verb slots. The target object stays in place.
+
+`the_verb_editor` may sit in `$nowhere` because `$nowhere` is not space-like and
+is not a reachability container. It must not be seeded in an ordinary room or
+shared `$space`. The programmer `edit_verb` door moves the actor into the
+editor; normal reachability then exposes editor-room tools.
 
 The editor contributes only editor-specific verbs: load/view buffer, edit
 buffer, dry-run, save, pause, abort, and "what am I editing?" Presence, chat,

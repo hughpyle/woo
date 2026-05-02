@@ -82,6 +82,9 @@ changed by editing.
 Session storage may begin as an editor property containing value records. If
 shared sessions or large buffers become important, session objects can be
 introduced later without changing the room model.
+That storage is editor-owned implementation state. Actors mutate it only through
+editor verbs; direct property writes to the whole session map are not part of
+the authoring surface.
 
 ## E4. Lifecycle
 
@@ -142,6 +145,12 @@ For example:
 
 The editor tools are not globally visible. They appear for the same reason room
 exits or room-local commands appear: the actor is there.
+
+The seeded editor instance should not live in an ordinary room or any shared
+`$space`; otherwise every actor at that location would see editor tools before
+entering. `$nowhere` is acceptable precisely because it is not space-like and is
+not a reachability container. The programmer door is the reachability
+transition.
 
 ## E6. Verb Editor
 

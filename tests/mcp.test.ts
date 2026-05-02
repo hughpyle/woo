@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installVerb } from "../src/core/authoring";
+import { installVerb, installVerbAs } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
 import { McpHost, type McpTool } from "../src/mcp/host";
 import { McpGateway } from "../src/mcp/gateway";
@@ -157,6 +157,43 @@ describe("McpHost", () => {
 
     // Tool names are unique.
     expect(new Set(tools.map((t) => t.name)).size).toBe(tools.length);
+  });
+
+  it("exposes verb editor tools after the programmer enters the editor room", async () => {
+    const world = bootstrapWorld();
+    const session = world.auth("guest:mcp-editor");
+    const actorObj = world.object(session.actor);
+    actorObj.owner = session.actor;
+    actorObj.flags.programmer = true;
+    world.chparentAuthoredObject("$wiz", session.actor, "$programmer");
+    const target = world.createAuthoredObject(session.actor, { parent: "$thing", name: "MCP Edit Target" });
+    expect(installVerbAs(world, session.actor, target, "title", `verb :title() rx {
+  return "before";
+}`, null).ok).toBe(true);
+
+    const host = new McpHost(world);
+    host.bindSession(session.id, session.actor);
+    const before = await host.enumerateTools(session.actor);
+    expect(before.some((tool) => tool.object === session.actor && tool.verb === "edit_verb")).toBe(true);
+    expect(before.some((tool) => tool.object === "the_verb_editor" && tool.verb === "view")).toBe(false);
+
+    const edit = before.find((tool) => tool.object === session.actor && tool.verb === "edit_verb")!;
+    await host.invokeTool(session.actor, session.id, edit, [target, "title", {}]);
+    expect(world.object(session.actor).location).toBe("the_verb_editor");
+
+    const inEditor = await host.enumerateTools(session.actor);
+    const replace = inEditor.find((tool) => tool.object === "the_verb_editor" && tool.verb === "replace")!;
+    const save = inEditor.find((tool) => tool.object === "the_verb_editor" && tool.verb === "save")!;
+    expect(inEditor.some((tool) => tool.object === "the_verb_editor" && tool.verb === "view")).toBe(true);
+    await host.invokeTool(session.actor, session.id, replace, [`verb :title() rx {
+  return "after";
+}`]);
+    await host.invokeTool(session.actor, session.id, save, []);
+
+    expect(world.object(session.actor).location).toBe("$nowhere");
+    expect(world.ownVerb(target, "title")?.source).toContain("after");
+    const after = await host.enumerateTools(session.actor);
+    expect(after.some((tool) => tool.object === "the_verb_editor" && tool.verb === "view")).toBe(false);
   });
 
   it("builds input schemas from source-compiled parameter specs", async () => {

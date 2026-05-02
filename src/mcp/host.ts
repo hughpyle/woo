@@ -213,7 +213,7 @@ export class McpHost {
     add(actor, "self");
     const actorObj = this.world.objects.has(actor) ? this.world.object(actor) : null;
     if (actorObj?.location) add(actorObj.location, "location", false);
-    if (actorObj?.location && this.world.objects.has(actorObj.location)) {
+    if (actorObj?.location && this.world.objects.has(actorObj.location) && this.descendsFrom(actorObj.location, "$space")) {
       for (const id of this.world.object(actorObj.location).contents) {
         if (this.isOtherActor(actor, id)) continue;
         if (this.actorCanSee(actor, id)) add(id, "contents");

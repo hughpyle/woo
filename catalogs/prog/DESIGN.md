@@ -17,7 +17,7 @@ product surface.
   it: inspect, search, create, chparent, recycle, and set_property.
 - `$programmer < $builder` exposes source/metadata operations on actors
   inheriting from it: inspect, resolve_verb, list_verb, search, install_verb,
-  set_verb_info, set_property_info, and trace.
+  set_verb_info, set_property_info, edit_verb, and trace.
 
 Builder authority is delegable without programmer authority. Programmer
 authority is still gated by the actor's programmer or wizard flag because
@@ -49,6 +49,14 @@ instead of introducing a separate workshop. A `$verb_editor` is a room-like
 object. Actors enter it to edit; the edited object stays where it already is.
 The actor's session records target object, verb descriptor or slot, expected
 version, buffer, dirty state, and diagnostics.
+The `sessions` property is an editor-owned implementation slot; actors interact
+through editor verbs, not by writing the session map directly.
+
+The seeded editor instance may sit in `$nowhere` because `$nowhere` is not
+space-like and is not a reachability container. The invariant is that it is not
+seeded in an ordinary room or any shared `$space`. It becomes reachable when
+`edit_verb` moves the actor into it, and disappears from the actor's MCP tool
+set again after `save`, `pause`, or `abort` moves the actor back.
 
 Task-local communication between a team of agents comes from ordinary room and
 actor behavior: presence, `say`, `emote`, `wait`, focus, and observations. The

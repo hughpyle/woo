@@ -1560,6 +1560,100 @@ describe("authoring", () => {
     }));
   });
 
+  it("supports verb editor room sessions through the programmer surface", async () => {
+    const world = createWorld();
+    const programmer = world.auth("guest:verb-editor");
+    const actorObj = world.object(programmer.actor);
+    actorObj.owner = programmer.actor;
+    actorObj.flags.programmer = true;
+    world.chparentAuthoredObject("$wiz", programmer.actor, "$programmer");
+    expect(world.object("the_verb_editor").location).toBe("$nowhere");
+    expect(world.isDescendantOf("$nowhere", "$space")).toBe(false);
+
+    const baseCreated = await world.directCall("editor-base", programmer.actor, programmer.actor, "create", ["$thing", { name: "Editor Base" }]);
+    expect(baseCreated.op).toBe("result");
+    const base = (baseCreated.op === "result" ? (baseCreated.result as Record<string, string>).id : "");
+    const installed = await world.directCall("editor-install", programmer.actor, programmer.actor, "install_verb", [base, "title", `verb :title() rx {
+  return "old title";
+}`, {}]);
+    expect(installed.op).toBe("result");
+    const sessionWriteDenied = await world.directCall("editor-session-write-denied", programmer.actor, programmer.actor, "set_property", ["the_verb_editor", "sessions", {}, {}]);
+    expect(sessionWriteDenied.op).toBe("error");
+    if (sessionWriteDenied.op === "error") expect(sessionWriteDenied.error.code).toBe("E_PERM");
+    expect(world.object(programmer.actor).location).not.toBe("the_verb_editor");
+    const badEditorInstall = installVerbAs(world, "$wiz", "$programmer", "bad_editor_invoke", `verb :bad_editor_invoke(id, descriptor) rxd {
+  return editor_invoke("the_chatroom", id, descriptor, {});
+}`, null);
+    expect(badEditorInstall.ok).toBe(true);
+    const badEditor = await world.directCall("editor-bad-target", programmer.actor, programmer.actor, "bad_editor_invoke", [base, "title"]);
+    expect(badEditor.op).toBe("error");
+    if (badEditor.op === "error") expect(badEditor.error.code).toBe("E_TYPE");
+    expect(world.propOrNull("the_chatroom", "sessions")).toBeNull();
+
+    const opened = await world.directCall("editor-open", programmer.actor, programmer.actor, "edit_verb", [base, "title", {}]);
+    expect(opened.op).toBe("result");
+    if (opened.op === "result") expect(opened.result).toMatchObject({ editor: "the_verb_editor", target: base, slot: 1, expected_version: 1, dirty: false });
+    if (opened.op === "result") expect(opened.observations).toEqual(expect.arrayContaining([expect.objectContaining({ type: "editor_entered", actor: programmer.actor, target: base })]));
+    expect(world.object(programmer.actor).location).toBe("the_verb_editor");
+
+    const viewed = await world.directCall("editor-view", programmer.actor, "the_verb_editor", "view", [{ line_numbers: true }]);
+    expect(viewed.op).toBe("result");
+    if (viewed.op === "result") {
+      expect((viewed.result as Record<string, string>).buffer).toContain("old title");
+      expect((viewed.result as { lines: Array<Record<string, unknown>> }).lines[1]).toMatchObject({ line: 2 });
+    }
+
+    const replaced = await world.directCall("editor-replace", programmer.actor, "the_verb_editor", "replace", [`verb :title() rx {
+  return "new title";
+}`]);
+    expect(replaced.op).toBe("result");
+    if (replaced.op === "result") expect(replaced.result).toMatchObject({ dirty: true });
+    expect(world.ownVerb(base, "title")?.source).toContain("old title");
+
+    const dryRun = await world.directCall("editor-dry-run", programmer.actor, "the_verb_editor", "dry_run", []);
+    expect(dryRun.op).toBe("result");
+    if (dryRun.op === "result") expect(dryRun.result).toMatchObject({ ok: true, dry_run: true, slot: 1, version: 2 });
+    expect(world.ownVerb(base, "title")?.source).toContain("old title");
+
+    const saved = await world.directCall("editor-save", programmer.actor, "the_verb_editor", "save", []);
+    expect(saved.op).toBe("result");
+    if (saved.op === "result") expect(saved.result).toMatchObject({ ok: true, version: 2, exited_to: "$nowhere" });
+    expect(world.object(programmer.actor).location).toBe("$nowhere");
+    expect(world.propOrNull("the_verb_editor", "sessions")).toEqual({});
+    expect(world.ownVerb(base, "title")?.source).toContain("new title");
+
+    const reopened = await world.directCall("editor-reopen", programmer.actor, programmer.actor, "edit_verb", [base, "title", {}]);
+    expect(reopened.op).toBe("result");
+    const paused = await world.directCall("editor-pause", programmer.actor, "the_verb_editor", "pause", []);
+    expect(paused.op).toBe("result");
+    expect(world.object(programmer.actor).location).toBe("$nowhere");
+    expect(world.propOrNull("the_verb_editor", "sessions")).toHaveProperty(programmer.actor);
+    const resumed = await world.directCall("editor-resume", programmer.actor, programmer.actor, "edit_verb", [base, "title", {}]);
+    expect(resumed.op).toBe("result");
+    if (resumed.op === "result") expect(resumed.result).toMatchObject({ resumed: true });
+    if (resumed.op === "result") expect(resumed.observations).toEqual(expect.arrayContaining([expect.objectContaining({ type: "editor_entered", actor: programmer.actor, target: base })]));
+    const aborted = await world.directCall("editor-abort", programmer.actor, "the_verb_editor", "abort", []);
+    expect(aborted.op).toBe("result");
+    expect(world.propOrNull("the_verb_editor", "sessions")).toEqual({});
+
+    const secondCreated = await world.directCall("editor-second-base", programmer.actor, programmer.actor, "create", ["$thing", { name: "Second Editor Base" }]);
+    expect(secondCreated.op).toBe("result");
+    const secondBase = (secondCreated.op === "result" ? (secondCreated.result as Record<string, string>).id : "");
+    const secondInstall = await world.directCall("editor-second-install", programmer.actor, programmer.actor, "install_verb", [secondBase, "title", `verb :title() rx {
+  return "second title";
+}`, {}]);
+    expect(secondInstall.op).toBe("result");
+    const cleanFirst = await world.directCall("editor-clean-first", programmer.actor, programmer.actor, "edit_verb", [base, "title", {}]);
+    expect(cleanFirst.op).toBe("result");
+    const replacedSession = await world.directCall("editor-clean-replace", programmer.actor, programmer.actor, "edit_verb", [secondBase, "title", {}]);
+    expect(replacedSession.op).toBe("result");
+    if (replacedSession.op === "result") expect(replacedSession.result).toMatchObject({ target: secondBase, replaced_previous: { target: base, dirty: false } });
+    const abortedReplacement = await world.directCall("editor-abort-replacement", programmer.actor, "the_verb_editor", "abort", []);
+    expect(abortedReplacement.op).toBe("result");
+    if (abortedReplacement.op === "result") expect(abortedReplacement.result).toMatchObject({ exited_to: "$nowhere" });
+    expect(world.object(programmer.actor).location).toBe("$nowhere");
+  });
+
   it("compiles string interpolation and dynamic index get/set", async () => {
     const { world, session, actor } = authedWorld();
     const source = `verb :index_and_interp(name, value) rx {

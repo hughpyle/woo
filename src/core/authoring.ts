@@ -580,5 +580,15 @@ const VALID_BUILTINS = new Set([
   "programmer_install_verb",
   "programmer_set_verb_info",
   "programmer_set_property_info",
-  "programmer_trace"
+  "programmer_trace",
+  "editor_invoke",
+  "editor_what",
+  "editor_view",
+  "editor_replace",
+  "editor_insert",
+  "editor_delete",
+  "editor_dry_run",
+  "editor_save",
+  "editor_pause",
+  "editor_abort"
 ]);

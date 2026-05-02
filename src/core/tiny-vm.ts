@@ -112,7 +112,8 @@ const BUILTIN_NAMES = [
   "caller_perms", "set_task_perms", "set_presence", "observe_to_space",
   "builder_create_object", "builder_chparent", "builder_recycle", "builder_set_property", "builder_inspect", "builder_search",
   "programmer_inspect", "programmer_resolve_verb", "programmer_list_verb", "programmer_search", "programmer_install_verb",
-  "programmer_set_verb_info", "programmer_set_property_info", "programmer_trace"
+  "programmer_set_verb_info", "programmer_set_property_info", "programmer_trace",
+  "editor_invoke", "editor_what", "editor_view", "editor_replace", "editor_insert", "editor_delete", "editor_dry_run", "editor_save", "editor_pause", "editor_abort"
 ];
 
 export async function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): Promise<WooValue> {
@@ -891,6 +892,36 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       case "programmer_trace":
         if (builtinArgs.length < 2 || builtinArgs.length > 3) throw wooError("E_INVARG", "programmer_trace expects object, descriptor, and optional opts");
         return frame.ctx.world.programmerTrace(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1], builtinArgs[2] ?? null, frame.ctx.definer);
+      case "editor_invoke":
+        if (builtinArgs.length < 3 || builtinArgs.length > 4) throw wooError("E_INVARG", "editor_invoke expects editor, target, descriptor, and optional opts");
+        return await frame.ctx.world.editorInvoke(frame.ctx, assertObj(builtinArgs[0]), assertObj(builtinArgs[1]), builtinArgs[2], builtinArgs[3] ?? null, frame.ctx.definer);
+      case "editor_what":
+        if (builtinArgs.length !== 0) throw wooError("E_INVARG", "editor_what expects no arguments");
+        return frame.ctx.world.editorWhat(frame.ctx, frame.ctx.thisObj);
+      case "editor_view":
+        if (builtinArgs.length > 1) throw wooError("E_INVARG", "editor_view expects optional opts");
+        return frame.ctx.world.editorView(frame.ctx, frame.ctx.thisObj, builtinArgs[0] ?? null);
+      case "editor_replace":
+        if (builtinArgs.length !== 1) throw wooError("E_INVARG", "editor_replace expects text");
+        return frame.ctx.world.editorReplace(frame.ctx, frame.ctx.thisObj, assertString(builtinArgs[0]));
+      case "editor_insert":
+        if (builtinArgs.length !== 2) throw wooError("E_INVARG", "editor_insert expects line and text");
+        return frame.ctx.world.editorInsert(frame.ctx, frame.ctx.thisObj, numeric(builtinArgs[0], "line"), assertString(builtinArgs[1]));
+      case "editor_delete":
+        if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "editor_delete expects start and optional end");
+        return frame.ctx.world.editorDelete(frame.ctx, frame.ctx.thisObj, numeric(builtinArgs[0], "start"), builtinArgs.length > 1 && builtinArgs[1] !== null ? numeric(builtinArgs[1], "end") : null);
+      case "editor_dry_run":
+        if (builtinArgs.length !== 0) throw wooError("E_INVARG", "editor_dry_run expects no arguments");
+        return await frame.ctx.world.editorDryRun(frame.ctx, frame.ctx.thisObj);
+      case "editor_save":
+        if (builtinArgs.length !== 0) throw wooError("E_INVARG", "editor_save expects no arguments");
+        return await frame.ctx.world.editorSave(frame.ctx, frame.ctx.thisObj);
+      case "editor_pause":
+        if (builtinArgs.length !== 0) throw wooError("E_INVARG", "editor_pause expects no arguments");
+        return await frame.ctx.world.editorPause(frame.ctx, frame.ctx.thisObj);
+      case "editor_abort":
+        if (builtinArgs.length !== 0) throw wooError("E_INVARG", "editor_abort expects no arguments");
+        return await frame.ctx.world.editorAbort(frame.ctx, frame.ctx.thisObj);
       default:
         throw wooError("E_INVARG", `unknown builtin: ${name}`);
     }

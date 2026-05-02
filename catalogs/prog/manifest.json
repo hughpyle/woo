@@ -94,7 +94,7 @@
           "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": { "args": [] },
-          "source": "verb :look() rxd {\n  return { id: this, title: this.name, description: this.description, api_version: this.api_version, tools: [\"inspect(id, opts?)\", \"resolve_verb(id, descriptor)\", \"list_verb(id, descriptor, opts?)\", \"search(query, opts?)\", \"install_verb(id, descriptor, source, opts?)\", \"set_verb_info(id, descriptor, opts?)\", \"set_property_info(id, name, opts?)\", \"trace(id, descriptor, opts?)\"] };\n}"
+          "source": "verb :look() rxd {\n  return { id: this, title: this.name, description: this.description, api_version: this.api_version, tools: [\"inspect(id, opts?)\", \"resolve_verb(id, descriptor)\", \"list_verb(id, descriptor, opts?)\", \"search(query, opts?)\", \"install_verb(id, descriptor, source, opts?)\", \"set_verb_info(id, descriptor, opts?)\", \"set_property_info(id, name, opts?)\", \"edit_verb(id, descriptor, opts?)\", \"trace(id, descriptor, opts?)\"] };\n}"
         },
         {
           "name": "inspect",
@@ -160,6 +160,16 @@
           "source": "verb :set_property_info(id, name, opts) rxd {\n  // Define/update property metadata, defaults, perms, and type hints. This is\n  // programmer authority, not the builder value-setting surface.\n  return programmer_set_property_info(id, name, opts);\n}"
         },
         {
+          "name": "edit_verb",
+          "aliases": ["edit"],
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "descriptor", "opts?"] },
+          "source": "verb :edit_verb(id, descriptor, opts) rxd {\n  // Door into this catalog's seeded $verb_editor instance. The editor room\n  // owns the buffer session after this point; the target object stays where it is.\n  return editor_invoke(\"the_verb_editor\", id, descriptor, opts);\n}"
+        },
+        {
           "name": "trace",
           "perms": "rxd",
           "direct_callable": true,
@@ -169,6 +179,104 @@
           "source": "verb :trace(id, verb_name, opts) rxd {\n  // Capture source-span traces for the next N invocations. v1.1.\n  return programmer_trace(id, verb_name, opts);\n}"
         }
       ]
+    },
+    {
+      "local_name": "$generic_editor",
+      "parent": "$space",
+      "description": "Room-like editor base class. It owns per-actor edit sessions and source-buffer lifecycle verbs. Presence, focus, wait, and any conversational behavior come from ordinary room/actor mechanics; the editor adds only view, edit, dry-run, save, pause, abort, and session introspection.",
+      "properties": [
+        { "name": "sessions", "type": "map<obj,map>", "default": {}, "perms": "" }
+      ],
+      "verbs": [
+        {
+          "name": "look",
+          "perms": "rxd",
+          "direct_callable": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :look() rxd {\n  return { id: this, title: this.name, description: this.description, tools: [\"what()\", \"view(opts?)\", \"replace(text)\", \"insert(line, text)\", \"delete(start, end?)\", \"dry_run()\", \"save()\", \"pause()\", \"abort()\"] };\n}"
+        },
+        {
+          "name": "what",
+          "perms": "rxd",
+          "direct_callable": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :what() rxd {\n  return editor_what();\n}"
+        },
+        {
+          "name": "view",
+          "aliases": ["list"],
+          "perms": "rxd",
+          "direct_callable": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["opts?"] },
+          "source": "verb :view(opts) rxd {\n  return editor_view(opts);\n}"
+        },
+        {
+          "name": "replace",
+          "perms": "rxd",
+          "direct_callable": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["text"] },
+          "source": "verb :replace(text) rxd {\n  return editor_replace(text);\n}"
+        },
+        {
+          "name": "insert",
+          "perms": "rxd",
+          "direct_callable": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["line", "text"] },
+          "source": "verb :insert(line, text) rxd {\n  return editor_insert(line, text);\n}"
+        },
+        {
+          "name": "delete",
+          "perms": "rxd",
+          "direct_callable": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["start", "end?"] },
+          "source": "verb :delete(start, end) rxd {\n  return editor_delete(start, end);\n}"
+        },
+        {
+          "name": "dry_run",
+          "perms": "rxd",
+          "direct_callable": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :dry_run() rxd {\n  return editor_dry_run();\n}"
+        },
+        {
+          "name": "save",
+          "perms": "rxd",
+          "direct_callable": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :save() rxd {\n  return editor_save();\n}"
+        },
+        {
+          "name": "pause",
+          "perms": "rxd",
+          "direct_callable": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :pause() rxd {\n  return editor_pause();\n}"
+        },
+        {
+          "name": "abort",
+          "perms": "rxd",
+          "direct_callable": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :abort() rxd {\n  return editor_abort();\n}"
+        }
+      ]
+    },
+    {
+      "local_name": "$verb_editor",
+      "parent": "$generic_editor",
+      "description": "Verb-source editor room. Sessions point at a target object and ordered verb descriptor, keep a source buffer with expected_version, and save through the same source-level programmer install path used by MCP tools.",
+      "properties": [],
+      "verbs": []
     }
   ],
   "features": [],
@@ -178,9 +286,20 @@
     { "on": "$builder", "type": "builder_recycled", "shape": { "actor": "obj", "id": "obj", "ts": "int" } },
     { "on": "$programmer", "type": "programmer_installed", "shape": { "actor": "obj", "id": "obj", "verb": "any", "slot": "int", "version": "int", "ts": "int" } },
     { "on": "$programmer", "type": "programmer_check_failed", "shape": { "actor": "obj", "id": "obj", "verb": "any", "diagnostics": "list<map>", "dry_run": "bool", "ts": "int" } },
-    { "on": "$programmer", "type": "programmer_verb_info_changed", "shape": { "actor": "obj", "id": "obj", "verb": "any", "slot": "int", "version": "int", "ts": "int" } }
+    { "on": "$programmer", "type": "programmer_verb_info_changed", "shape": { "actor": "obj", "id": "obj", "verb": "any", "slot": "int", "version": "int", "ts": "int" } },
+    { "on": "$generic_editor", "type": "editor_entered", "shape": { "actor": "obj", "editor": "obj", "target": "obj", "slot": "int|null", "ts": "int" } },
+    { "on": "$generic_editor", "type": "editor_saved", "shape": { "actor": "obj", "editor": "obj", "target": "obj", "slot": "int|null", "version": "int|null", "ts": "int" } }
   ],
   "seed_hooks": [
-    { "kind": "change_parent", "object": "$wiz", "parent": "$programmer" }
+    { "kind": "change_parent", "object": "$wiz", "parent": "$programmer" },
+    {
+      "kind": "create_instance",
+      "class": "$verb_editor",
+      "as": "the_verb_editor",
+      "name": "Verb Editor",
+      "description": "A room-like source editor for verb bodies. Actors enter through programmer edit_verb, edit a per-actor buffer, dry-run diagnostics, and save back to the target object without moving the target into the room.",
+      "location": "$nowhere",
+      "properties": { "sessions": {} }
+    }
   ]
 }
