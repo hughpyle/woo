@@ -5,6 +5,7 @@ coverage/
 .env
 .env.*
 .dev.vars
+.mcp.json
 .woo/
 test-results/
 playwright-report/
