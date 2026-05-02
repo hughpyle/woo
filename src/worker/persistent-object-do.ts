@@ -645,7 +645,7 @@ export class PersistentObjectDO {
   // times per call so we cap each kind at SAMPLE_BUDGET per SAMPLE_WINDOW_MS
   // and emit a periodic dropped-count summary.
   private emitMetric(event: MetricEvent, hostKey: string): void {
-    if (event.kind === "broadcast" || event.kind === "cross_host_rpc") {
+    if (event.kind === "broadcast" || event.kind === "cross_host_rpc" || event.kind === "storage_direct_write") {
       const counter = this.metricSampleCounters[event.kind];
       const now = Date.now();
       if (now - counter.windowStart >= METRIC_SAMPLE_WINDOW_MS) {
@@ -665,9 +665,10 @@ export class PersistentObjectDO {
     console.log("woo.metric", JSON.stringify({ ...event, ts: Date.now(), host_key: hostKey }));
   }
 
-  private metricSampleCounters: Record<"broadcast" | "cross_host_rpc", { windowStart: number; emitted: number; dropped: number }> = {
+  private metricSampleCounters: Record<"broadcast" | "cross_host_rpc" | "storage_direct_write", { windowStart: number; emitted: number; dropped: number }> = {
     broadcast: { windowStart: 0, emitted: 0, dropped: 0 },
-    cross_host_rpc: { windowStart: 0, emitted: 0, dropped: 0 }
+    cross_host_rpc: { windowStart: 0, emitted: 0, dropped: 0 },
+    storage_direct_write: { windowStart: 0, emitted: 0, dropped: 0 }
   };
 
   private serializedCallContext(ctx: CallContext): Record<string, unknown> {

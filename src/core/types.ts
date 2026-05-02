@@ -182,6 +182,7 @@ export type MetricEvent =
   | { kind: "compose_look"; room: ObjRef; present_count: number; contents_count: number; remote_titles: number; remote_describe_batches: number; ms: number }
   | { kind: "cross_host_rpc"; route: string; host: string; ms: number }
   | { kind: "storage_flush"; objects: number; properties: number; sessions: number; deleted_sessions: number; tasks: number; deleted_tasks: number; counters: boolean; ms: number }
+  | { kind: "storage_direct_write"; what: "object" | "object_delete" | "property" | "session" | "session_delete" | "task" | "task_delete" | "counters"; ms: number }
   | { kind: "subscribers_write"; space: ObjRef; size: number; delta: number }
   | { kind: "applied"; space: ObjRef; seq: number; verb: string; ms: number }
   | { kind: "direct_call"; target: ObjRef; verb: string; audience: ObjRef | null; observations: number; ms: number; status: "ok" | "error"; error?: string }

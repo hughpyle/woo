@@ -3137,7 +3137,10 @@ export class WooWorld {
       return;
     }
     const obj = this.objects.get(objRef);
-    if (obj) repo.saveObject(this.serializeObject(obj));
+    if (!obj) return;
+    const startedAt = Date.now();
+    repo.saveObject(this.serializeObject(obj));
+    this.recordMetric({ kind: "storage_direct_write", what: "object", ms: Date.now() - startedAt });
   }
 
   private deletePersistedObject(objRef: ObjRef): void {
@@ -3147,7 +3150,9 @@ export class WooWorld {
       this.markObjectDeleted(objRef);
       return;
     }
+    const startedAt = Date.now();
     repo.deleteObject(objRef);
+    this.recordMetric({ kind: "storage_direct_write", what: "object_delete", ms: Date.now() - startedAt });
   }
 
   private persistProperty(objRef: ObjRef, name: string): void {
@@ -3157,7 +3162,9 @@ export class WooWorld {
       this.markPropertyDirty(objRef, name);
       return;
     }
+    const startedAt = Date.now();
     repo.saveProperty(objRef, this.serializeProperty(objRef, name));
+    this.recordMetric({ kind: "storage_direct_write", what: "property", ms: Date.now() - startedAt });
   }
 
   private serializeProperty(objRef: ObjRef, name: string): SerializedProperty {
@@ -3181,7 +3188,9 @@ export class WooWorld {
       this.markSessionDirty(session.id);
       return;
     }
+    const startedAt = Date.now();
     repo.saveSession(this.serializeSession(session));
+    this.recordMetric({ kind: "storage_direct_write", what: "session", ms: Date.now() - startedAt });
   }
 
   private deletePersistedSession(sessionId: string): void {
@@ -3191,7 +3200,9 @@ export class WooWorld {
       this.markSessionDeleted(sessionId);
       return;
     }
+    const startedAt = Date.now();
     repo.deleteSession(sessionId);
+    this.recordMetric({ kind: "storage_direct_write", what: "session_delete", ms: Date.now() - startedAt });
   }
 
   private persistTask(task: ParkedTaskRecord): void {
@@ -3201,7 +3212,9 @@ export class WooWorld {
       this.markTaskDirty(task.id);
       return;
     }
+    const startedAt = Date.now();
     repo.saveTask(task);
+    this.recordMetric({ kind: "storage_direct_write", what: "task", ms: Date.now() - startedAt });
   }
 
   private persistCounters(): void {
@@ -3211,9 +3224,11 @@ export class WooWorld {
       this.markCountersDirty();
       return;
     }
+    const startedAt = Date.now();
     repo.saveMeta("objectCounter", String(this.objectCounter));
     repo.saveMeta("parkedTaskCounter", String(this.parkedTaskCounter));
     repo.saveMeta("sessionCounter", String(this.sessionCounter));
+    this.recordMetric({ kind: "storage_direct_write", what: "counters", ms: Date.now() - startedAt });
   }
 
   private deletePersistedTask(taskId: string): void {
@@ -3223,7 +3238,9 @@ export class WooWorld {
       this.markTaskDeleted(taskId);
       return;
     }
+    const startedAt = Date.now();
     repo.deleteTask(taskId);
+    this.recordMetric({ kind: "storage_direct_write", what: "task_delete", ms: Date.now() - startedAt });
   }
 
   private flushIncrementalState(): void {
