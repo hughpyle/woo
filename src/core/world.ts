@@ -2246,7 +2246,8 @@ export class WooWorld {
    * authoring forced move. `movetoChecked` is the user-level path:
    *
    *  - authority: caller (`ctx.progr`) must control `obj` (owner or wizard);
-   *  - cross-host writes are barred at the receiver;
+   *  - cross-host writes route through the host bridge or deferred host
+   *    effects, rather than mutating another host's local object cache;
    *  - `obj:moveto(target)` is dispatched once per (obj, target) pair via
    *    a per-call marker set so that a verb that delegates with
    *    `moveto(this, target)` falls through to the core path instead of
@@ -2257,12 +2258,25 @@ export class WooWorld {
    *    must not fail the move per the LambdaMOO contract).
    */
   async movetoChecked(ctx: CallContext, objRef: ObjRef, targetRef: ObjRef): Promise<WooValue> {
-    this.assertCanMoveto(ctx.progr, objRef);
-    if (await this.remoteHostForObject(objRef, ctx.hostMemo) || await this.remoteHostForObject(targetRef, ctx.hostMemo)) {
-      throw wooError("E_CROSS_HOST_WRITE", `moveto requires shared host: ${objRef} -> ${targetRef}`, { obj: objRef, target: targetRef });
+    this.assertCanMoveto(ctx, objRef);
+    const objRemote = await this.remoteHostForObject(objRef, ctx.hostMemo);
+    const targetRemote = await this.remoteHostForObject(targetRef, ctx.hostMemo);
+    if (!objRemote) this.object(objRef);
+    if (!targetRemote) this.object(targetRef);
+
+    if (objRemote && ctx.deferHostEffect) {
+      await this.invokeAcceptableHook(ctx, targetRef, objRef);
+      const oldLocation = await this.objectLocationChecked(objRef, ctx.hostMemo);
+      if (oldLocation && (this.objects.has(oldLocation) || await this.remoteHostForObject(oldLocation, ctx.hostMemo))) {
+        await this.invokeContainerHookSwallow(ctx, oldLocation, "exitfunc", [objRef]);
+      }
+      this.mirrorRemoteMoveLocally(objRef, targetRef);
+      ctx.deferHostEffect({ kind: "move_object", obj: objRef, target: targetRef, suppress_mirror_host: this.hostBridge?.localHost ?? null });
+      if (this.objects.has(targetRef) || await this.remoteHostForObject(targetRef, ctx.hostMemo)) {
+        await this.invokeContainerHookSwallow(ctx, targetRef, "enterfunc", [objRef]);
+      }
+      return targetRef;
     }
-    this.object(objRef);
-    this.object(targetRef);
 
     if (!ctx.movetoStack) ctx.movetoStack = new Set<string>();
     const marker = `${objRef}->${targetRef}`;
@@ -2282,25 +2296,28 @@ export class WooWorld {
 
     await this.invokeAcceptableHook(ctx, targetRef, objRef);
 
-    const oldLocation = this.object(objRef).location;
+    const oldLocation = await this.objectLocationChecked(objRef, ctx.hostMemo);
     if (oldLocation && this.objects.has(oldLocation)) {
+      await this.invokeContainerHookSwallow(ctx, oldLocation, "exitfunc", [objRef]);
+    } else if (oldLocation && await this.remoteHostForObject(oldLocation, ctx.hostMemo)) {
       await this.invokeContainerHookSwallow(ctx, oldLocation, "exitfunc", [objRef]);
     }
 
     await this.moveObjectChecked(objRef, targetRef);
 
-    if (this.objects.has(targetRef)) {
+    if (this.objects.has(targetRef) || await this.remoteHostForObject(targetRef, ctx.hostMemo)) {
       await this.invokeContainerHookSwallow(ctx, targetRef, "enterfunc", [objRef]);
     }
 
     return targetRef;
   }
 
-  private assertCanMoveto(progr: ObjRef, objRef: ObjRef): void {
-    if (this.isWizard(progr)) return;
-    const obj = this.object(objRef);
-    if (obj.owner === progr) return;
-    throw wooError("E_PERM", `${progr} cannot moveto ${objRef}`, { progr, obj: objRef });
+  private assertCanMoveto(ctx: CallContext, objRef: ObjRef): void {
+    if (objRef === ctx.actor) return;
+    if (this.isWizard(ctx.progr)) return;
+    const obj = this.objects.get(objRef);
+    if (obj && obj.owner === ctx.progr) return;
+    throw wooError("E_PERM", `${ctx.progr} cannot moveto ${objRef}`, { progr: ctx.progr, obj: objRef });
   }
 
   private async invokeAcceptableHook(ctx: CallContext, targetRef: ObjRef, objRef: ObjRef): Promise<void> {
@@ -2440,6 +2457,18 @@ export class WooWorld {
       }
     }
     ctx.observe(observation);
+  }
+
+  tellPlayer(ctx: CallContext, target: ObjRef, values: WooValue[]): void {
+    const text = values.map((value) => valueToText(value)).join("");
+    ctx.observe({
+      type: "text",
+      target,
+      actor: ctx.actor,
+      text,
+      body: text,
+      ts: Date.now()
+    });
   }
 
   chparentAuthoredObject(actor: ObjRef, objRef: ObjRef, parentRef: ObjRef): void {
@@ -3661,6 +3690,10 @@ export class WooWorld {
     if ((observation.type === "looked" || observation.type === "who") && typeof observation.to === "string") {
       return [observation.to];
     }
+    if (typeof observation.target === "string") {
+      if (this.objects.has(observation.target) && this.inheritsFrom(observation.target, "$actor")) return [observation.target];
+      if (!this.objects.has(observation.target)) return [observation.target];
+    }
     const directed = directedRecipients(observation);
     if (directed.to) {
       const actors = [directed.to];
@@ -3674,7 +3707,7 @@ export class WooWorld {
     if (!audience) return undefined;
     const present = this.liveAudienceActors(audience);
     if (!present) return undefined;
-    if ((observation.type === "entered" || observation.type === "left") && typeof observation.actor === "string") {
+    if ((observation.type === "entered" || observation.type === "left" || observation.type === "taken" || observation.type === "dropped") && typeof observation.actor === "string") {
       return present.filter((actor) => actor !== observation.actor);
     }
     return present;
@@ -4258,7 +4291,15 @@ export class WooWorld {
     this.nativeHandlers.set("player_moveto", async (ctx, args) => {
       if (ctx.thisObj !== ctx.actor && !this.isWizard(ctx.actor)) throw wooError("E_PERM", "players may only move themselves", { actor: ctx.actor, target: ctx.thisObj });
       const target = assertObj(args[0] ?? "$nowhere");
-      await this.moveObjectChecked(ctx.thisObj, target);
+      return await this.movetoChecked(ctx, ctx.thisObj, target);
+    });
+    this.nativeHandlers.set("player_tell", (ctx, args) => {
+      this.tellPlayer(ctx, ctx.thisObj, args);
+      return true;
+    });
+    this.nativeHandlers.set("player_tell_lines", (ctx, args) => {
+      const lines = Array.isArray(args[0]) ? args[0] : args;
+      for (const line of lines) this.tellPlayer(ctx, ctx.thisObj, [line]);
       return true;
     });
     this.nativeHandlers.set("guest_on_disfunc", async (ctx) => {
@@ -4283,6 +4324,10 @@ export class WooWorld {
     this.nativeHandlers.set("feature_can_be_attached_by", (ctx, args) => {
       const actor = assertObj(args[0] ?? ctx.actor);
       return actor === this.object(ctx.thisObj).owner;
+    });
+    this.nativeHandlers.set("thing_moveto", async (ctx, args) => {
+      const target = assertObj(args[0] ?? "$nowhere");
+      return await this.movetoChecked(ctx, ctx.thisObj, target);
     });
     this.nativeHandlers.set("add_feature", (ctx, args) => this.addFeature(ctx.thisObj, assertObj(args[0]), ctx.actor, ctx.observations));
     this.nativeHandlers.set("remove_feature", (ctx, args) => this.removeFeature(ctx.thisObj, assertObj(args[0]), ctx.actor, ctx.observations));
@@ -4357,6 +4402,7 @@ export class WooWorld {
       const location = typeof args[2] === "string" ? args[2] as ObjRef : await this.objectLocationChecked(actor, ctx.hostMemo);
       return await this.parseCommandMap(assertString(args[0] ?? ""), ctx, location, actor) as unknown as WooValue;
     });
+    this.nativeHandlers.set("room_look_self", (ctx) => this.spaceLookSelf(ctx));
     this.nativeHandlers.set("space_look_self", (ctx) => this.spaceLookSelf(ctx));
     this.nativeHandlers.set("room_who", (ctx) => this.roomWho(ctx));
     this.nativeHandlers.set("room_take", (ctx, args) => this.roomTake(ctx, assertString(args[0] ?? "")));
@@ -4606,7 +4652,9 @@ export class WooWorld {
     // See suppress-and-self-mirror convention in hosts.md §3.4.
     if (this.objects.has(room)) this.mirrorContents(room, item, false);
     const title = await this.titleForLook(ctx, room, item);
-    ctx.observe({ type: "taken", actor: ctx.actor, item, text: `You take ${title}.`, ts: Date.now() });
+    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor, ctx.hostMemo);
+    this.tellPlayer(ctx, ctx.actor, [`You take ${title}.`]);
+    ctx.observe({ type: "taken", actor: ctx.actor, item, text: `${actorName} takes ${title}.`, ts: Date.now() });
     return { item, title };
   }
 
@@ -4622,7 +4670,9 @@ export class WooWorld {
     // See suppress-and-self-mirror convention in hosts.md §3.4.
     if (this.objects.has(room)) this.mirrorContents(room, item, true);
     const title = await this.titleForLook(ctx, room, item);
-    ctx.observe({ type: "dropped", actor: ctx.actor, item, room, text: `You drop ${title}.`, ts: Date.now() });
+    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor, ctx.hostMemo);
+    this.tellPlayer(ctx, ctx.actor, [`You drop ${title}.`]);
+    ctx.observe({ type: "dropped", actor: ctx.actor, item, room, text: `${actorName} drops ${title}.`, ts: Date.now() });
     return { item, title, room };
   }
 
@@ -5192,6 +5242,12 @@ function assertVerbNameDescriptor(value: WooValue): string {
 
 function titleFromSummary(fallback: ObjRef, summary: HostObjectSummary): string {
   return typeof summary.name === "string" && summary.name.length > 0 ? summary.name : fallback;
+}
+
+function valueToText(value: WooValue): string {
+  if (value === null) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
 }
 
 function runtimeObjectScope(value: ObjRef): string {

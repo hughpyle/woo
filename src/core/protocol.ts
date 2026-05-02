@@ -39,6 +39,14 @@ export type RestProtocolHost = {
   openStream?(request: RestProtocolRequest, rawTarget: string, target: ObjRef, session: Session): RestProtocolResult | Promise<RestProtocolResult>;
   resolveObject?(id: string, session: Session, request: RestProtocolRequest): ObjRef;
   resolveActor?(request: RestProtocolRequest, actorValue: unknown, session: Session): ObjRef;
+  directCall?(
+    id: string | undefined,
+    actor: ObjRef,
+    target: ObjRef,
+    verb: string,
+    args: WooValue[],
+    options: { forceDirect?: boolean; forceReason?: string }
+  ): Promise<DirectResultFrame | ErrorFrame>;
   broadcastApplied(frame: AppliedFrame): void | Promise<void>;
   broadcastLiveEvents(result: DirectResultFrame): void | Promise<void>;
 };
@@ -158,7 +166,9 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
       }
 
       const forceDirect = request.header("x-woo-force-direct") === "1";
-      const result = await world.directCall(id, actor, target, verb, args, { forceDirect, forceReason: "REST X-Woo-Force-Direct" });
+      const direct = host.directCall ?? ((frameId, directActor, directTarget, directVerb, directArgs, directOptions) =>
+        world.directCall(frameId, directActor, directTarget, directVerb, directArgs, directOptions));
+      const result = await direct(id, actor, target, verb, args, { forceDirect, forceReason: "REST X-Woo-Force-Direct" });
       if (result.op === "error") return errorProtocol(result.error);
       await host.broadcastLiveEvents(result);
       return jsonProtocol({

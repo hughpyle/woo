@@ -15,7 +15,8 @@ keywords:
 Source catalog for the first-light chat demo.
 
 Defines the `$conversational` feature, `$match` scaffolding, sentinel match
-objects, `$chatroom`, and the seeded `the_chatroom` lobby. Chat verbs are direct
-live interactions; their observations are not replayed through a space log.
+objects, `$room` / `$exit` geography, `$chatroom`, and the seeded tiny
+Living Room -> Deck -> Hot Tub path. Chat verbs are direct live interactions;
+their observations are not replayed through a space log.
 
 See [DESIGN.md](DESIGN.md) for the app design and behavior contract.

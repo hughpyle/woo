@@ -37,13 +37,15 @@ Receiver verbs are dispatched as forked tasks (not joined to the emitter's task)
 
 ### 12.4 Strings as degenerate events
 
-`player:tell(s)` is a builtin shorthand for:
+`tell(player, s...)` and `$player:tell(s...)` are shorthand for:
 
 ```
-emit(player, { type: "text", body: s, source: caller });
+emit(player, { type: "text", body: join(s), target: player, source: caller });
 ```
 
-LambdaCore-style `:announce_all`, `:announce_all_but` are not built in. Authors of base classes can implement them in terms of `emit` if they want.
+LambdaCore-style `:announce_all`, `:announce_all_but` are ordinary room
+verbs, not core event primitives. The bundled `$room` catalog implements them
+by iterating room subscribers and calling `tell(listener, text)`.
 
 ### 12.5 Ordering
 
@@ -96,7 +98,7 @@ Both are advisory hints to transports. If absent, a transport falls back to the 
 
 1. **Self-addressed.** If the observation is `looked` or `who` and has a `to: obj` field, the audience is `[to]`. (The look's structured payload is for the looker; bystanders don't see another player's look output.)
 2. **Directed.** If the observation's `type` appears in the canonical *directed observation type set* (§12.7.1), the audience is `[to, from]` (whichever are present and are valid object refs). The `told`/`whisper`/`page` family is the v1 use.
-3. **Self-suppressing.** If the observation is `entered` or `left` and has an `actor: obj` field, the audience is everyone with presence in the source/audience space *except* that actor — the actor's own movement is already in their call result; the room broadcasts to bystanders.
+3. **Self-suppressing.** If the observation is `entered`, `left`, `taken`, or `dropped` and has an `actor: obj` field, the audience is everyone with presence in the source/audience space *except* that actor — the actor's own command output is delivered through the call result or a `text` observation; the room broadcasts to bystanders.
 4. **Default.** Otherwise the audience is everyone with presence in the audience space (the source space if `observation.source` is a `$space` descendant, else the call's space argument).
 
 #### 12.7.1 Directed observation types (v1)

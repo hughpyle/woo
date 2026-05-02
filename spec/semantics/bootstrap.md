@@ -39,12 +39,12 @@ the target for runtime-created objects, but it is not active in v1.
 | `$system` | singleton | none | `$wiz` | wizard | `description`; `wizard_actions=[]`; `bootstrap_token_used=false`; `applied_migrations=[]` | `:return_guest(guest)` | Bootstrap object and world registry root. It owns the reserved `#0` identity, carries wizard authority, and anchors world-level metadata. |
 | `$root` | class | `$system` | `$wiz` | — | Defines `name`, `description`, `aliases`, `host_placement` | `:set_value(value)`, `:set_prop(name,value)`, `:describe()`, `:title()`, `:look_self()` | Universal base class for ordinary persistent objects. Most object parent chains terminate here before reaching `$system`. |
 | `$actor` | class | `$root` | `$wiz` | — | Defines `presence_in`, `features`, `features_version`, `focus_list` | `:add_feature(f)`, `:remove_feature(f)`, `:has_feature(f)`, `:wait(timeout_ms?,limit?)`, `:focus(target)`, `:unfocus(target)`, `:focus_list()` | Base class for principals that originate messages and carry actor-scoped features and MCP focus state. |
-| `$player` | class | `$actor` | `$wiz` | — | Defines `session_id`, `home` | `:on_disfunc()`, `:moveto(target)` | Session-capable actor class for humans, agents, and tools connected over the wire. |
+| `$player` | class | `$actor` | `$wiz` | — | Defines `session_id`, `home` | `:on_disfunc()`, `:moveto(target)`, `:tell(text)`, `:tell_lines(lines)` | Session-capable actor class for humans, agents, and tools connected over the wire. |
 | `$wiz` | instance/class | `$player` | `$wiz` | wizard, programmer | Inherits player state; owns the seed graph | Inherits player/actor/root verbs | Seed administrator player used to bootstrap, inspect, and repair code, schema, and seeded objects. |
 | `$guest` | class | `$player` | `$wiz` | — | Inherits player state | Overrides `:on_disfunc()` | Reusable temporary player class. Guest instances bind to short-lived sessions and return to the free pool on reap. |
 | `$sequenced_log` | class | `$root` | `$wiz` | — | Inherits descriptive slots | Host operations `append(message)`, `read(from,limit)` | Append-only sequenced log base class. `$space` and registry-like coordination objects inherit its sequence/replay shape. |
-| `$space` | class | `$sequenced_log` | `$wiz` | — | Defines `next_seq`, `subscribers`, `last_snapshot_seq`, `features`, `features_version`, `auto_presence` | `:look_self()`, `:replay(from_seq,limit)`, `:add_feature(f)`, `:remove_feature(f)`, `:has_feature(f)` | Coordination base class: one local sequence, applied-frame history, present subscribers, and feature-extended direct verbs. |
-| `$thing` | class | `$root` | `$wiz` | fertile | Inherits descriptive slots | `:can_be_attached_by(actor)` | Simple non-actor base for addressable stateful objects. Fertile so first-light programmers can create ordinary owned objects. |
+| `$space` | class | `$sequenced_log` | `$wiz` | — | Defines `next_seq`, `subscribers`, `last_snapshot_seq`, `features`, `features_version`, `auto_presence` | `:replay(from_seq,limit)`, `:add_feature(f)`, `:remove_feature(f)`, `:has_feature(f)` | Coordination base class: one local sequence, applied-frame history, present subscribers, and feature-extended direct verbs. Room composition is catalog-level behavior, not part of `$space`. |
+| `$thing` | class | `$root` | `$wiz` | fertile | Inherits descriptive slots | `:can_be_attached_by(actor)`, `:moveto(target)` | Simple non-actor base for addressable stateful objects. Fertile so first-light programmers can create ordinary owned objects. |
 | `$catalog` | class | `$thing` | `$wiz` | — | Defines `catalog_name`, `alias`, `version`, `tap`, `objects`, `seeds`, `provenance` | Inherits root/thing verbs | Base class for installed catalog records. Instances record provenance and created refs for introspection and uninstall planning. |
 | `$catalog_registry` | singleton space | `$space` | `$wiz` | — | Own values for `$space` state plus `installed_catalogs=[]` | `:install(manifest,frontmatter,alias,provenance)`, `:list()` | Sequenced registry space for catalog install/update/uninstall operations. See [catalogs.md §CT5](../discovery/catalogs.md#ct5-install). |
 | `$nowhere` | singleton location | `$thing` | `$wiz` | — | Own `description`; inherits descriptive slots | Inherits root/thing verbs | Universal default-home location for disconnected guests, recycled objects, and objects whose home cannot otherwise be resolved. |
@@ -121,6 +121,8 @@ has no ordinary parent chain; `$nowhere` inherits descriptive slots from
 |---|---|---|
 | `:on_disfunc()` | — | Disfunc hook called at session reap. Default body is a no-op; `$guest` overrides. See [identity.md §I6.4](identity.md#i64-guest-reset-the-on_disfunc-convention). |
 | `:moveto(target)` | obj | Move this player to `target.contents`. Used by disfunc bodies. |
+| `:tell(text...)` rxd | any... | Deliver text output directly to this player. This is the LambdaCore `notify`/`:tell` output path adapted to observations. |
+| `:tell_lines(lines)` rxd | list | Deliver a sequence of text lines to this player. |
 
 ### B2.8 `$guest` verbs
 
@@ -154,7 +156,6 @@ directly on `$sequenced_log`.
 
 | Verb | Args | Purpose |
 |---|---|---|
-| `:look_self()` rxd | — | Generic room/space view: own title and actor-readable description, present actors, and visible contents summarized via each item's `:title()` and actor-readable `description`. Item `:title()` calls run under the looking actor's authority, not privileged room authority. `:title()` errors propagate; they are not silently replaced with object names. |
 | `:replay(from_seq, limit)` rxd | int, int | Public wrapper over the host log read operation. |
 | `:add_feature(f)` | obj | Append to `features`; idempotent. |
 | `:remove_feature(f)` | obj | Remove from `features`. |
@@ -171,7 +172,8 @@ permission checks.
 
 | Verb | Args | Purpose |
 |---|---|---|
-| `:can_be_attached_by(actor)` rxd | obj | Feature-attachment policy hook. Default allows attachment; feature objects override when they need stricter policy. |
+| `:can_be_attached_by(actor)` rxd | obj | Feature-attachment policy hook. Default allows the feature object's owner; feature objects override when they need wider or stricter policy. |
+| `:moveto(target)` | obj | Default LambdaCore-style moveto wrapper: delegates to the core `moveto(this, target)` pipeline, whose re-entry guard then runs `:acceptable`, `:exitfunc`, relocation, and `:enterfunc`. |
 
 ### B2.13 `$catalog` additional properties
 
@@ -346,7 +348,11 @@ builtin; no task-specific native runtime handler is required.
 | `$failed_match` | `$thing` | n/a | Stable sentinel returned by `$match:match_object` when no visible object matches. It is a value object, not an exception. |
 | `$ambiguous_match` | `$thing` | n/a | Stable sentinel returned by `$match:match_object` when multiple visible objects match at the same priority tier. It lets callers ask users to disambiguate without exceptions. |
 | `$conversational` | `$thing` | n/a | Feature object carrying chat verbs. Attached to `$actor`- or `$space`-descended consumers via `:add_feature($conversational)` per [features.md](features.md). Its verbs run with `this` = the consumer; observation routing emits to `this.subscribers`. |
-| `$chatroom` | `$space` | own host | Standalone room. A trivial `$space` subclass whose only addition is `features: [$conversational]` at boot. |
+| `$room` | `$space` | n/a | LambdaCore-shaped room base. Owns room look composition, `exits`, direction verbs, announce helpers, and carry/drop verbs. |
+| `$exit` | `$thing` | source room | First-class exit object with `source`, `dest`, and movement message properties. Direction verbs call room `:match_exit`, then invoke the matched exit. |
+| `$chatroom` | `$room` | own host | Standalone room class. Chat behavior comes from `$conversational`; room geography and contents behavior come from `$room`. |
+| `$portable` | `$thing` | n/a | Carryable object class used by the tiny room demo. |
+| `$furniture` | `$thing` | n/a | Fixed room furnishing class used by the tiny room demo. |
 
 ### B5.1 `$match` verbs
 
@@ -367,14 +373,35 @@ All direct-callable (rxd). Observations are live-only by route per [chat DESIGN.
 | `:say(text)` | str | Emits `said`. |
 | `:emote(text)` | str | Emits `emoted`. |
 | `:tell(recipient, text)` | obj, str | Emits `told` to `recipient`. |
-| `:look()` | — | Thin chat command wrapper over `this:look_self()`. The generic composition lives on `$space:look_self`, not in the chat feature. |
+| `:look()` | — | Thin chat command wrapper over `this:look_self()`. Room composition lives on `$room:look_self`, not in the chat feature. |
 | `:who()` | — | Returns the present-actor list. |
 | `:enter(actor?)` | obj? | Adds presence; emits `entered`. |
 | `:leave(actor?)` | obj? | Removes presence; emits `left`. |
-| `:command(text)` | str | Current installable-source fallback calls `:say(text)`. Full free-text dispatch via `$match:parse_command` is the next parser milestone. |
-| `:can_be_attached_by(actor)` | obj | Default policy: `actor == this.owner || is_wizard(actor)`. Override to widen. |
+| `:command_plan(text)` | str | Parse free text into a concrete direct/sequenced/huh route. |
+| `:command(text)` | str | Compatibility wrapper that executes direct plans. Richer clients should call `:command_plan` and then execute the returned route. |
+| `:can_be_attached_by(actor)` | obj | Attachment policy. Bundled `$conversational` allows attachment by default; stricter feature objects override. |
 
-### B5.3 `$conversational` schemas
+### B5.3 `$room` / `$exit` verbs
+
+`$room` follows the LambdaCore split: room verbs tell room occupants, and
+`$player:tell` is the output path for individual players.
+
+| Verb | Args | Purpose |
+|---|---|---|
+| `:look_self()` | — | Compose room title, description, present actors, and visible contents. Emits private `looked` to the looker. |
+| `:announce(text)` | str | Tell everyone in the room except `actor`. |
+| `:announce_all(text)` | str | Tell every subscribed actor in the room. |
+| `:announce_all_but(ignore, text)` | list, str | Tell every subscribed actor except those listed. |
+| `:match_exit(name)` | str | Resolve a name through `this.exits`, returning an `$exit` or `$failed_match`. |
+| direction verbs / `:go(exit)` | str | Find an exit object and call `exit:invoke()`. |
+| `:acceptable(obj)` / `:enterfunc(obj)` / `:exitfunc(obj)` | obj | Default moveto hooks. |
+| `:take(name)` / `:drop(name)` | str | Match visible/carryable objects and move them between room contents and actor inventory. |
+
+`$exit:invoke()` calls `$exit:move(actor)`. `$exit:move(who)` sends private
+leave/arrival text to `who`, calls `moveto(who, dest)`, updates room presence,
+and emits `left` / `entered` observations to the source and destination rooms.
+
+### B5.4 `$conversational` schemas
 
 Declared at boot:
 
@@ -382,14 +409,16 @@ Declared at boot:
 declare_event $conversational "said"    { source: obj, actor: obj, text: str };
 declare_event $conversational "emoted"  { source: obj, actor: obj, text: str };
 declare_event $conversational "told"    { source: obj, from:  obj, to:   obj, text: str };
-declare_event $conversational "entered" { source: obj, actor: obj };
-declare_event $conversational "left"    { source: obj, actor: obj };
+declare_event $conversational "entered" { source: obj, actor: obj, room: obj, origin?: obj, exit?: str, text: str };
+declare_event $conversational "left"    { source: obj, actor: obj, room: obj, destination?: obj, exit?: str, text: str };
+declare_event $conversational "looked"  { source: obj, actor: obj, to: obj, room: obj, text: str, look: map };
+declare_event $conversational "who"     { source: obj, actor: obj, to: obj, room: obj, present_actors: list<obj>, text: str };
 declare_event $conversational "huh"     { source: obj, actor: obj, text: str, suggestion?: str };
 ```
 
 Schemas describe shape only ([events.md §13](events.md#13-schemas)); durability is set by the route of the verb that emits each observation.
 
-### B5.4 Feature attachment at boot
+### B5.5 Feature attachment at boot
 
 The bootstrap step that creates `the_chatroom` (B6) and `the_taskspace` (B6) ends with:
 

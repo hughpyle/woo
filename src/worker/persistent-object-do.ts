@@ -177,6 +177,15 @@ export class PersistentObjectDO {
         },
         resolveObject: (id, session) => this.resolveRestObject(world, id, session),
         resolveActor: (_protocolRequest, actorValue, session) => this.resolveRestActor(world, request, actorValue, session),
+        directCall: async (id, actor, target, verb, args, options) => {
+          const deferredHostEffects: DeferredHostEffect[] = [];
+          const result = await world.directCall(id, actor, target, verb, args, {
+            ...options,
+            deferHostEffect: (effect) => deferredHostEffects.push(effect)
+          });
+          if (deferredHostEffects.length > 0) await world.applyDeferredHostEffects(deferredHostEffects);
+          return result;
+        },
         broadcastApplied: (frame) => this.handleAppliedFrame(world, frame),
         broadcastLiveEvents: (result) => this.broadcastLiveEvents(world, result)
       });
@@ -673,7 +682,8 @@ export class PersistentObjectDO {
       thisObj: ctx.thisObj,
       verbName: ctx.verbName,
       definer: ctx.definer,
-      message: ctx.message
+      message: ctx.message,
+      moveto_stack: ctx.movetoStack ? Array.from(ctx.movetoStack) : []
     };
   }
 
@@ -960,6 +970,9 @@ export class PersistentObjectDO {
           message,
           observations,
           hostMemo: createHostOperationMemo(),
+          movetoStack: Array.isArray(rawCtx.moveto_stack)
+            ? new Set(rawCtx.moveto_stack.filter((item): item is string => typeof item === "string"))
+            : undefined,
           observe: (event) => {
             observations.push({ ...event, source: event.source ?? String(rawCtx.space ?? "#-1") });
           },

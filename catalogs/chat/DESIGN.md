@@ -57,11 +57,8 @@ A feature object (per [features.md](../../spec/semantics/features.md)) carrying 
 | `:emote(text)` | str | Third-person action. Emits `emoted {actor, text}`. |
 | `:pose(text)` / `:quote(text)` / `:self(text)` | str | Small LambdaCore-flavored speech forms for `]`, `|`, and `<`. |
 | `:tell(recipient, text)` | obj, str | Directed message; emits `told {from: actor, to: recipient, text}` to recipient only. |
-| `:look()` rxd | — | Thin wrapper over `this:look_self()`. Room composition is generic `$space` behavior: it returns `{description, present_actors, contents}`, emits a private `looked` observation to the looker, and lists contained objects as `{id, title, description}` using each item's `:title()` and actor-readable description. |
+| `:look()` rxd | — | Thin wrapper over `this:look_self()`. In chat rooms, composition comes from `$room:look_self()`: it returns `{description, present_actors, contents}`, emits a private `looked` observation to the looker, and lists contained objects as `{id, title, description}` using each item's `:title()` and actor-readable description. |
 | `:who()` rxd | — | Returns the present-actor list and emits a private `who` observation to the caller. |
-| direction verbs | — | Room exits in the LambdaCore style: `north`, `se`, `east`, `out`, etc. Each delegates to `:go(exit)`, which looks up the room's `exits` map, moves the actor, asks the source room to emit `left`, asks the destination room to emit `entered`, and returns `look_deferred: true`. The actor/client then issues `:look()` as the next direct call so the destination room composes its own view in a separate turn. |
-| `:go(exit)` | str | Convenience wrapper around the same exit table for non-MOO clients. |
-| `:take(object)` / `:drop(object)` | str | Moves carryable objects between the room and the actor's inventory; fixed furnishings reject with `E_PERM`. |
 | `:enter(actor?)` | obj? | Adds actor (defaults `actor`) to subscribers and to its `presence_in`; when the room is itself contained in another room, `enter tub` resolves the contained room object and invokes this verb on it. Emits room-originated `entered` to the entered room and, when moving from another room, room-originated `left` to the old room. |
 | `:leave(actor?)` | obj? | Removes presence and emits room-originated `left`. |
 | `:huh(text, reason?)` | str, str? | Emits a parse-failure observation. |
@@ -70,12 +67,12 @@ A feature object (per [features.md](../../spec/semantics/features.md)) carrying 
 
 Most `$conversational` verbs remain portable source. `$match` and the command planner use trusted local native implementation hints until the DSL grows enough string/pattern primitives to express the parser cleanly as catalog code. Public tap installs ignore those hints and still compile the source fallback.
 
-Room movement (`:enter`, `:leave`, direction verbs, and `:go`) is source
-woocode. The core only supplies generic primitives: `set_presence`,
-`move`, `observe_to_space`, and `location`. Carrying objects with `:take` and
-`:drop` still uses native hints for the object matcher and portable checks;
-that remains catalog behavior behind ordinary dispatch, not a room primitive in
-the host protocol.
+Room entry/exit (`:enter`, `:leave`) is source woocode on `$conversational`.
+Geographic movement belongs to `$room` and `$exit` below. The core only
+supplies generic primitives: `set_presence`, `moveto`, `observe_to_space`,
+`tell`, and `location`. Carrying objects with `:take` and `:drop` still uses
+native hints for the object matcher and portable checks; that remains catalog
+behavior behind ordinary dispatch, not a room primitive in the host protocol.
 
 Inside each verb body: `this` = the consumer space (the room being talked in), `definer` = the `$conversational` feature, `progr` = the feature's owner. Observations are emitted to `this.subscribers`, not to the feature's own subscribers (which would be empty).
 
@@ -112,20 +109,36 @@ declare_event $conversational "huh"     { source: obj, actor: obj, text: str, re
 
 Live observations flow over the wire as `op: "event"` frames ([wire.md §17.2](../../spec/protocol/wire.md#172-server--client)) or as SSE `event: event` entries; clients render them in the same chronological feed as applied frames but they are not part of `:replay` history.
 
-## The chatroom class
+## The room and exit classes
 
-A trivially small subclass of `$space`:
+The chat catalog defines the LambdaCore-shaped geography layer separately from
+the conversational feature:
 
 ```
-$chatroom < $space
-  description: "A room for conversation."
+$room < $space
+  exits: map<str, $exit>
+  :look_self()
+  :announce() / :announce_all() / :announce_all_but()
+  :match_exit(name)
+  direction verbs / :go(exit)
+  :take(name) / :drop(name)
+
+$exit < $thing
+  source, dest
+  nogo_msg, onogo_msg
+  leave_msg, oleave_msg
+  arrive_msg, oarrive_msg
+  :invoke()
+  :move(who)
+
+$chatroom < $room
   features: [$conversational]            // attached at boot
 ```
 
 The standalone demo uses `$chatroom` as a small room class, close to LambdaCore's room model:
 
-- exits are room verbs (`se`, `east`, `out`) backed by an `exits` map;
-- blocked exits are still verbs, but return text instead of moving the actor;
+- exits are first-class objects addressed by the room's `exits` map;
+- blocked exits are `$exit` objects with `nogo_msg` / `onogo_msg`;
 - rooms may be contained in other rooms, so `enter tub` is ordinary object-command dispatch;
 - room contents are real objects, including fixed furnishings and portable things.
 
@@ -145,7 +158,10 @@ The local chat catalog seeds a tiny LambdaHouse-shaped path: `Living Room -> Dec
 
 This is intentionally not a full LambdaCore clone. It is the smallest room/object/exits slice that proves the same object model can support MOO-like navigation and carrying before builder tools exist.
 
-The current in-memory demo proves the object model and command surface, not the distributed containment invariant. On Cloudflare, `:take` and `:drop` still need the §R1.7 contents-mirror primitive: the object's owning host updates `location`, then old/new container hosts update their `contents` caches by RPC. Until that lands, cross-host carrying is a known implementation gap.
+The current implementation uses the host contents-mirror primitive: the
+object's owning host updates `location`, then old/new container hosts update
+their `contents` caches by RPC. Portables do not become self-hosted just because
+they move between rooms or inventories.
 
 ## The cockatoo (cheap imitation of LambdaMOO #1479)
 
@@ -159,7 +175,11 @@ What's intentionally not (yet) here: **self-driven timer chatter**. The canonica
 
 **Determinism if the wake path is sequenced.** If the scheduled wake fires through `the_chatroom`'s sequenced log so other clients see the same squawk on replay, calling `random()` *inside* the resumed handler breaks replay determinism (per [space.md](../../spec/semantics/space.md)). Capture randomness at *schedule time* — the scheduler picks the next phrase and the next interval and passes both as args/body to the scheduled message — rather than re-rolling on the wake. That mirrors the LambdaMOO `fork` pattern, where the next-scheduled call is itself the value chosen at this tick.
 
-**UI discovery still partial.** `$conversational:look()` delegates to the room's generic `:look_self()`, so REST/WS callers and the chat client see composed room contents. Verb-discovery via `:describe()` on a selected object is still tracked at [LATER.md](../../LATER.md); for now players discover object verbs by trying MOO-like text commands.
+**UI discovery still partial.** `$conversational:look()` delegates to the
+room's `$room:look_self()`, so REST/WS callers and the chat client see composed
+room contents. Verb-discovery via `:describe()` on a selected object is still
+tracked at [LATER.md](../../LATER.md); for now players discover object verbs by
+trying MOO-like text commands.
 
 ## Renderer
 
@@ -247,7 +267,7 @@ Two streams, one timeline. The renderer distinguishes by observation type but re
 
 Out of scope for this demo:
 
-- Channels, multi-room navigation, exits, world geography.
+- Channels and richer world geography beyond the tiny LambdaHouse path.
 - IRC-style modes/ops, kick/ban.
 - Threading, replies, edits, reactions, typing indicators.
 - Logged chat history, search, scrollback beyond the live session.
@@ -258,7 +278,7 @@ Out of scope for this demo:
 Reserved as natural follow-ons:
 
 - A logged `$chatroom_logged` variant that overrides `:say` to sequence through the log.
-- `$exit` and room navigation (the canonical MOO geography pattern).
+- More complete `$exit` behavior (doors, keys, locks, open/close).
 - A `$mail_recipient` feature for asynchronous messages between disconnected actors.
 
 ## Why this demo exists

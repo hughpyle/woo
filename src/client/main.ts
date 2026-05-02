@@ -27,7 +27,7 @@ type AppState = {
 };
 
 type ChatLine = {
-  kind: "said" | "said_to" | "said_as" | "emoted" | "posed" | "quoted" | "self_pointed" | "told" | "entered" | "left" | "looked" | "who" | "blocked_exit" | "taken" | "dropped" | "huh" | "dubspace_activity" | "dubspace_entered" | "dubspace_left" | "pinboard_activity" | "pinboard_entered" | "pinboard_left" | "system" | "error";
+  kind: "text" | "said" | "said_to" | "said_as" | "emoted" | "posed" | "quoted" | "self_pointed" | "told" | "entered" | "left" | "looked" | "who" | "blocked_exit" | "taken" | "dropped" | "huh" | "dubspace_activity" | "dubspace_entered" | "dubspace_left" | "pinboard_activity" | "pinboard_entered" | "pinboard_left" | "system" | "error";
   actor?: string;
   from?: string;
   to?: string;
@@ -1217,6 +1217,7 @@ function enterChat() {
 function isChatObservation(observation: any) {
   return [
     "said",
+    "text",
     "said_to",
     "said_as",
     "emoted",

@@ -569,6 +569,7 @@ const VALID_BUILTINS = new Set([
   "set_task_perms",
   "set_presence",
   "observe_to_space",
+  "tell",
   "builder_create_object",
   "builder_chparent",
   "builder_recycle",

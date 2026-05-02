@@ -19,10 +19,10 @@ moving object.
 | `move(obj, target)` | Programmer ownership of `obj` *or* wizard | None | Authoring / catalog install / forced relocations |
 | `moveto(obj, target)` | Caller controls `obj` (owner/wizard) *or* the verb running it has appropriate perms | Full chain (see M2) | Ordinary actor-level container moves |
 
-`move()` keeps its current implementation. `moveto()` is new and is the
-verb-friendly path. The old `room_take`/`room_drop` natives in chat can
-be reimplemented as `moveto()` callers without changing observable
-behavior.
+`move()` keeps its current implementation. `moveto()` is the verb-friendly
+path. Chat room exits use it now; `room_take`/`room_drop` still use trusted
+native mechanics until matching and portable checks are expressible in ordinary
+woocode.
 
 ## M2. The hook chain
 
@@ -33,7 +33,7 @@ moveto(obj, target)
   ↓
 2. target:acceptable(obj)             — must return truthy; else E_PERM
   ↓
-3. cross-host validation              — both sides must share host
+3. host coordination                  — local move or deferred owner write
   ↓
 4. obj.location:exitfunc(obj)         — fired if prior location defines :exitfunc
   ↓
@@ -100,10 +100,22 @@ gated by who controls the moving object. The `:acceptable` verb is the
 
 ## M4. Cross-host moves
 
-A `moveto` whose `obj` and `target` are on different hosts errors with
-`E_CROSS_HOST_WRITE`. Cross-host coordination is left to a future spec
-(probably a follow-the-target relocation primitive that runs as two
-local moves on each side under a sequenced call).
+Direct `moveto` may cross hosts. The host running the verb performs the
+receiver-side checks and container hooks it can observe, then coordinates the
+source-of-truth owner-location write through the host bridge. If the moving
+object is remote and the current request is already executing inside a host
+queue, the owner write is deferred as a host effect and applied after the
+outer dispatch returns. This avoids the re-entrant deadlock shape:
+
+```
+room host -> actor host -> same room host
+```
+
+Sequenced `$space:call` bodies still should not use cross-host `moveto` as a
+deterministic state primitive. If a sequenced behavior needs to move remote
+objects, it should delegate to a direct/catalog operation that owns the
+cross-host effects, or fail with `E_CROSS_HOST_WRITE` until a stronger
+multi-host transaction profile exists.
 
 ## M5. Implementation surface
 
@@ -113,8 +125,14 @@ local moves on each side under a sequenced call).
 // world.ts
 async movetoChecked(ctx: CallContext, objRef: ObjRef, targetRef: ObjRef): Promise<WooValue> {
   this.assertCanMoveto(ctx.actor, objRef);
-  if (await this.remoteHostForObject(objRef) || await this.remoteHostForObject(targetRef)) {
-    throw wooError("E_CROSS_HOST_WRITE", `moveto requires shared host: ${objRef} -> ${targetRef}`);
+  const objRemote = await this.remoteHostForObject(objRef, ctx.hostMemo);
+  if (objRemote && ctx.deferHostEffect) {
+    await this.invokeAcceptableOrTrue(ctx, targetRef, objRef);
+    const oldLoc = await this.objectLocationChecked(objRef, ctx.hostMemo);
+    if (oldLoc) await this.invokeHookOrIgnore(ctx, oldLoc, "exitfunc", [objRef]);
+    ctx.deferHostEffect({ kind: "move_object", obj: objRef, target: targetRef });
+    await this.invokeHookOrIgnore(ctx, targetRef, "enterfunc", [objRef]);
+    return targetRef;
   }
 
   // 1. Virtual dispatch through obj:moveto(target) once per (obj, target).
@@ -175,17 +193,18 @@ a debug-level event:
   shape: { obj: "obj", target: "obj", reason: "str", ts: "int" } }
 ```
 
-…fired when `moveto` raises (cross-host or :acceptable rejection).
+…fired when `moveto` raises (:acceptable rejection, permission failure, or
+unsupported sequenced cross-host use).
 Optional. Skip if it adds noise.
 
 ## M7. Migration of existing callers
 
 After landing:
 
-- `room_take` / `room_drop` natives in chat can be reimplemented as
-  `moveto()` callers. Behavior should be unchanged because chat's
-  `:acceptable` already filters on `$portable`; the migration is
-  mechanical.
+- room exits in chat now use `moveto()` in source woocode. `room_take` /
+  `room_drop` still use trusted native mechanics because they combine command
+  matching, portable checks, and inventory moves; once those checks are
+  expressible in ordinary woocode, they can become plain `moveto()` callers.
 - `pinboard v0.2` (`catalogs/pinboard/manifest.draft.json`) becomes
   installable: `:post(pin) → move(pin, this)` becomes `moveto(pin, this)`,
   triggering `:acceptable`/`:enterfunc` automatically.
@@ -210,9 +229,10 @@ In `tests/core.test.ts`, a new `describe` block:
   is at target after the throwing hook).
 - recursive moveto (verb calls `moveto(this, t)`) doesn't re-dispatch
   verb — the (obj, target) marker prevents infinite recursion.
-- cross-host attempts raise `E_CROSS_HOST_WRITE`.
+- direct cross-host actor movement defers the owner-location write and avoids
+  re-entering the origin host.
 - non-controller caller raises `E_PERM` before invoking `:acceptable`.
-- objects without a `:moveto` verb take the default (just hits
+- objects without a `:moveto` override inherit `$thing:moveto` (just hits
   acceptable + relocate + enterfunc).
 
 ## M9. What this enables

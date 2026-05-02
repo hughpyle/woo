@@ -109,7 +109,7 @@ const MAX_RUNTIME_STACK = 4_096;
 const BUILTIN_NAMES = [
   "length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs",
   "now", "create", "move", "moveto", "chparent", "has_flag", "isa", "random", "contents", "location", "task_perms",
-  "caller_perms", "set_task_perms", "set_presence", "observe_to_space",
+  "caller_perms", "set_task_perms", "set_presence", "observe_to_space", "tell",
   "builder_create_object", "builder_chparent", "builder_recycle", "builder_set_property", "builder_inspect", "builder_search",
   "programmer_inspect", "programmer_resolve_verb", "programmer_list_verb", "programmer_search", "programmer_install_verb",
   "programmer_set_verb_info", "programmer_set_property_info", "programmer_trace",
@@ -856,6 +856,11 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         if (builtinArgs.length !== 2) throw wooError("E_INVARG", "observe_to_space expects space and event");
         const event = assertMap(builtinArgs[1]);
         await frame.ctx.world.observeToSpace(frame.ctx, assertObj(builtinArgs[0]), { ...event, type: assertString(event.type) });
+        return null;
+      }
+      case "tell": {
+        if (builtinArgs.length < 2) throw wooError("E_INVARG", "tell expects actor and text");
+        frame.ctx.world.tellPlayer(frame.ctx, assertObj(builtinArgs[0]), builtinArgs.slice(1));
         return null;
       }
       case "builder_create_object":

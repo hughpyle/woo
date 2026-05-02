@@ -499,7 +499,7 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       if (moved.op === "result") {
         expect(moved.result).toMatchObject({ room: "the_deck", look_deferred: true });
       }
-      expect(moveEffects.map((effect) => effect.kind)).toEqual(["actor_presence", "actor_presence", "space_subscriber", "move_object"]);
+      expect(moveEffects.map((effect) => effect.kind)).toEqual(["move_object", "actor_presence", "actor_presence", "space_subscriber"]);
       await home.applyDeferredHostEffects(moveEffects);
       expect(roomABridge.contentsCalls.get("the_deck") ?? 0).toBe(0);
       expect(home.object(actor).location).toBe("the_deck");
@@ -528,7 +528,7 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       });
       expect(enterTub.op).toBe("result");
       if (enterTub.op === "result") expect(enterTub.result).toMatchObject({ room: "the_hot_tub", look_deferred: true });
-      expect(tubEffects.map((effect) => effect.kind)).toEqual(["actor_presence", "actor_presence", "move_object"]);
+      expect(tubEffects.map((effect) => effect.kind)).toEqual(["actor_presence", "move_object", "actor_presence"]);
       await home.applyDeferredHostEffects(tubEffects);
       expect(home.hasPresence(actor, "the_deck")).toBe(false);
       expect(home.hasPresence(actor, "the_hot_tub")).toBe(true);
@@ -556,7 +556,7 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       if (west.op === "result") {
         expect(west.result).toMatchObject({ room: "the_chatroom", look_deferred: true });
       }
-      expect(westEffects.map((effect) => effect.kind)).toEqual(["actor_presence", "actor_presence", "space_subscriber", "move_object"]);
+      expect(westEffects.map((effect) => effect.kind)).toEqual(["move_object", "actor_presence", "actor_presence", "space_subscriber"]);
       await home.applyDeferredHostEffects(westEffects);
       expect(roomBBridge.contentsCalls.get("the_chatroom") ?? 0).toBe(0);
       expect(home.object(actor).location).toBe("the_chatroom");

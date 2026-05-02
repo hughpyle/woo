@@ -2025,10 +2025,11 @@ describe("moveto", () => {
     expect(world.getProp(item, "move_count")).toBe(1);
   });
 
-  it("falls through to the direct chain when no :moveto verb is defined", async () => {
+  it("uses the default $thing:moveto wrapper for plain objects", async () => {
     const { world, auth } = await setupMovetoWorld("moveto-default");
     const target = world.createAuthoredObject(auth.actor, { parent: "$thing", name: "Plain" });
     const item = world.createAuthoredObject(auth.actor, { parent: "$thing", name: "Bare" });
+    expect(world.resolveVerb(item, "moveto").definer).toBe("$thing");
 
     const result = await world.directCall("moveto-default", auth.actor, auth.actor, "do_move", [item, target]);
     expect(result.op).toBe("result");
