@@ -613,6 +613,36 @@ describe("local catalogs", () => {
     expect(Array.from(world.object("the_pinboard").contents).some((id) => world.isDescendantOf(id, "$pin"))).toBe(true);
   });
 
+  it("installs missing dependency catalogs of an already-installed catalog before repair", () => {
+    const world = createWorld({ catalogs: ["chat", "pinboard"] });
+    expect(world.objects.has("$pinboard")).toBe(true);
+    // Simulate a world that long ago auto-installed pinboard but never had the
+    // note dependency installed (the depends edge is new in this codebase).
+    const registry = world.getProp("$catalog_registry", "installed_catalogs") as Array<Record<string, unknown>>;
+    const trimmed = registry.filter((record) => record.alias !== "note" && record.catalog !== "note");
+    world.setProp("$catalog_registry", "installed_catalogs", trimmed as unknown as Parameters<typeof world.setProp>[2]);
+    // Tear $note out of the world the way an old-deploy world that never had
+    // it would look. We can't recycle: $pin descends from $note, so removing
+    // by parent is unsafe. Instead, simulate the prior state by walking the
+    // map directly — the test exercises the install/migrate path that should
+    // restore $note as $pin's ancestor.
+    const noteObj = world.objects.get("$note");
+    if (noteObj) {
+      const noteParent = noteObj.parent ? world.objects.get(noteObj.parent) : null;
+      if (noteParent) noteParent.children.delete("$note");
+      world.objects.delete("$note");
+    }
+    expect(world.objects.has("$note")).toBe(false);
+    const migrations = (world.getProp("$system", "applied_migrations") as string[])
+      .filter((id) => id !== "2026-05-02-pinboard-v02-repair");
+    world.setProp("$system", "applied_migrations", migrations);
+
+    installLocalCatalogs(world, []);
+
+    expect(world.objects.has("$note")).toBe(true);
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-pinboard-v02-repair");
+  });
+
   it("seeds the_cockatoo in the chatroom with random-pick squawk", async () => {
     const world = createWorld();
     expect(world.objects.has("$cockatoo")).toBe(true);

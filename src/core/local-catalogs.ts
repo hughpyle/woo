@@ -101,9 +101,14 @@ export function parseAutoInstallCatalogs(value: string | undefined): string[] {
 }
 
 export function installLocalCatalogs(world: WooWorld, names: readonly string[] = DEFAULT_LOCAL_CATALOGS): void {
-  const sorted = sortCatalogNames(names);
-  for (const name of sorted) installLocalCatalog(world, name);
-  runLocalCatalogMigrations(world, localMigrationCatalogNames(world, sorted));
+  // Expand to: requested names + every catalog already installed + transitive
+  // deps of either. Otherwise installLocalCatalogs(world, []) on a world that
+  // long ago auto-installed pinboard would skip both install and reconcile —
+  // pinboard would stay on stale source, and the V02 repair migration would
+  // fail because $note (a dep of pinboard) was never installed.
+  const expanded = localMigrationCatalogNames(world, sortCatalogNames(names));
+  for (const name of expanded) installLocalCatalog(world, name);
+  runLocalCatalogMigrations(world, expanded);
 }
 
 export function installLocalCatalog(world: WooWorld, name: string): void {
@@ -182,6 +187,9 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): v
 }
 
 function localMigrationCatalogNames(world: WooWorld, requested: readonly string[]): string[] {
+  // sortCatalogNames walks `depends` transitively and includes every dep in
+  // the result, even deps that weren't in the input — so the returned list is
+  // always topologically complete relative to the bundled manifest.
   const selected = new Set(requested);
   for (const name of installedLocalCatalogNames(world)) selected.add(name);
   return sortCatalogNames(Array.from(selected));
@@ -209,6 +217,10 @@ function runPinboardV02RepairMigration(world: WooWorld, names: readonly string[]
   if (!names.includes("pinboard")) return;
   if (!localCatalogInstalled(world, "pinboard")) return;
   if (migrationApplied(world, LOCAL_CATALOG_PINBOARD_V02_REPAIR_MIGRATION)) return;
+  // The repair re-walks the manifest, which references $note as $pin's
+  // parent. Without that ancestor in place repairCatalogManifest throws
+  // E_UNRESOLVED_REFERENCE — defer until a later boot installs note.
+  if (!world.objects.has("$note")) return;
   const listNotes = world.objects.has("$pinboard") ? world.ownVerbExact("$pinboard", "list_notes") : null;
   const needsRepair =
     !world.objects.has("$pin") ||
