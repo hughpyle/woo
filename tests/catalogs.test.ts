@@ -666,6 +666,17 @@ describe("local catalogs", () => {
     expect(world.hasPresence(session.actor, "the_chatroom")).toBe(true);
     expect(world.object(session.actor).location).toBe("the_chatroom");
 
+    const outsider = world.auth("guest:match-outsider");
+    const leakedMatch = await world.directCall("match-outside-room", outsider.actor, "$match", "match_object", ["lamp", "the_chatroom"]);
+    expect(leakedMatch.op).toBe("error");
+    if (leakedMatch.op === "error") expect(leakedMatch.error.code).toBe("E_PERM");
+    const leakedParse = await world.directCall("parse-outside-room", outsider.actor, "$match", "parse_command", ["look lamp", outsider.actor, "the_chatroom"]);
+    expect(leakedParse.op).toBe("error");
+    if (leakedParse.op === "error") expect(leakedParse.error.code).toBe("E_PERM");
+    const leakedVerb = await world.directCall("match-verb-outside-room", outsider.actor, "$match", "match_verb", ["look", "the_lamp"]);
+    expect(leakedVerb.op).toBe("error");
+    if (leakedVerb.op === "error") expect(leakedVerb.error.code).toBe("E_PERM");
+
     const look = await world.directCall("look-lr", session.actor, "the_chatroom", "look", []);
     expect(look.op).toBe("result");
     if (look.op === "result") {
@@ -688,6 +699,11 @@ describe("local catalogs", () => {
     const takeCouch = await world.directCall("take-couch", session.actor, "the_chatroom", "take", ["couch"]);
     expect(takeCouch.op).toBe("error");
     if (takeCouch.op === "error") expect(takeCouch.error.code).toBe("E_PERM");
+    expect(world.object("the_couch").location).toBe("the_chatroom");
+
+    const moveCouchThroughExit = await world.directCall("exit-move-couch", session.actor, "exit_living_room_southeast", "move", ["the_couch"]);
+    expect(moveCouchThroughExit.op).toBe("error");
+    if (moveCouchThroughExit.op === "error") expect(moveCouchThroughExit.error.code).toBe("E_PERM");
     expect(world.object("the_couch").location).toBe("the_chatroom");
 
     const blockedSouth = await world.directCall("south-window", session.actor, "the_chatroom", "south", []);
@@ -783,6 +799,7 @@ describe("local catalogs", () => {
     expect(world.getProp("the_chatroom", "subscribers")).toEqual(["guest_1"]);
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-01-chat-room-contents-repair");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-chat-room-exit-model");
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-chat-exit-privilege-repair");
   });
 
   it("rehomes chat seed portables stranded in $nowhere", () => {

@@ -4280,6 +4280,68 @@ export class WooWorld {
     };
   }
 
+  private async publicCommandActor(ctx: CallContext, value: WooValue | undefined): Promise<ObjRef> {
+    const actor = typeof value === "string" ? value as ObjRef : ctx.actor;
+    if (actor !== ctx.actor && !this.isWizard(ctx.actor)) {
+      throw wooError("E_PERM", `${ctx.actor} cannot parse commands as ${actor}`, { actor: ctx.actor, requested_actor: actor });
+    }
+    if (this.objects.has(actor) || await this.remoteHostForObject(actor, ctx.hostMemo)) return actor;
+    this.object(actor);
+    return actor;
+  }
+
+  private async publicCommandLocation(ctx: CallContext, actor: ObjRef, value: WooValue | undefined): Promise<ObjRef | null> {
+    const location = typeof value === "string"
+      ? value as ObjRef
+      : await this.objectLocationChecked(actor, ctx.hostMemo).catch(() => null);
+    await this.assertPublicCommandLocation(ctx, actor, location);
+    return location;
+  }
+
+  private async assertPublicCommandLocation(ctx: CallContext, actor: ObjRef, location: ObjRef | null): Promise<void> {
+    if (!location || this.isWizard(ctx.actor)) return;
+    if (actor !== ctx.actor) {
+      throw wooError("E_PERM", `${ctx.actor} cannot parse commands for ${actor}`, { actor: ctx.actor, requested_actor: actor });
+    }
+    if (location === actor) return;
+
+    const actorLocation = await this.objectLocationChecked(actor, ctx.hostMemo).catch(() => null);
+    if (actorLocation === location) return;
+    try {
+      if (this.hasPresence(actor, location)) return;
+    } catch {
+      // Remote or partial host state falls through to the contents check.
+    }
+    try {
+      if ((await this.objectContents(location, ctx.hostMemo)).includes(actor)) return;
+    } catch {
+      // Missing or unreadable command locations are rejected below.
+    }
+    throw wooError("E_PERM", `${actor} is not present in ${location}`, { actor, location });
+  }
+
+  private async commandVisibleCandidates(ctx: CallContext, actor: ObjRef, location: ObjRef | null): Promise<ObjRef[]> {
+    const candidates: ObjRef[] = [];
+    const add = (id: unknown): void => {
+      if (typeof id === "string" && !candidates.includes(id)) candidates.push(id);
+    };
+    add(actor);
+    if (location) {
+      add(location);
+      for (const id of await this.objectContents(location, ctx.hostMemo).catch(() => [])) add(id);
+      const present = await this.propOrNullForActorAsync(actor, location, "subscribers", ctx.hostMemo).catch(() => null);
+      if (Array.isArray(present)) for (const id of present) add(id);
+    }
+    for (const id of await this.objectContents(actor, ctx.hostMemo).catch(() => [])) add(id);
+    return candidates;
+  }
+
+  private async canSeeCommandObject(ctx: CallContext, target: ObjRef): Promise<boolean> {
+    if (this.isWizard(ctx.actor)) return true;
+    const location = await this.publicCommandLocation(ctx, ctx.actor, undefined);
+    return (await this.commandVisibleCandidates(ctx, ctx.actor, location)).includes(target);
+  }
+
   private registerNativeHandlers(): void {
     this.nativeHandlers.set("describe", (ctx) => this.describeForActor(ctx.thisObj, ctx.actor));
     this.nativeHandlers.set("default_title", (ctx) => {
@@ -4380,12 +4442,15 @@ export class WooWorld {
       return record && typeof record === "object" && !Array.isArray(record) ? ((record as Record<string, WooValue>).migration_state ?? null) : null;
     });
     this.nativeHandlers.set("match_object", async (ctx, args) => {
-      const match = await this.matchObjectForActorAsync(assertString(args[0] ?? ""), ctx, typeof args[1] === "string" ? args[1] : await this.objectLocationChecked(ctx.actor, ctx.hostMemo));
+      const actor = await this.publicCommandActor(ctx, undefined);
+      const location = await this.publicCommandLocation(ctx, actor, args[1]);
+      const match = await this.matchObjectForActorAsync(assertString(args[0] ?? ""), ctx, location, actor);
       return match.value;
     });
     this.nativeHandlers.set("match_verb", async (ctx, args) => {
       const name = assertString(args[0] ?? "");
       const target = assertObj(args[1]);
+      if (!await this.canSeeCommandObject(ctx, target)) throw wooError("E_PERM", `${ctx.actor} cannot match verbs on ${target}`, { actor: ctx.actor, target });
       try {
         if (await this.remoteHostForObject(target, ctx.hostMemo)) {
           const resolved = await this.tryResolveVerbForCommand(ctx, target, name);
@@ -4398,8 +4463,8 @@ export class WooWorld {
       }
     });
     this.nativeHandlers.set("parse_command", async (ctx, args) => {
-      const actor = typeof args[1] === "string" ? args[1] as ObjRef : ctx.actor;
-      const location = typeof args[2] === "string" ? args[2] as ObjRef : await this.objectLocationChecked(actor, ctx.hostMemo);
+      const actor = await this.publicCommandActor(ctx, args[1]);
+      const location = await this.publicCommandLocation(ctx, actor, args[2]);
       return await this.parseCommandMap(assertString(args[0] ?? ""), ctx, location, actor) as unknown as WooValue;
     });
     this.nativeHandlers.set("room_look_self", (ctx) => this.spaceLookSelf(ctx));
@@ -4857,13 +4922,14 @@ export class WooWorld {
     const lower = wanted.toLowerCase();
     if (lower === "me") return { status: "ok", value: actor };
     if (lower === "here" && location) return { status: "ok", value: location };
-    if (this.objects.has(wanted) || await this.remoteHostForObject(wanted, ctx.hostMemo)) return { status: "ok", value: wanted };
 
     const candidates: ObjRef[] = [];
     const add = (id: unknown): void => {
       if (typeof id === "string" && !candidates.includes(id)) candidates.push(id);
     };
+    add(actor);
     if (location) {
+      add(location);
       for (const id of await this.objectContents(location, ctx.hostMemo)) add(id);
       const present = await this.propOrNullForActorAsync(ctx.progr, location, "subscribers", ctx.hostMemo);
       if (Array.isArray(present)) for (const id of present) add(id);
