@@ -78,6 +78,11 @@ export class PersistentObjectDO {
   private publishedRoutes = new Map<ObjRef, string>();
   private routesRegistered = false;
   private mcpGateway: McpGateway | null = null;
+  // Per-actor cache of `world.state(actor)` keyed by world.mutationVersion().
+  // Both /__internal/state and the local-host slice inside aggregateState
+  // hit this; a cache hit returns instantly without re-walking the object
+  // graph. Cleared implicitly on DO restart (cold init wipes the Map).
+  private hostStateCache = new Map<ObjRef, { version: number; payload: Record<string, unknown> }>();
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -698,8 +703,21 @@ export class PersistentObjectDO {
     }
   }
 
+  private cachedHostState(world: WooWorld, actor: ObjRef): Record<string, unknown> {
+    const version = world.mutationVersion();
+    const hit = this.hostStateCache.get(actor);
+    // Clone on read so callers (notably aggregateState, which reassigns
+    // state.object_routes / state.spaces / state.objects) can't mutate the
+    // cached copy. structuredClone on a ~127KB plain object is much cheaper
+    // than rebuilding state via the full object-graph walk.
+    if (hit && hit.version === version) return structuredClone(hit.payload);
+    const payload = world.state(actor) as unknown as Record<string, unknown>;
+    this.hostStateCache.set(actor, { version, payload: structuredClone(payload) });
+    return payload;
+  }
+
   private async aggregateState(world: WooWorld, actor: ObjRef): Promise<Record<string, unknown>> {
-    const state = world.state(actor) as unknown as Record<string, unknown>;
+    const state = this.cachedHostState(world, actor);
     const routes = Array.isArray(state.object_routes)
       ? state.object_routes.filter((route): route is { id: string; host: string; anchor: string | null } => (
           route !== null &&
@@ -793,7 +811,7 @@ export class PersistentObjectDO {
     try {
       if (request.method === "GET" && pathname === "/__internal/state") {
         const actor = request.headers.get("x-woo-internal-actor");
-        return jsonResponse(actor ? world.state(actor as ObjRef) : world.state());
+        return jsonResponse(actor ? this.cachedHostState(world, actor as ObjRef) : world.state());
       }
 
       const body = await readJsonBody(request);

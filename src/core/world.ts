@@ -245,6 +245,11 @@ export class WooWorld {
   private dirtyTasks = new Set<string>();
   private deletedTasks = new Set<string>();
   private dirtyCounters = false;
+  // Bumped on every mutation that could affect the world's externally visible
+  // state (object/property/session/task slice writes or deletes). Consumers
+  // such as the DO layer use this as a cache key for `state(actor)`-shaped
+  // responses; cache hits are valid while the version stays the same.
+  private mutationCounter = 0;
   private callDepth = 0;
   private guestFreePool = new Set<ObjRef>();
   private objectRepository: ObjectRepository | null;
@@ -282,6 +287,15 @@ export class WooWorld {
     const hook = this.metricsHook;
     if (!hook) return;
     try { hook(event); } catch { /* metrics must never throw */ }
+  }
+
+  /** Monotonically increasing counter bumped on every state-affecting
+   * mutation (object / property / session / task / counters slice writes
+   * and deletes). DO-layer caches key on this so the cache invalidates
+   * exactly when the snapshot would change. Reset implicitly on world
+   * recreation; not persisted. */
+  mutationVersion(): number {
+    return this.mutationCounter;
   }
 
   // Read access for the MCP host (cross-host tool enumeration). Other callers
@@ -3130,6 +3144,7 @@ export class WooWorld {
   }
 
   private persistObject(objRef: ObjRef): void {
+    this.mutationCounter += 1;
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3144,6 +3159,7 @@ export class WooWorld {
   }
 
   private deletePersistedObject(objRef: ObjRef): void {
+    this.mutationCounter += 1;
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3156,6 +3172,7 @@ export class WooWorld {
   }
 
   private persistProperty(objRef: ObjRef, name: string): void {
+    this.mutationCounter += 1;
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3182,6 +3199,7 @@ export class WooWorld {
   }
 
   private persistSession(session: Session): void {
+    this.mutationCounter += 1;
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3194,6 +3212,7 @@ export class WooWorld {
   }
 
   private deletePersistedSession(sessionId: string): void {
+    this.mutationCounter += 1;
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3206,6 +3225,7 @@ export class WooWorld {
   }
 
   private persistTask(task: ParkedTaskRecord): void {
+    this.mutationCounter += 1;
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3218,6 +3238,7 @@ export class WooWorld {
   }
 
   private persistCounters(): void {
+    this.mutationCounter += 1;
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3232,6 +3253,7 @@ export class WooWorld {
   }
 
   private deletePersistedTask(taskId: string): void {
+    this.mutationCounter += 1;
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
