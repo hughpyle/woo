@@ -710,8 +710,14 @@ export class PersistentObjectDO {
         ))
       : [];
     const remoteHosts = Array.from(new Set(routes.map((route) => route.host).filter((host) => host && host !== WORLD_HOST)));
-    for (const host of remoteHosts) {
-      const remote = await this.fetchHostState(host, actor);
+    // Fan out to every remote host in parallel; each /__internal/state takes
+    // O(per-host-state-compose) so a serial loop turns into O(N × that). The
+    // merge below is purely local object-reshape, so awaiting all fetches up
+    // front collapses the wall time to roughly max-host-latency.
+    const fetched = await Promise.all(
+      remoteHosts.map((host) => this.fetchHostState(host, actor).then((remote) => ({ host, remote })))
+    );
+    for (const { host, remote } of fetched) {
       if (!remote) continue;
       const remoteRoutes = Array.isArray(remote.object_routes)
         ? remote.object_routes.filter((route): route is { id: string; host: string; anchor: string | null } => (
