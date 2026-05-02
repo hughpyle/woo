@@ -3,7 +3,7 @@ import { compileVerb, definePropertyVersioned, definePropertyVersionedAs, instal
 import { bootstrap, createWorld, createWorldFromSerialized, mergeHostScopedSeed, nonEmptyHostScopedWorld, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
 import type { CallContext, HostBridge, HostObjectSummary, HostOperationMemo, MoveObjectResult, WooWorld } from "../src/core/world";
-import type { Message, MetricEvent, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
+import { wooError, type Message, type MetricEvent, type ObjRef, type TinyBytecode, type VerbDef, type WooValue } from "../src/core/types";
 
 function message(actor: string, target: string, verb: string, args: unknown[] = []): Message {
   return { actor, target, verb, args: args as any[] };
@@ -867,7 +867,7 @@ describe("woo core", () => {
     ]);
     expect(world.resolveVerb("ordered_probe", "same").verb.source_hash).toBe("test-same");
     expect(world.resolveVerb("ordered_probe", "two").verb.source_hash).toBe("test-same-second");
-    expect(world.progResolveVerb("$wiz", "ordered_probe", 2)).toMatchObject({ slot: 2, source_hash: "test-same-second" });
+    expect(world.programmerResolveVerb("$wiz", "ordered_probe", 2, "$wiz")).toMatchObject({ slot: 2, source: "verb :same() rx { ... }" });
 
     const reloaded = createWorldFromSerialized(world.exportWorld(), { persist: false });
     expect(reloaded.object("ordered_probe").verbs.map((verb) => [verb.name, verb.slot, verb.source_hash])).toEqual([
@@ -1438,57 +1438,102 @@ describe("authoring", () => {
     if (escalated.op === "error") expect(escalated.error.code).toBe("E_PERM");
   });
 
-  it("exposes LambdaCore-shaped prog read tools as actor-gated builtins", async () => {
+  it("exposes builder and programmer tools through player-class inheritance", async () => {
     const world = createWorld();
     const programmer = world.auth("guest:prog-reader");
+    const programmerNoBit = world.auth("guest:prog-reader-nobit");
     const other = world.auth("guest:prog-reader-other");
     const actorObj = world.object(programmer.actor);
     actorObj.owner = programmer.actor;
     actorObj.flags.programmer = true;
+    world.object(programmerNoBit.actor).owner = programmerNoBit.actor;
+    world.object(other.actor).owner = other.actor;
+    world.chparentAuthoredObject("$wiz", programmer.actor, "$programmer");
+    world.chparentAuthoredObject("$wiz", programmerNoBit.actor, "$programmer");
+    world.chparentAuthoredObject("$wiz", other.actor, "$builder");
 
-    const probe = world.createObject({ id: "prog_probe", name: "Prog Probe", parent: "$thing", owner: "$wiz" }).id;
-    expect(installVerb(world, probe, "compile_source", `verb :compile_source(source) rxd {
-  return prog_compile(source);
-}`, null).ok).toBe(true);
-    expect(installVerb(world, probe, "inspect_object", `verb :inspect_object(id) rxd {
-  return prog_inspect(id, { include_source: true });
-}`, null).ok).toBe(true);
-    expect(installVerb(world, probe, "resolve_named", `verb :resolve_named(id, name) rxd {
-  return prog_resolve_verb(id, name);
-}`, null).ok).toBe(true);
-    expect(installVerb(world, probe, "search_world", `verb :search_world(query) rxd {
-  return prog_search(query, { scope: "actor_context" });
-}`, null).ok).toBe(true);
+    expect(world.object("$builder").parent).toBe("$player");
+    expect(world.object("$programmer").parent).toBe("$builder");
+    expect(world.object("$wiz").parent).toBe("$programmer");
+    expect(world.objects.has("the_builder")).toBe(false);
+    expect(world.objects.has("the_programmer")).toBe(false);
 
-    const base = world.createAuthoredObject(programmer.actor, { parent: "$thing", name: "Prog Base" });
-    const widget = world.createAuthoredObject(programmer.actor, {
-      parent: base,
+    const built = await world.directCall("builder-create", other.actor, other.actor, "create", ["$thing", {
+      name: "Builder Box",
+      description: "A non-programmer owned object.",
+      aliases: ["box"]
+    }]);
+    expect(built.op).toBe("result");
+    const otherBox = (built.op === "result" ? (built.result as Record<string, string>).id : "");
+    expect(world.object(otherBox)).toMatchObject({ parent: "$thing", owner: other.actor });
+    expect(world.object(otherBox).flags.recyclable).toBe(true);
+
+    const actorChparentDenied = await world.directCall("builder-chparent-actor-denied", other.actor, other.actor, "chparent", [other.actor, otherBox, { dry_run: true }]);
+    expect(actorChparentDenied.op).toBe("error");
+    if (actorChparentDenied.op === "error") expect(actorChparentDenied.error.code).toBe("E_PERM");
+    expect(world.object(other.actor).parent).toBe("$builder");
+
+    const denied = await world.directCall("prog-denied", programmerNoBit.actor, programmerNoBit.actor, "install_verb", [otherBox, "demo", `verb :demo() rx { return true; }`, { dry_run: true }]);
+    expect(denied.op).toBe("error");
+    if (denied.op === "error") expect(denied.error.code).toBe("E_PERM");
+
+    const baseCreated = await world.directCall("builder-create-base", programmer.actor, programmer.actor, "create", ["$thing", { name: "Prog Base", fertile: true }]);
+    expect(baseCreated.op).toBe("result");
+    const base = (baseCreated.op === "result" ? (baseCreated.result as Record<string, string>).id : "");
+    const widgetCreated = await world.directCall("builder-create-widget", programmer.actor, programmer.actor, "create", [base, {
       name: "Widget",
       description: "A programmer-owned widget.",
       location: programmer.actor
-    });
-    definePropertyVersionedAs(world, programmer.actor, widget, "secret_note", "private", "w", null, "str");
-    expect(installVerbAs(world, programmer.actor, base, "title", `verb :title() rx {
-  return this.name;
-}`, null).ok).toBe(true);
+    }]);
+    expect(widgetCreated.op).toBe("result");
+    const widget = (widgetCreated.op === "result" ? (widgetCreated.result as Record<string, string>).id : "");
 
-    const compiled = await world.directCall("prog-compile", programmer.actor, probe, "compile_source", [`verb :demo() rx {
-  return "ok";
-}`]);
-    expect(compiled.op).toBe("result");
-    if (compiled.op === "result") {
-      expect(compiled.result).toMatchObject({ ok: true, metadata: { name: "demo", perms: "rx" } });
-      expect((compiled.result as Record<string, unknown>).bytecode).toMatchObject({ op_count: expect.any(Number) });
+    const propInfo = await world.directCall("programmer-prop-info", programmer.actor, programmer.actor, "set_property_info", [widget, "secret_note", {
+      default: "private",
+      perms: "w",
+      type_hint: "str"
+    }]);
+    expect(propInfo.op).toBe("result");
+    expect(world.propertyInfo(widget, "secret_note")).toMatchObject({ owner: programmer.actor, perms: "w" });
+
+    const dryRun = await world.directCall("programmer-dry-run", programmer.actor, programmer.actor, "install_verb", [base, "title", `verb :title() rx {
+  return this.name;
+}`, { dry_run: true }]);
+    expect(dryRun.op).toBe("result");
+    if (dryRun.op === "result") {
+      expect(dryRun.result).toMatchObject({ ok: true, dry_run: true, slot: 1, version: 1, metadata: { name: "title", perms: "rx" } });
+      expect(dryRun.result as Record<string, unknown>).not.toHaveProperty("bytecode");
+      expect(world.ownVerb(base, "title")).toBeNull();
     }
 
-    const resolved = await world.directCall("prog-resolve", programmer.actor, probe, "resolve_named", [widget, "title"]);
+    const installed = await world.directCall("programmer-install", programmer.actor, programmer.actor, "install_verb", [base, "title", `verb :title() rx {
+  return this.name;
+}`, {}]);
+    expect(installed.op).toBe("result");
+    expect(world.ownVerb(base, "title")).toBeTruthy();
+
+    const infoChanged = await world.directCall("programmer-verb-info", programmer.actor, programmer.actor, "set_verb_info", [base, "title", {
+      aliases: ["headline"],
+      tool_exposed: true,
+      expected_version: 1
+    }]);
+    expect(infoChanged.op).toBe("result");
+    expect(world.ownVerb(base, "title")).toMatchObject({ aliases: ["headline"], tool_exposed: true, version: 2 });
+
+    const resolved = await world.directCall("prog-resolve", programmer.actor, programmer.actor, "resolve_verb", [widget, "title"]);
     expect(resolved.op).toBe("result");
     if (resolved.op === "result") {
       expect(resolved.result).toMatchObject({ definer: base, name: "title", readable: true });
       expect((resolved.result as Record<string, unknown>).source).toContain("return this.name");
+      expect(resolved.result as Record<string, unknown>).not.toHaveProperty("bytecode");
+      expect(resolved.result as Record<string, unknown>).not.toHaveProperty("source_hash");
     }
 
-    const inspected = await world.directCall("prog-inspect", programmer.actor, probe, "inspect_object", [widget]);
+    const listed = await world.directCall("prog-list", programmer.actor, programmer.actor, "list_verb", [base, 1, {}]);
+    expect(listed.op).toBe("result");
+    if (listed.op === "result") expect(listed.result).toMatchObject({ slot: 1, name: "title", aliases: ["headline"] });
+
+    const inspected = await world.directCall("prog-inspect", programmer.actor, programmer.actor, "inspect", [widget, { include_source: true }]);
     expect(inspected.op).toBe("result");
     if (inspected.op === "result") {
       const result = inspected.result as Record<string, unknown>;
@@ -1497,16 +1542,22 @@ describe("authoring", () => {
       expect(result.own_properties).toEqual(expect.arrayContaining([expect.objectContaining({ name: "secret_note", readable: true })]));
     }
 
-    const searched = await world.directCall("prog-search", programmer.actor, probe, "search_world", ["widget"]);
+    const searched = await world.directCall("prog-search", programmer.actor, programmer.actor, "search", ["widget", { scope: "actor_context" }]);
     expect(searched.op).toBe("result");
     if (searched.op === "result") {
       expect(searched.result).toMatchObject({ query: "widget", scope: "actor_context" });
       expect((searched.result as { results: Array<Record<string, unknown>> }).results).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "object", id: widget })]));
     }
 
-    const denied = await world.directCall("prog-denied", other.actor, probe, "compile_source", [`verb :demo() rx { return true; }`]);
-    expect(denied.op).toBe("error");
-    if (denied.op === "error") expect(denied.error.code).toBe("E_PERM");
+    const oldCompat = compileVerb(`verb :old() rx {
+  return prog_search("x");
+}`);
+    expect(oldCompat.ok).toBe(false);
+
+    await expect(world.builderCreateObject(other.actor, "$thing", null, other.actor)).rejects.toMatchObject(wooError("E_PERM", "builder class surface required", {
+      actor: other.actor,
+      surface: other.actor
+    }));
   });
 
   it("compiles string interpolation and dynamic index get/set", async () => {

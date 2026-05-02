@@ -113,6 +113,7 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 
 ### Authoring
 - [minimal-ide.md](spec/authoring/minimal-ide.md) — first Web IDE and authoring primitives (A1–A11)
+- [editor-rooms.md](spec/authoring/editor-rooms.md) — LambdaCore-style editor rooms for collaborative in-world authoring (E1–E8)
 
 ### Deferred
 - [federation.md](spec/deferred/federation.md) — full cross-world interop design (§24)

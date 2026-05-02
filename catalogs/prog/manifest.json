@@ -1,0 +1,186 @@
+{
+  "name": "prog",
+  "version": "0.1.0",
+  "spec_version": "v1",
+  "description": "Builder and programmer tooling. The same world is the IDE: tools inspect and mutate the live object graph, with no design-time/runtime split. The catalog deliberately preserves LambdaCore's builder/programmer authority split by installing them as player classes. Builder class membership exposes object/data tools. Programmer class membership exposes source/metadata tools, while progbit and wizbit remain the hard authority facts.",
+  "license": "MIT",
+  "depends": [],
+  "classes": [
+    {
+      "local_name": "$builder",
+      "parent": "$player",
+      "description": "Builder player class. Actors inheriting from `$builder` expose object creation, reparenting, recycling, data-property setting, and structure-oriented inspection/search as their own MCP tools. Builder class membership is the authoring surface, not programmer authority: these verbs cannot install code, change executable behavior, or adjust source/perms metadata. Engine builtins check the invoking actor and object policy, not the wrapper verb owner.",
+      "properties": [
+        { "name": "api_version", "type": "str", "default": "0.1.0", "perms": "r" }
+      ],
+      "verbs": [
+        {
+          "name": "look",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :look() rxd {\n  return { id: this, title: this.name, description: this.description, api_version: this.api_version, tools: [\"inspect(id, opts?)\", \"search(query, opts?)\", \"create(parent, opts?)\", \"chparent(id, parent, opts?)\", \"recycle(id, opts?)\", \"set_property(id, name, value, opts?)\"] };\n}"
+        },
+        {
+          "name": "inspect",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "opts?"] },
+          "source": "verb :inspect(id, opts) rxd {\n  // Structure/data view: owner, flags, parent, children, instances, location,\n  // contents, and property summaries. No source output.\n  return builder_inspect(id, opts);\n}"
+        },
+        {
+          "name": "search",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["query", "opts?"] },
+          "source": "verb :search(query, opts) rxd {\n  // Bounded actor-scoped search across object names and property channels.\n  // Source channels are reserved for the programmer surface.\n  return builder_search(query, opts);\n}"
+        },
+        {
+          "name": "create",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["parent", "opts?"] },
+          "source": "verb :create(parent, opts) rxd {\n  // Creates an object owned by the invoking actor. There is intentionally no\n  // owner option on the builder surface; creating for another actor is wizard\n  // administration, not delegated building.\n  let result = builder_create_object(parent, opts);\n  observe({ type: \"builder_created\", actor: actor, id: result[\"id\"], parent: parent, ts: now() });\n  return result;\n}"
+        },
+        {
+          "name": "chparent",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "parent", "opts?"] },
+          "source": "verb :chparent(id, parent, opts) rxd {\n  let result = builder_chparent(id, parent, opts);\n  if (result[\"ok\"] && !result[\"dry_run\"]) {\n    observe({ type: \"builder_chparented\", actor: actor, id: id, parent: parent, ts: now() });\n  }\n  return result;\n}"
+        },
+        {
+          "name": "recycle",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "opts?"] },
+          "source": "verb :recycle(id, opts) rxd {\n  let result = builder_recycle(id, opts);\n  if (result[\"ok\"] && !result[\"dry_run\"]) {\n    observe({ type: \"builder_recycled\", actor: actor, id: id, ts: now() });\n  }\n  return result;\n}"
+        },
+        {
+          "name": "set_property",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "name", "value", "opts?"] },
+          "source": "verb :set_property(id, name, value, opts) rxd {\n  // Ordinary data value setting. This does not change verb source, property\n  // perms, executable metadata, wizard/programmer flags, or ownership.\n  return builder_set_property(id, name, value, opts);\n}"
+        }
+      ]
+    },
+    {
+      "local_name": "$programmer",
+      "parent": "$builder",
+      "description": "Programmer player class. Actors inheriting from `$programmer` expose source-aware inspection, verb resolution, source listing, source search, verb install with dry-run diagnostics, metadata-only verb edits, property-definition metadata, and traces as their own MCP tools. Programmer class membership exposes the interface; the programmer or wizard flag remains the hard authority check. The surface is source-level; bytecode and VM internals are deliberately absent.",
+      "properties": [
+        { "name": "api_version", "type": "str", "default": "0.1.0", "perms": "r" }
+      ],
+      "verbs": [
+        {
+          "name": "look",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :look() rxd {\n  return { id: this, title: this.name, description: this.description, api_version: this.api_version, tools: [\"inspect(id, opts?)\", \"resolve_verb(id, descriptor)\", \"list_verb(id, descriptor, opts?)\", \"search(query, opts?)\", \"install_verb(id, descriptor, source, opts?)\", \"set_verb_info(id, descriptor, opts?)\", \"set_property_info(id, name, opts?)\", \"trace(id, descriptor, opts?)\"] };\n}"
+        },
+        {
+          "name": "inspect",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "opts?"] },
+          "source": "verb :inspect(id, opts) rxd {\n  // Source-aware call-tree view with read filters: parent/features walk, own\n  // and inherited verbs/properties, slots, impact hints, and optional readable\n  // source summaries. No bytecode.\n  return programmer_inspect(id, opts);\n}"
+        },
+        {
+          "name": "resolve_verb",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "descriptor"] },
+          "source": "verb :resolve_verb(id, descriptor) rxd {\n  return programmer_resolve_verb(id, descriptor);\n}"
+        },
+        {
+          "name": "list_verb",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "descriptor", "opts?"] },
+          "source": "verb :list_verb(id, descriptor, opts) rxd {\n  // Return readable source and metadata for one ordered verb slot. This is\n  // source-level only: no bytecode, opcode, literal-pool, or VM detail.\n  return programmer_list_verb(id, descriptor, opts);\n}"
+        },
+        {
+          "name": "search",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["query", "opts?"] },
+          "source": "verb :search(query, opts) rxd {\n  // Bounded actor-scoped search. opts.channels may include readable\n  // verb_source; unreadable source is omitted, not summarized.\n  return programmer_search(query, opts);\n}"
+        },
+        {
+          "name": "install_verb",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "descriptor", "source", "opts?"] },
+          "source": "verb :install_verb(id, descriptor, source, opts) rxd {\n  // Check and install source. opts.dry_run=true exercises the exact install\n  // path, including authority, slot resolution, expected_version, mode, and\n  // header diagnostics, but mutates nothing and emits no install observation.\n  // opts.perms is rejected; the source header is canonical.\n  let result = programmer_install_verb(id, descriptor, source, opts);\n  if (result[\"ok\"] && !result[\"dry_run\"]) {\n    observe({ type: \"programmer_installed\", actor: actor, id: id, verb: descriptor, slot: result[\"slot\"], version: result[\"version\"], ts: now() });\n  } else if (!result[\"ok\"]) {\n    observe({ type: \"programmer_check_failed\", actor: actor, id: id, verb: descriptor, diagnostics: result[\"diagnostics\"], dry_run: result[\"dry_run\"], ts: now() });\n  }\n  return result;\n}"
+        },
+        {
+          "name": "set_verb_info",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "descriptor", "opts?"] },
+          "source": "verb :set_verb_info(id, descriptor, opts) rxd {\n  // Metadata-only edit for aliases, arg spec, exposure flags, and perms.\n  // Permission bits are changed here, not through source install. Does not\n  // reinstall source. opts.dry_run=true validates without mutation.\n  let result = programmer_set_verb_info(id, descriptor, opts);\n  if (result[\"ok\"] && !result[\"dry_run\"]) {\n    observe({ type: \"programmer_verb_info_changed\", actor: actor, id: id, verb: descriptor, slot: result[\"slot\"], version: result[\"version\"], ts: now() });\n  }\n  return result;\n}"
+        },
+        {
+          "name": "set_property_info",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "name", "opts?"] },
+          "source": "verb :set_property_info(id, name, opts) rxd {\n  // Define/update property metadata, defaults, perms, and type hints. This is\n  // programmer authority, not the builder value-setting surface.\n  return programmer_set_property_info(id, name, opts);\n}"
+        },
+        {
+          "name": "trace",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "verb_name", "opts?"] },
+          "source": "verb :trace(id, verb_name, opts) rxd {\n  // Capture source-span traces for the next N invocations. v1.1.\n  return programmer_trace(id, verb_name, opts);\n}"
+        }
+      ]
+    }
+  ],
+  "features": [],
+  "schemas": [
+    { "on": "$builder", "type": "builder_created", "shape": { "actor": "obj", "id": "obj", "parent": "obj", "ts": "int" } },
+    { "on": "$builder", "type": "builder_chparented", "shape": { "actor": "obj", "id": "obj", "parent": "obj", "ts": "int" } },
+    { "on": "$builder", "type": "builder_recycled", "shape": { "actor": "obj", "id": "obj", "ts": "int" } },
+    { "on": "$programmer", "type": "programmer_installed", "shape": { "actor": "obj", "id": "obj", "verb": "any", "slot": "int", "version": "int", "ts": "int" } },
+    { "on": "$programmer", "type": "programmer_check_failed", "shape": { "actor": "obj", "id": "obj", "verb": "any", "diagnostics": "list<map>", "dry_run": "bool", "ts": "int" } },
+    { "on": "$programmer", "type": "programmer_verb_info_changed", "shape": { "actor": "obj", "id": "obj", "verb": "any", "slot": "int", "version": "int", "ts": "int" } }
+  ],
+  "seed_hooks": [
+    { "kind": "change_parent", "object": "$wiz", "parent": "$programmer" }
+  ]
+}

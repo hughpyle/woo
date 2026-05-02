@@ -10,6 +10,8 @@ The sections below distinguish three flavors of pending item:
 
 ## random stuff to do
 
+- subscriptions (to anything) (grouped??)
+- help, equivalent to the MOO help-system (lots of pages, and "editor"... how?)
 - ~~multiple rooms, and furniture and exits~~ — first chat slice landed with Living Room, Deck, Hot Tub, exits, fixed furniture, and portables.
 - migrate `the_dubspace`, `the_taskspace`, and `the_chatroom` manifests to declare `instances_self_host: true` on `$dubspace` / `$taskspace` / `$chatroom` (or `$room`) at the class, instead of stamping `host_placement: "self"` on each instance. Wire `create()` to compute `host_placement` from the parent chain. Keep `host_placement` as the runtime projection. Manifest-migration story per `spec/semantics/objects.md §4.2`.
 - mid-RPC origin-host crash drops the awaiting task: the v1 `awaiting_call` removal trades a real durability story for simplicity (`spec/semantics/tasks.md §16.3`). If a verb does many cross-host RPCs and the origin host evicts mid-flight, the in-memory task is lost. Revisit if the workload makes this hurt.

@@ -16,3 +16,5 @@ source editing, compile/install, diagnostics, and versioned mutation.
 
 - [minimal-ide.md](minimal-ide.md): the first Web IDE design and the object
   behavior primitives it pulls forward.
+- [editor-rooms.md](editor-rooms.md): LambdaCore-style editor rooms for
+  collaborative, in-world authoring sessions.

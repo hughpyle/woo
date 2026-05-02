@@ -106,7 +106,14 @@ const DEFAULT_WALL_MS = 10_000;
 const MAX_VM_FRAMES = 128;
 const MAX_RUNTIME_LOCALS = 1_024;
 const MAX_RUNTIME_STACK = 4_096;
-const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "move", "chparent", "has_flag", "random", "contents", "location", "task_perms", "caller_perms", "set_task_perms", "set_presence", "observe_to_space", "prog_compile", "prog_inspect", "prog_resolve_verb", "prog_search"];
+const BUILTIN_NAMES = [
+  "length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs",
+  "now", "create", "move", "chparent", "has_flag", "random", "contents", "location", "task_perms",
+  "caller_perms", "set_task_perms", "set_presence", "observe_to_space",
+  "builder_create_object", "builder_chparent", "builder_recycle", "builder_set_property", "builder_inspect", "builder_search",
+  "programmer_inspect", "programmer_resolve_verb", "programmer_list_verb", "programmer_search", "programmer_install_verb",
+  "programmer_set_verb_info", "programmer_set_property_info", "programmer_trace"
+];
 
 export async function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): Promise<WooValue> {
   return (await runVmFrames([makeFrame(ctx, bytecode, args)])).result;
@@ -842,18 +849,48 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         await frame.ctx.world.observeToSpace(frame.ctx, assertObj(builtinArgs[0]), { ...event, type: assertString(event.type) });
         return null;
       }
-      case "prog_compile":
-        if (builtinArgs.length !== 1) throw wooError("E_INVARG", "prog_compile expects source");
-        return frame.ctx.world.progCompile(frame.ctx.actor, assertString(builtinArgs[0]));
-      case "prog_inspect":
-        if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "prog_inspect expects object and optional opts");
-        return frame.ctx.world.progInspect(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1] ?? null);
-      case "prog_resolve_verb":
-        if (builtinArgs.length !== 2) throw wooError("E_INVARG", "prog_resolve_verb expects object and verb descriptor");
-        return frame.ctx.world.progResolveVerb(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1]);
-      case "prog_search":
-        if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "prog_search expects query and optional opts");
-        return frame.ctx.world.progSearch(frame.ctx.actor, assertString(builtinArgs[0]), builtinArgs[1] ?? null);
+      case "builder_create_object":
+        if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "builder_create_object expects parent and optional opts");
+        return await frame.ctx.world.builderCreateObject(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1] ?? null, frame.ctx.definer);
+      case "builder_chparent":
+        if (builtinArgs.length < 2 || builtinArgs.length > 3) throw wooError("E_INVARG", "builder_chparent expects object, parent, and optional opts");
+        return await frame.ctx.world.builderChparent(frame.ctx.actor, assertObj(builtinArgs[0]), assertObj(builtinArgs[1]), builtinArgs[2] ?? null, frame.ctx.definer);
+      case "builder_recycle":
+        if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "builder_recycle expects object and optional opts");
+        return await frame.ctx.world.builderRecycle(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1] ?? null, frame.ctx.definer);
+      case "builder_set_property":
+        if (builtinArgs.length < 3 || builtinArgs.length > 4) throw wooError("E_INVARG", "builder_set_property expects object, name, value, and optional opts");
+        return await frame.ctx.world.builderSetProperty(frame.ctx.actor, assertObj(builtinArgs[0]), assertString(builtinArgs[1]), builtinArgs[2], builtinArgs[3] ?? null, frame.ctx.definer);
+      case "builder_inspect":
+        if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "builder_inspect expects object and optional opts");
+        return frame.ctx.world.builderInspect(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1] ?? null, frame.ctx.definer);
+      case "builder_search":
+        if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "builder_search expects query and optional opts");
+        return frame.ctx.world.builderSearch(frame.ctx.actor, assertString(builtinArgs[0]), builtinArgs[1] ?? null, frame.ctx.definer);
+      case "programmer_inspect":
+        if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "programmer_inspect expects object and optional opts");
+        return frame.ctx.world.programmerInspect(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1] ?? null, frame.ctx.definer);
+      case "programmer_resolve_verb":
+        if (builtinArgs.length !== 2) throw wooError("E_INVARG", "programmer_resolve_verb expects object and verb descriptor");
+        return frame.ctx.world.programmerResolveVerb(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1], frame.ctx.definer);
+      case "programmer_list_verb":
+        if (builtinArgs.length < 2 || builtinArgs.length > 3) throw wooError("E_INVARG", "programmer_list_verb expects object, descriptor, and optional opts");
+        return frame.ctx.world.programmerListVerb(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1], builtinArgs[2] ?? null, frame.ctx.definer);
+      case "programmer_search":
+        if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "programmer_search expects query and optional opts");
+        return frame.ctx.world.programmerSearch(frame.ctx.actor, assertString(builtinArgs[0]), builtinArgs[1] ?? null, frame.ctx.definer);
+      case "programmer_install_verb":
+        if (builtinArgs.length < 3 || builtinArgs.length > 4) throw wooError("E_INVARG", "programmer_install_verb expects object, descriptor, source, and optional opts");
+        return await frame.ctx.world.programmerInstallVerb(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1], assertString(builtinArgs[2]), builtinArgs[3] ?? null, frame.ctx.definer);
+      case "programmer_set_verb_info":
+        if (builtinArgs.length < 2 || builtinArgs.length > 3) throw wooError("E_INVARG", "programmer_set_verb_info expects object, descriptor, and optional opts");
+        return await frame.ctx.world.programmerSetVerbInfo(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1], builtinArgs[2] ?? null, frame.ctx.definer);
+      case "programmer_set_property_info":
+        if (builtinArgs.length < 2 || builtinArgs.length > 3) throw wooError("E_INVARG", "programmer_set_property_info expects object, name, and optional opts");
+        return await frame.ctx.world.programmerSetPropertyInfo(frame.ctx.actor, assertObj(builtinArgs[0]), assertString(builtinArgs[1]), builtinArgs[2] ?? null, frame.ctx.definer);
+      case "programmer_trace":
+        if (builtinArgs.length < 2 || builtinArgs.length > 3) throw wooError("E_INVARG", "programmer_trace expects object, descriptor, and optional opts");
+        return frame.ctx.world.programmerTrace(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1], builtinArgs[2] ?? null, frame.ctx.definer);
       default:
         throw wooError("E_INVARG", `unknown builtin: ${name}`);
     }

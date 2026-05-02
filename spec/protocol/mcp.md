@@ -136,7 +136,8 @@ A verb's `aliases` list ([../semantics/space.md](../semantics/space.md)) is **no
 Ordered duplicate verb slots are also collapsed for the v1 dynamic tool list:
 only the first tool-exposed slot for a given `(object, verb_name)` becomes a
 dedicated MCP tool. Slot-precise authoring and inspection go through the
-programmer surface (`prog_inspect`, `prog_resolve_verb`, and future
+programmer surface inherited by actors whose class chain includes
+`$programmer` (`actor:inspect`, `actor:resolve_verb`, `actor:list_verb`, and
 descriptor-aware authoring tools). A future MCP revision may add
 descriptor-aware invocation if a catalog has a real need to expose duplicate
 same-name verbs as separate tools.

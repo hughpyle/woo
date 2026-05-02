@@ -7,7 +7,6 @@ import {
   isErrorValue,
   valuesEqual,
   type AppliedFrame,
-  type CompileResult,
   type DirectResultFrame,
   type ErrorFrame,
   type ErrorValue,
@@ -29,6 +28,7 @@ import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializ
 import { installCatalogManifest, updateCatalogManifest, type CatalogManifest, type CatalogMigrationManifest } from "./catalog-installer";
 import { normalizeVerbPerms } from "./verb-perms";
 import { compileVerb } from "./authoring";
+import { hashSource } from "./source-hash";
 
 export type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
 const GUEST_SESSION_GRACE_MS = 60_000;
@@ -176,6 +176,7 @@ type BehaviorSavepoint = {
 
 type PersistenceDirtyState = {
   dirtyObjects: Set<ObjRef>;
+  deletedObjects: Set<ObjRef>;
   dirtyProperties: Map<ObjRef, Set<string>>;
   dirtySessions: Set<string>;
   deletedSessions: Set<string>;
@@ -217,6 +218,7 @@ export class WooWorld {
   private persistenceDeferred = 0;
   private persistenceDirty = false;
   private dirtyObjects = new Set<ObjRef>();
+  private deletedObjects = new Set<ObjRef>();
   private dirtyProperties = new Map<ObjRef, Set<string>>();
   private dirtySessions = new Set<string>();
   private deletedSessions = new Set<string>();
@@ -1242,14 +1244,135 @@ export class WooWorld {
     return { ...described, props };
   }
 
-  progCompile(actor: ObjRef, source: string): WooValue {
-    this.assertProgrammerActor(actor);
-    const compiled = compileVerb(source);
-    return compileResultSummary(compiled) as WooValue;
+  async builderCreateObject(actor: ObjRef, parentRef: ObjRef, opts: WooValue, surfaceClass: ObjRef): Promise<WooValue> {
+    this.assertBuilderActor(actor, surfaceClass);
+    if (await this.remoteHostForObject(parentRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host object creation is not atomic under ${parentRef}`, { actor, parent: parentRef });
+    }
+    const options = progOptions(opts);
+    const location = optionObjOrNull(options, "location", null);
+    if (location && await this.remoteHostForObject(location)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host object placement is not atomic in ${location}`, { actor, parent: parentRef, location });
+    }
+    this.assertCanBuildChild(actor, parentRef, actor);
+    if (location) {
+      this.object(location);
+      if (this.isSpaceLike(location) && !this.hasPresence(actor, location) && !this.isWizard(actor)) {
+        throw wooError("E_PERM", `${actor} is not present in ${location}`, { actor, location });
+      }
+    }
+    const displayName = optionMaybeString(options, "name") ?? null;
+    const description = optionMaybeString(options, "description") ?? null;
+    const aliases = optionStringList(options, "aliases", []);
+    const anchor = location && this.isSpaceLike(location) ? location : null;
+    const id = this.createBuilderObject(parentRef, actor, anchor, {
+      location,
+      name: displayName ?? undefined,
+      fertile: optionBool(options, "fertile", false),
+      recyclable: optionBool(options, "recyclable", true)
+    });
+    if (displayName !== null) this.setProp(id, "name", displayName);
+    if (description !== null) this.setProp(id, "description", description);
+    if (aliases.length > 0) this.setProp(id, "aliases", aliases);
+    return { ok: true, id, parent: parentRef, owner: actor, location, dry_run: false };
   }
 
-  progResolveVerb(actor: ObjRef, objRef: ObjRef, descriptor: WooValue): WooValue {
-    this.assertProgrammerActor(actor);
+  async builderChparent(actor: ObjRef, objRef: ObjRef, parentRef: ObjRef, opts: WooValue, surfaceClass: ObjRef): Promise<WooValue> {
+    this.assertBuilderActor(actor, surfaceClass);
+    const options = progOptions(opts);
+    const dryRun = optionBool(options, "dry_run", false);
+    if (await this.remoteHostForObject(objRef) || await this.remoteHostForObject(parentRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host chparent is not atomic: ${objRef} -> ${parentRef}`, { actor, obj: objRef, parent: parentRef });
+    }
+    this.assertCanBuildOwnedObject(actor, objRef);
+    this.assertCanBuildChild(actor, parentRef, actor);
+    if (objRef === parentRef || this.inheritsFrom(parentRef, objRef)) throw wooError("E_RECMOVE", "recursive parent change", { obj: objRef, parent: parentRef });
+    if (this.inheritsFrom(objRef, "$actor") && !this.inheritsFrom(parentRef, "$actor")) {
+      throw wooError("E_PERM", "actors can only be reparented under actor classes", { actor, obj: objRef, parent: parentRef });
+    }
+    const previousParent = this.object(objRef).parent;
+    const result = { ok: true, dry_run: dryRun, id: objRef, parent: parentRef, previous_parent: previousParent };
+    if (dryRun) return result;
+    this.chparentLocal(objRef, parentRef);
+    return result;
+  }
+
+  async builderRecycle(actor: ObjRef, objRef: ObjRef, opts: WooValue, surfaceClass: ObjRef): Promise<WooValue> {
+    this.assertBuilderActor(actor, surfaceClass);
+    const options = progOptions(opts);
+    const dryRun = optionBool(options, "dry_run", false);
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host recycle is not atomic: ${objRef}`, { actor, obj: objRef });
+    }
+    const obj = this.object(objRef);
+    this.assertCanBuildOwnedObject(actor, objRef);
+    if (!this.isWizard(actor) && obj.flags.recyclable !== true) throw wooError("E_PERM", `${objRef} is not recyclable`, { actor, obj: objRef });
+    if (this.inheritsFrom(objRef, "$actor")) throw wooError("E_PERM", "actors cannot be recycled through builder tools", { actor, obj: objRef });
+    const impact = {
+      id: objRef,
+      parent: obj.parent,
+      location: obj.location,
+      child_count: obj.children.size,
+      children: Array.from(obj.children).sort(),
+      contents_count: obj.contents.size,
+      contents: Array.from(obj.contents).sort(),
+      own_verbs: obj.verbs.length,
+      own_properties: obj.propertyDefs.size
+    };
+    if (obj.children.size > 0 || obj.contents.size > 0) throw wooError("E_RECMOVE", `${objRef} still has children or contents`, impact as WooValue);
+    const result = { ok: true, dry_run: dryRun, id: objRef, impact: impact as WooValue };
+    if (dryRun) return result;
+    this.recycleObjectLocal(objRef);
+    return result;
+  }
+
+  async builderSetProperty(actor: ObjRef, objRef: ObjRef, name: string, value: WooValue, opts: WooValue, surfaceClass: ObjRef): Promise<WooValue> {
+    this.assertBuilderActor(actor, surfaceClass);
+    const options = progOptions(opts);
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host property writes are not atomic: ${objRef}.${name}`, { actor, obj: objRef, property: name });
+    }
+    const target = this.object(objRef);
+    const expectedVersion = optionNullableInt(options, "expected_version");
+    const currentVersion = target.propertyVersions.get(name) ?? null;
+    let exists = true;
+    try {
+      this.propertyInfo(objRef, name);
+    } catch (err) {
+      if (!isErrorValue(err) || err.code !== "E_PROPNF") throw err;
+      exists = false;
+    }
+    if (expectedVersion !== null && currentVersion !== expectedVersion) {
+      throw wooError("E_VERSION", "property value version conflict", { expected: expectedVersion, actual: currentVersion });
+    }
+    if (!exists) {
+      this.assertCanBuildOwnedObject(actor, objRef);
+      this.defineProperty(objRef, { name, defaultValue: null, owner: actor, perms: "rw", typeHint: typeHintForValue(value) });
+    } else if (!this.canWriteProperty(actor, objRef, name)) {
+      throw wooError("E_PERM", `${actor} cannot write ${objRef}.${name}`, { actor, obj: objRef, property: name });
+    }
+    this.setProp(objRef, name, value);
+    return {
+      ok: true,
+      id: objRef,
+      name,
+      version: target.propertyVersions.get(name) ?? 0,
+      info: this.propertyInfo(objRef, name) as WooValue
+    };
+  }
+
+  builderInspect(actor: ObjRef, objRef: ObjRef, opts: WooValue, surfaceClass: ObjRef): WooValue {
+    this.assertBuilderActor(actor, surfaceClass);
+    return this.authoringInspect(actor, objRef, opts, { includeSourceAllowed: false, requireProgrammer: false });
+  }
+
+  builderSearch(actor: ObjRef, query: string, opts: WooValue, surfaceClass: ObjRef): WooValue {
+    this.assertBuilderActor(actor, surfaceClass);
+    return this.authoringSearch(actor, query, opts, { includeSourceAllowed: false });
+  }
+
+  programmerResolveVerb(actor: ObjRef, objRef: ObjRef, descriptor: WooValue, surfaceClass: ObjRef): WooValue {
+    this.assertProgrammerActor(actor, surfaceClass);
     const walk: Record<string, WooValue>[] = [];
     const resolved =
       typeof descriptor === "number"
@@ -1261,10 +1384,209 @@ export class WooWorld {
     };
   }
 
-  progInspect(actor: ObjRef, objRef: ObjRef, opts: WooValue = null): WooValue {
-    this.assertProgrammerActor(actor);
+  programmerListVerb(actor: ObjRef, objRef: ObjRef, descriptor: WooValue, opts: WooValue, surfaceClass: ObjRef): WooValue {
+    this.assertProgrammerActor(actor, surfaceClass);
     const options = progOptions(opts);
-    const includeSource = optionBool(options, "include_source", false);
+    const includeSource = optionBool(options, "include_source", true);
+    const walk: Record<string, WooValue>[] = [];
+    const resolved =
+      typeof descriptor === "number"
+        ? this.resolveVerbSlotWithWalk(actor, objRef, descriptor, walk)
+        : this.resolveVerbWithWalk(actor, objRef, assertVerbNameDescriptor(descriptor), walk);
+    return {
+      ...this.verbSummaryForActor(actor, resolved.definer, resolved.verb, { includeSource }),
+      walk: walk as unknown as WooValue
+    };
+  }
+
+  programmerInspect(actor: ObjRef, objRef: ObjRef, opts: WooValue, surfaceClass: ObjRef): WooValue {
+    return this.authoringInspect(actor, objRef, opts, { includeSourceAllowed: true, requireProgrammer: true, programmerSurface: surfaceClass });
+  }
+
+  programmerSearch(actor: ObjRef, query: string, opts: WooValue, surfaceClass: ObjRef): WooValue {
+    this.assertProgrammerActor(actor, surfaceClass);
+    return this.authoringSearch(actor, query, opts, { includeSourceAllowed: true });
+  }
+
+  async programmerInstallVerb(actor: ObjRef, objRef: ObjRef, descriptor: WooValue, source: string, opts: WooValue, surfaceClass: ObjRef): Promise<WooValue> {
+    this.assertProgrammerActor(actor, surfaceClass);
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host verb installs are not atomic: ${objRef}`, { actor, obj: objRef });
+    }
+    this.assertCanAuthorObject(actor, objRef);
+    const options = progOptions(opts);
+    const dryRun = optionBool(options, "dry_run", false);
+    if (Object.prototype.hasOwnProperty.call(options, "perms")) {
+      return sourceInstallFailure(dryRun, "E_INVARG", "opts.perms is not accepted; verb source header is canonical");
+    }
+    const mode = optionString(options, "mode", "upsert");
+    if (!["upsert", "define", "set_code"].includes(mode)) throw wooError("E_INVARG", `unknown install mode: ${mode}`, mode);
+    const append = optionBool(options, "append", false);
+    const expectedVersion = optionNullableInt(options, "expected_version");
+    const compiled = compileVerb(source);
+    const selected = this.selectOwnVerbForInstall(objRef, descriptor, { mode, append });
+    if ((selected.current?.version ?? null) !== expectedVersion && expectedVersion !== null) {
+      throw wooError("E_VERSION", "verb version conflict", { expected: expectedVersion, actual: selected.current?.version ?? null });
+    }
+    if (!compiled.ok || !compiled.bytecode) {
+      return sourceInstallSummary({
+        ok: false,
+        dryRun,
+        current: selected.current,
+        diagnostics: compiled.diagnostics as unknown as WooValue,
+        metadata: compiled.metadata as WooValue | undefined,
+        slot: selected.slot
+      });
+    }
+    if (compiled.metadata?.name && compiled.metadata.name !== selected.name) {
+      return sourceInstallFailure(dryRun, "E_COMPILE", `verb header names :${compiled.metadata.name}, but install target is :${selected.name}`, selected.current, selected.slot, compiled.metadata as WooValue);
+    }
+    const version = (selected.current?.version ?? 0) + 1;
+    const parsedPerms = normalizeVerbPerms(
+      compiled.metadata?.perms ?? selected.current?.perms ?? "rx",
+      compiled.metadata?.perms ? false : selected.current?.direct_callable === true
+    );
+    const summary = sourceInstallSummary({
+      ok: true,
+      dryRun,
+      current: selected.current,
+      diagnostics: [],
+      metadata: compiled.metadata as WooValue | undefined,
+      slot: selected.slot,
+      version
+    });
+    if (dryRun) return summary;
+    this.addVerb(objRef, {
+      kind: "bytecode",
+      name: selected.name,
+      aliases: selected.current?.aliases ?? [],
+      owner: actor,
+      perms: parsedPerms.perms,
+      arg_spec: compiled.metadata?.arg_spec ?? selected.current?.arg_spec ?? {},
+      direct_callable: parsedPerms.directCallable,
+      skip_presence_check: selected.current?.skip_presence_check,
+      tool_exposed: selected.current?.tool_exposed,
+      source,
+      source_hash: compiled.source_hash ?? hashSource(source),
+      bytecode: { ...compiled.bytecode, version },
+      version,
+      line_map: compiled.line_map ?? {}
+    }, { append: selected.append, slot: selected.current ? selected.slot : undefined });
+    return summary;
+  }
+
+  async programmerSetVerbInfo(actor: ObjRef, objRef: ObjRef, descriptor: WooValue, opts: WooValue, surfaceClass: ObjRef): Promise<WooValue> {
+    this.assertProgrammerActor(actor, surfaceClass);
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host verb metadata writes are not atomic: ${objRef}`, { actor, obj: objRef });
+    }
+    this.assertCanAuthorObject(actor, objRef);
+    const options = progOptions(opts);
+    const dryRun = optionBool(options, "dry_run", false);
+    const expectedVersion = optionNullableInt(options, "expected_version");
+    const selected = this.selectOwnVerbSlot(objRef, descriptor);
+    const current = selected.verb;
+    if (expectedVersion !== null && current.version !== expectedVersion) {
+      throw wooError("E_VERSION", "verb version conflict", { expected: expectedVersion, actual: current.version });
+    }
+    // Permission bits are metadata edits, deliberately separate from source install.
+    const directCallable = optionMaybeBool(options, "direct_callable") ?? current.direct_callable === true;
+    const perms = optionMaybeString(options, "perms") ?? current.perms;
+    const parsedPerms = normalizeVerbPerms(perms, directCallable);
+    const next: VerbDef = {
+      ...current,
+      aliases: hasOption(options, "aliases") ? optionStringList(options, "aliases", []) : current.aliases,
+      arg_spec: hasOption(options, "arg_spec") ? assertMap(options.arg_spec) : current.arg_spec,
+      perms: parsedPerms.perms,
+      direct_callable: parsedPerms.directCallable,
+      skip_presence_check: optionMaybeBool(options, "skip_presence_check") ?? current.skip_presence_check,
+      tool_exposed: optionMaybeBool(options, "tool_exposed") ?? current.tool_exposed,
+      version: current.version + 1
+    } as VerbDef;
+    const result = {
+      ok: true,
+      dry_run: dryRun,
+      id: objRef,
+      slot: selected.slot,
+      version: next.version,
+      before: this.verbSummaryForActor(actor, objRef, current, { includeSource: false }) as WooValue,
+      after: this.verbSummaryForActor(actor, objRef, next, { includeSource: false }) as WooValue
+    };
+    if (dryRun) return result;
+    this.addVerb(objRef, next, { slot: selected.slot });
+    return result;
+  }
+
+  async programmerSetPropertyInfo(actor: ObjRef, objRef: ObjRef, name: string, opts: WooValue, surfaceClass: ObjRef): Promise<WooValue> {
+    this.assertProgrammerActor(actor, surfaceClass);
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host property metadata writes are not atomic: ${objRef}.${name}`, { actor, obj: objRef, property: name });
+    }
+    this.assertCanAuthorObject(actor, objRef);
+    const options = progOptions(opts);
+    const dryRun = optionBool(options, "dry_run", false);
+    const mode = optionString(options, "mode", "upsert");
+    if (!["upsert", "define", "update", "delete"].includes(mode)) throw wooError("E_INVARG", `unknown property-info mode: ${mode}`, mode);
+    const expectedVersion = optionNullableInt(options, "expected_version");
+    const obj = this.object(objRef);
+    const current = obj.propertyDefs.get(name) ?? null;
+    if (mode === "define" && current) throw wooError("E_INVARG", `property already exists: ${objRef}.${name}`, { obj: objRef, property: name });
+    if ((mode === "update" || mode === "delete") && !current) throw wooError("E_PROPNF", `property not defined on ${objRef}: ${name}`, { obj: objRef, property: name });
+    if (expectedVersion !== null && (current?.version ?? null) !== expectedVersion) {
+      throw wooError("E_VERSION", "property definition version conflict", { expected: expectedVersion, actual: current?.version ?? null });
+    }
+    const before = current ? propertyDefSummary(current, objRef) : null;
+    if (mode === "delete") {
+      const result = { ok: true, dry_run: dryRun, id: objRef, name, deleted: true, before: before as WooValue };
+      if (dryRun) return result;
+      obj.propertyDefs.delete(name);
+      obj.properties.delete(name);
+      obj.propertyVersions.delete(name);
+      obj.modified = Date.now();
+      this.persistObject(objRef);
+      this.persist();
+      return result;
+    }
+    const owner = optionMaybeString(options, "owner") ?? current?.owner ?? actor;
+    if (owner !== actor && !this.isWizard(actor)) throw wooError("E_PERM", `${actor} cannot create property ${objRef}.${name} owned by ${owner}`, { actor, obj: objRef, property: name, owner });
+    const next: PropertyDef = {
+      name,
+      owner,
+      perms: optionMaybeString(options, "perms") ?? current?.perms ?? "rw",
+      typeHint: optionMaybeString(options, "type_hint") ?? current?.typeHint,
+      defaultValue: hasOption(options, "default") ? cloneValue(options.default) : cloneValue(current?.defaultValue ?? null),
+      version: (current?.version ?? 0) + 1
+    };
+    const result = {
+      ok: true,
+      dry_run: dryRun,
+      id: objRef,
+      name,
+      version: next.version,
+      before: before as WooValue,
+      after: propertyDefSummary(next, objRef) as WooValue
+    };
+    if (dryRun) return result;
+    obj.propertyDefs.set(name, next);
+    if (!obj.properties.has(name)) {
+      obj.properties.set(name, cloneValue(next.defaultValue));
+      obj.propertyVersions.set(name, 1);
+    }
+    obj.modified = Date.now();
+    this.persistObject(objRef);
+    this.persist();
+    return result;
+  }
+
+  programmerTrace(actor: ObjRef, _objRef: ObjRef, _descriptor: WooValue, _opts: WooValue, surfaceClass: ObjRef): WooValue {
+    this.assertProgrammerActor(actor, surfaceClass);
+    throw wooError("E_NOT_IMPLEMENTED", "programmer trace is deferred to v1.1");
+  }
+
+  private authoringInspect(actor: ObjRef, objRef: ObjRef, opts: WooValue, policy: { includeSourceAllowed: boolean; requireProgrammer: boolean; programmerSurface?: ObjRef }): WooValue {
+    if (policy.requireProgrammer) this.assertProgrammerActor(actor, policy.programmerSurface ?? actor);
+    const options = progOptions(opts);
+    const includeSource = policy.includeSourceAllowed && optionBool(options, "include_source", false);
     const maxChildren = optionInt(options, "max_children", 50, 0, 500);
     const maxInstances = optionInt(options, "max_instances", 50, 0, 500);
     const maxValueBytes = optionInt(options, "max_value_bytes", 512, 0, 16_384);
@@ -1335,13 +1657,16 @@ export class WooWorld {
     };
   }
 
-  progSearch(actor: ObjRef, query: string, opts: WooValue = null): WooValue {
-    this.assertProgrammerActor(actor);
+  private authoringSearch(actor: ObjRef, query: string, opts: WooValue, policy: { includeSourceAllowed: boolean }): WooValue {
     const options = progOptions(opts);
     const normalized = query.trim().toLowerCase();
     const scope = optionString(options, "scope", "actor_context");
     const limit = optionInt(options, "limit", 50, 1, 500);
-    const channels = new Set(optionStringList(options, "channels", ["object_name", "verb_name", "verb_source", "property_name", "property_value"]));
+    const defaultChannels = policy.includeSourceAllowed
+      ? ["object_name", "verb_name", "verb_source", "property_name", "property_value"]
+      : ["object_name", "property_name", "property_value"];
+    const channels = new Set(optionStringList(options, "channels", defaultChannels));
+    if (!policy.includeSourceAllowed) channels.delete("verb_source");
     const results: Record<string, WooValue>[] = [];
     let total = 0;
     const addResult = (result: Record<string, WooValue>): void => {
@@ -1387,10 +1712,20 @@ export class WooWorld {
     return this.canBypassPerms(actor) || verb.owner === actor || verb.perms.includes("r");
   }
 
-  private assertProgrammerActor(actor: ObjRef): void {
+  private assertProgrammerActor(actor: ObjRef, surfaceClass: ObjRef): void {
     const obj = this.object(actor);
-    if (obj.flags.programmer === true || obj.flags.wizard === true) return;
+    if (obj.flags.wizard === true) return;
+    if (actor === surfaceClass) throw wooError("E_PERM", "programmer class surface required", { actor, surface: surfaceClass });
+    if (!this.inheritsFrom(actor, surfaceClass)) throw wooError("E_PERM", "programmer class surface required", { actor, surface: surfaceClass });
+    if (obj.flags.programmer === true) return;
     throw wooError("E_PERM", "programmer flag required", actor);
+  }
+
+  private assertBuilderActor(actor: ObjRef, surfaceClass: ObjRef): void {
+    if (this.isWizard(actor)) return;
+    if (actor === surfaceClass) throw wooError("E_PERM", "builder class surface required", { actor, surface: surfaceClass });
+    if (this.inheritsFrom(actor, surfaceClass)) return;
+    throw wooError("E_PERM", "builder class surface required", { actor, surface: surfaceClass });
   }
 
   private resolveVerbWithWalk(actor: ObjRef, objRef: ObjRef, name: string, walk: Record<string, WooValue>[]): ResolvedVerb {
@@ -1424,6 +1759,47 @@ export class WooWorld {
     return { definer: objRef, verb };
   }
 
+  private selectOwnVerbSlot(objRef: ObjRef, descriptor: WooValue): { slot: number; verb: VerbDef } {
+    const obj = this.object(objRef);
+    if (typeof descriptor === "number") {
+      if (!Number.isInteger(descriptor) || descriptor < 1) throw wooError("E_INVARG", "verb slot must be a positive integer", descriptor);
+      const verb = obj.verbs[descriptor - 1];
+      if (!verb) throw wooError("E_VERBNF", `verb slot not found: ${objRef}:${descriptor}`, { obj: objRef, slot: descriptor });
+      return { slot: descriptor, verb };
+    }
+    const name = assertVerbNameDescriptor(descriptor);
+    const index = obj.verbs.findIndex((verb) => verb.name === name || verb.aliases.some((alias) => verbAliasMatches(alias, name)));
+    if (index < 0) throw wooError("E_VERBNF", `own verb not found: ${objRef}:${name}`, { obj: objRef, name });
+    return { slot: index + 1, verb: obj.verbs[index] };
+  }
+
+  private selectOwnVerbForInstall(
+    objRef: ObjRef,
+    descriptor: WooValue,
+    options: { mode: string; append: boolean }
+  ): { current: VerbDef | null; slot: number; name: string; append: boolean } {
+    const obj = this.object(objRef);
+    if (typeof descriptor === "number") {
+      if (!Number.isInteger(descriptor) || descriptor < 1) throw wooError("E_INVARG", "verb slot must be a positive integer", descriptor);
+      const current = obj.verbs[descriptor - 1] ?? null;
+      if (!current) throw wooError("E_VERBNF", `verb slot not found: ${objRef}:${descriptor}`, { obj: objRef, slot: descriptor });
+      if (options.mode === "define") throw wooError("E_INVARG", "define mode requires a name descriptor, not an existing slot", descriptor);
+      return { current, slot: descriptor, name: current.name, append: false };
+    }
+    const descriptorName = assertVerbNameDescriptor(descriptor);
+    const existingIndex = obj.verbs.findIndex((verb) => verb.name === descriptorName || verb.aliases.some((alias) => verbAliasMatches(alias, descriptorName)));
+    const current = options.append ? null : existingIndex >= 0 ? obj.verbs[existingIndex] : null;
+    const name = current?.name ?? descriptorName;
+    if (options.mode === "define" && current) throw wooError("E_INVARG", `verb already exists: ${objRef}:${descriptorName}`, { obj: objRef, name: descriptorName });
+    if (options.mode === "set_code" && !current) throw wooError("E_VERBNF", `verb not found for set_code: ${objRef}:${descriptorName}`, { obj: objRef, name: descriptorName });
+    return {
+      current,
+      slot: current ? (current.slot ?? existingIndex + 1) : obj.verbs.length + 1,
+      name,
+      append: options.append || !current
+    };
+  }
+
   private ownVerbNamed(objRef: ObjRef, name: string): VerbDef | null {
     const obj = this.object(objRef);
     for (const verb of obj.verbs) {
@@ -1452,7 +1828,6 @@ export class WooWorld {
     };
     if (readable && options.includeSource) {
       summary.source = verb.source;
-      summary.source_hash = verb.source_hash;
       summary.line_map = verb.line_map as WooValue;
     }
     return summary;
@@ -1722,6 +2097,10 @@ export class WooWorld {
     this.assertCanAuthorObject(actor, objRef);
     this.assertCanCreateObject(actor, parentRef, actor);
     if (objRef === parentRef || this.inheritsFrom(parentRef, objRef)) throw wooError("E_RECMOVE", "recursive parent change", { obj: objRef, parent: parentRef });
+    this.chparentLocal(objRef, parentRef);
+  }
+
+  private chparentLocal(objRef: ObjRef, parentRef: ObjRef): void {
     const obj = this.object(objRef);
     if (obj.parent && this.objects.has(obj.parent)) this.object(obj.parent).children.delete(objRef);
     obj.parent = parentRef;
@@ -1729,6 +2108,60 @@ export class WooWorld {
     obj.modified = Date.now();
     this.persistObject(objRef);
     this.persistObject(parentRef);
+    this.persist();
+  }
+
+  private createBuilderObject(parent: ObjRef, owner: ObjRef, anchor: ObjRef | null, options: { location: ObjRef | null; name?: string; fertile: boolean; recyclable: boolean }): ObjRef {
+    this.object(parent);
+    this.object(owner);
+    if (anchor) this.object(anchor);
+    const scope = runtimeObjectScope(anchor ?? parent);
+    let id: ObjRef;
+    do {
+      id = `obj_${scope}_${this.objectCounter++}`;
+    } while (this.objects.has(id));
+    this.createObject({
+      id,
+      parent,
+      owner,
+      anchor,
+      location: options.location,
+      name: options.name,
+      flags: { fertile: options.fertile, recyclable: options.recyclable }
+    });
+    this.persistCounters();
+    return id;
+  }
+
+  private assertCanBuildOwnedObject(actor: ObjRef, objRef: ObjRef): void {
+    const obj = this.object(objRef);
+    if (this.isWizard(actor) || obj.owner === actor) return;
+    throw wooError("E_PERM", `${actor} cannot build on ${objRef}`, { actor, obj: objRef });
+  }
+
+  private assertCanBuildChild(actor: ObjRef, parent: ObjRef, owner: ObjRef): void {
+    const parentObj = this.object(parent);
+    if (this.isWizard(actor)) return;
+    if (owner !== actor) throw wooError("E_PERM", `${actor} cannot create objects owned by ${owner}`, { actor, owner });
+    if (parentObj.owner !== actor && parentObj.flags.fertile !== true) {
+      throw wooError("E_PERM", `${actor} cannot create children of ${parent}`, { actor, parent });
+    }
+  }
+
+  private recycleObjectLocal(objRef: ObjRef): void {
+    const obj = this.object(objRef);
+    const parent = obj.parent;
+    const location = obj.location;
+    if (parent && this.objects.has(parent)) {
+      this.object(parent).children.delete(objRef);
+      this.persistObject(parent);
+    }
+    if (location && this.objects.has(location)) {
+      this.object(location).contents.delete(objRef);
+      this.persistObject(location);
+    }
+    this.objects.delete(objRef);
+    this.deletePersistedObject(objRef);
     this.persist();
   }
 
@@ -2192,12 +2625,21 @@ export class WooWorld {
   }
 
   private markObjectDirty(objRef: ObjRef): void {
+    if (this.deletedObjects.has(objRef)) return;
     this.dirtyObjects.add(objRef);
     this.dirtyProperties.delete(objRef);
     this.persistenceDirty = true;
   }
 
+  private markObjectDeleted(objRef: ObjRef): void {
+    this.dirtyObjects.delete(objRef);
+    this.dirtyProperties.delete(objRef);
+    this.deletedObjects.add(objRef);
+    this.persistenceDirty = true;
+  }
+
   private markPropertyDirty(objRef: ObjRef, name: string): void {
+    if (this.deletedObjects.has(objRef)) return;
     if (this.dirtyObjects.has(objRef)) {
       this.persistenceDirty = true;
       return;
@@ -2243,6 +2685,7 @@ export class WooWorld {
   private snapshotPersistenceDirtyState(): PersistenceDirtyState {
     return {
       dirtyObjects: new Set(this.dirtyObjects),
+      deletedObjects: new Set(this.deletedObjects),
       dirtyProperties: new Map(Array.from(this.dirtyProperties.entries()).map(([objRef, properties]) => [objRef, new Set(properties)])),
       dirtySessions: new Set(this.dirtySessions),
       deletedSessions: new Set(this.deletedSessions),
@@ -2255,6 +2698,7 @@ export class WooWorld {
 
   private restorePersistenceDirtyState(state: PersistenceDirtyState): void {
     this.dirtyObjects = new Set(state.dirtyObjects);
+    this.deletedObjects = new Set(state.deletedObjects);
     this.dirtyProperties = new Map(Array.from(state.dirtyProperties.entries()).map(([objRef, properties]) => [objRef, new Set(properties)]));
     this.dirtySessions = new Set(state.dirtySessions);
     this.deletedSessions = new Set(state.deletedSessions);
@@ -2267,6 +2711,7 @@ export class WooWorld {
   private hasDirtyPersistence(): boolean {
     return (
       this.dirtyObjects.size > 0 ||
+      this.deletedObjects.size > 0 ||
       this.dirtyProperties.size > 0 ||
       this.dirtySessions.size > 0 ||
       this.deletedSessions.size > 0 ||
@@ -2285,6 +2730,16 @@ export class WooWorld {
     }
     const obj = this.objects.get(objRef);
     if (obj) repo.saveObject(this.serializeObject(obj));
+  }
+
+  private deletePersistedObject(objRef: ObjRef): void {
+    const repo = this.activeObjectRepository();
+    if (!repo) return;
+    if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
+      this.markObjectDeleted(objRef);
+      return;
+    }
+    repo.deleteObject(objRef);
   }
 
   private persistProperty(objRef: ObjRef, name: string): void {
@@ -2373,6 +2828,8 @@ export class WooWorld {
     }
     const dirtyObjects = Array.from(this.dirtyObjects);
     const dirtyObjectSet = new Set(dirtyObjects);
+    const deletedObjects = Array.from(this.deletedObjects);
+    const deletedObjectSet = new Set(deletedObjects);
     const dirtyProperties = Array.from(this.dirtyProperties.entries()).flatMap(([objRef, properties]) =>
       Array.from(properties).map((name) => ({ objRef, name }))
     );
@@ -2383,6 +2840,7 @@ export class WooWorld {
     const dirtyCounters = this.dirtyCounters;
     const startedAt = Date.now();
     repo.transaction(() => {
+      for (const objRef of deletedObjects) repo.deleteObject(objRef);
       for (const sessionId of deletedSessions) repo.deleteSession(sessionId);
       for (const sessionId of dirtySessions) {
         if (this.deletedSessions.has(sessionId)) continue;
@@ -2396,11 +2854,12 @@ export class WooWorld {
         if (task) repo.saveTask(task);
       }
       for (const objRef of dirtyObjects) {
+        if (deletedObjectSet.has(objRef)) continue;
         const obj = this.objects.get(objRef);
         if (obj) repo.saveObject(this.serializeObject(obj));
       }
       for (const { objRef, name } of dirtyProperties) {
-        if (dirtyObjectSet.has(objRef) || !this.objects.has(objRef)) continue;
+        if (deletedObjectSet.has(objRef) || dirtyObjectSet.has(objRef) || !this.objects.has(objRef)) continue;
         repo.saveProperty(objRef, this.serializeProperty(objRef, name));
       }
       if (dirtyCounters) {
@@ -2411,6 +2870,7 @@ export class WooWorld {
       }
     });
     for (const objRef of dirtyObjects) this.dirtyObjects.delete(objRef);
+    for (const objRef of deletedObjects) this.deletedObjects.delete(objRef);
     for (const { objRef, name } of dirtyProperties) {
       const properties = this.dirtyProperties.get(objRef);
       properties?.delete(name);
@@ -2424,8 +2884,8 @@ export class WooWorld {
     this.persistenceDirty = this.hasDirtyPersistence();
     this.recordMetric({
       kind: "storage_flush",
-      objects: dirtyObjects.length,
-      properties: dirtyProperties.filter(({ objRef }) => !dirtyObjectSet.has(objRef)).length,
+      objects: dirtyObjects.length + deletedObjects.length,
+      properties: dirtyProperties.filter(({ objRef }) => !deletedObjectSet.has(objRef) && !dirtyObjectSet.has(objRef)).length,
       sessions: dirtySessions.length,
       deleted_sessions: deletedSessions.length,
       tasks: dirtyTasks.length,
@@ -2857,6 +3317,10 @@ export class WooWorld {
       current = this.object(current).parent;
     }
     return false;
+  }
+
+  isDescendantOf(objRef: ObjRef, ancestorRef: ObjRef): boolean {
+    return this.inheritsFrom(objRef, ancestorRef);
   }
 
   private ensurePresence(actor: ObjRef, space: ObjRef): void {
@@ -4054,26 +4518,28 @@ export class WooWorld {
   }
 }
 
-function compileResultSummary(result: CompileResult): Record<string, WooValue> {
+function sourceInstallSummary(input: { ok: boolean; dryRun: boolean; current?: VerbDef | null; diagnostics: WooValue; metadata?: WooValue; slot: number; version?: number }): Record<string, WooValue> {
+  const version = input.version ?? (input.current?.version ?? 0);
   const summary: Record<string, WooValue> = {
-    ok: result.ok,
-    diagnostics: result.diagnostics as unknown as WooValue
+    ok: input.ok,
+    dry_run: input.dryRun,
+    slot: input.slot,
+    version,
+    diagnostics: input.diagnostics
   };
-  if (result.source_hash) summary.source_hash = result.source_hash;
-  if (result.metadata) summary.metadata = result.metadata as WooValue;
-  if (result.line_map) summary.line_map = result.line_map as WooValue;
-  if (result.bytecode) {
-    summary.bytecode = {
-      op_count: result.bytecode.ops.length,
-      literal_count: result.bytecode.literals.length,
-      num_locals: result.bytecode.num_locals,
-      max_stack: result.bytecode.max_stack,
-      max_ticks: result.bytecode.max_ticks ?? null,
-      max_memory: result.bytecode.max_memory ?? null,
-      max_wall_ms: result.bytecode.max_wall_ms ?? null
-    };
-  }
+  if (input.metadata !== undefined) summary.metadata = input.metadata;
   return summary;
+}
+
+function sourceInstallFailure(dryRun: boolean, code: string, message: string, current: VerbDef | null = null, slot = 0, metadata?: WooValue): Record<string, WooValue> {
+  return sourceInstallSummary({
+    ok: false,
+    dryRun,
+    current,
+    slot,
+    metadata,
+    diagnostics: [{ severity: "error", code, message }] as unknown as WooValue
+  });
 }
 
 function progOptions(value: WooValue): Record<string, WooValue> {
@@ -4089,6 +4555,34 @@ function optionBool(options: Record<string, WooValue>, name: string, fallback: b
 function optionString(options: Record<string, WooValue>, name: string, fallback: string): string {
   const value = options[name];
   return typeof value === "string" ? value : fallback;
+}
+
+function optionMaybeString(options: Record<string, WooValue>, name: string): string | undefined {
+  const value = options[name];
+  return typeof value === "string" ? value : undefined;
+}
+
+function optionMaybeBool(options: Record<string, WooValue>, name: string): boolean | undefined {
+  const value = options[name];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function optionObjOrNull(options: Record<string, WooValue>, name: string, fallback: ObjRef | null): ObjRef | null {
+  if (!hasOption(options, name)) return fallback;
+  const value = options[name];
+  if (value === null) return null;
+  return assertObj(value);
+}
+
+function optionNullableInt(options: Record<string, WooValue>, name: string): number | null {
+  if (!hasOption(options, name) || options[name] === null) return null;
+  const value = options[name];
+  if (typeof value !== "number" || !Number.isInteger(value)) throw wooError("E_TYPE", `${name} must be an integer`, value);
+  return value;
+}
+
+function hasOption(options: Record<string, WooValue>, name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(options, name);
 }
 
 function optionStringList(options: Record<string, WooValue>, name: string, fallback: string[]): string[] {
@@ -4123,6 +4617,27 @@ function valueSummary(value: WooValue, maxBytes: number): string {
   else summary = `map(${Object.keys(value).length}) ${JSON.stringify(value)}`;
   if (summary.length <= maxBytes) return summary;
   return `${summary.slice(0, Math.max(0, maxBytes - 3))}...`;
+}
+
+function propertyDefSummary(def: PropertyDef, definedOn: ObjRef): Record<string, WooValue> {
+  return {
+    name: def.name,
+    owner: def.owner,
+    perms: def.perms,
+    defined_on: definedOn,
+    type_hint: def.typeHint ?? null,
+    default_summary: valueSummary(def.defaultValue, 512),
+    version: def.version
+  };
+}
+
+function typeHintForValue(value: WooValue): string {
+  if (value === null) return "any";
+  if (typeof value === "string") return "str";
+  if (typeof value === "boolean") return "bool";
+  if (typeof value === "number") return Number.isInteger(value) ? "int" : "num";
+  if (Array.isArray(value)) return "list";
+  return "map";
 }
 
 export function normalizeError(err: unknown): ErrorValue {

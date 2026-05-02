@@ -132,7 +132,14 @@ const FRAME_GLOBALS = new Map<string, string>([
   ["verb", "PUSH_VERB"]
 ]);
 
-const BUILTINS = new Set(["length", "keys", "values", "has", "typeof", "to_string", "tostr", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "move", "chparent", "has_flag", "random", "contents", "location", "task_perms", "caller_perms", "set_task_perms", "set_presence", "observe_to_space", "prog_compile", "prog_inspect", "prog_resolve_verb", "prog_search"]);
+const BUILTINS = new Set([
+  "length", "keys", "values", "has", "typeof", "to_string", "tostr", "min", "max", "floor", "ceil", "round", "abs",
+  "now", "create", "move", "chparent", "has_flag", "random", "contents", "location", "task_perms", "caller_perms",
+  "set_task_perms", "set_presence", "observe_to_space",
+  "builder_create_object", "builder_chparent", "builder_recycle", "builder_set_property", "builder_inspect", "builder_search",
+  "programmer_inspect", "programmer_resolve_verb", "programmer_list_verb", "programmer_search", "programmer_install_verb",
+  "programmer_set_verb_info", "programmer_set_property_info", "programmer_trace"
+]);
 const RESERVED_NAMES = new Set([...FRAME_GLOBALS.keys(), ...KEYWORDS]);
 
 export function compileWooSource(source: string): CompileResult {

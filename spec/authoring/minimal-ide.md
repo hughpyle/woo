@@ -230,6 +230,9 @@ a programmer editing an object it owns. `create_object` creates an object owned
 by the actor; the parent must be owned by the actor or `fertile`. `move_object`
 and `chparent_object` require the same object-authoring authority, and
 `chparent_object` applies the same parent/fertile rule plus cycle rejection.
+Builder-facing chparent also preserves the actor hierarchy: actor/player objects
+may only be reparented under actor-derived classes. Wizard/admin repair paths may
+still perform deliberate class graph edits.
 Wire endpoints for these live under an authoring surface, not under
 `/api/objects/:id`, which is reserved for ordinary REST object access. The local
 development server currently exposes `/api/compile`, `/api/install`,

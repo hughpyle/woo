@@ -202,7 +202,7 @@ For `@local:<catalog>` installs, the Worker reads from the deployment's bundled 
 2. **Verify** declared dependencies are already installed and version-compatible — refuse with `E_DEPENDENCY` if any are missing or incompatible. v1 does not auto-resolve; the operator installs dependencies first.
 3. Recompile every verb in the manifest using the world's current DSL compiler.
 4. Create classes, property defs, verbs, event schemas, feature objects in the manifest's declared order. Parents are resolved via the reference grammar (§CT3.1).
-5. Run the manifest's `seed_hooks` block — feature attachments, instance creation, post-install verbs.
+5. Run the manifest's `seed_hooks` block — instance creation, feature attachments, and ordinary authored parent changes.
 6. Record the install in the registry's local state: `{tap, catalog, alias, version, install_provenance, installed_at, owner: actor_at_install}`.
 
 Steps 3–5 run inside the call's savepoint; any failure rolls them back while the registry log row stays at the assigned seq with `applied_ok=false` and an error observation, per the standard sequenced-call discipline.
@@ -292,6 +292,7 @@ branch on the seeded object names that happen to receive them.
   "seed_hooks": [
     {"kind": "create_instance", "class": "$loop_slot", "as": "slot_1", "anchor": "the_dubspace"},
     {"kind": "attach_feature", "consumer": "the_chatroom", "feature": "$conversational"},
+    {"kind": "change_parent", "object": "$wiz", "parent": "$programmer"},
     ...
   ]
 }
@@ -301,6 +302,13 @@ Catalog `perms` use the same authoring shorthand as source: `rxd` means install
 with normalized `perms: "rx"` and `direct_callable: true`. Catalogs may also set
 `direct_callable` explicitly; the explicit metadata field is the authoritative
 stored form after install.
+
+Seed hooks are intentionally small. `create_instance` creates a named instance
+from a catalog or dependency class, `attach_feature` appends a feature object to
+a consumer, and `change_parent` runs the normal authored `chparent` path for an
+existing object. Catalogs use `change_parent` only for explicit opt-in surface
+changes such as making `$wiz` inherit a newly installed programmer class; it is
+not a hidden privilege grant.
 
 The DSL source per verb is what enables the recompile-in-importing-world
 discipline. Trusted local experiments may additionally include:

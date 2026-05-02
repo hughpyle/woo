@@ -66,6 +66,11 @@ type CatalogSeedHook =
       kind: "attach_feature";
       consumer: string;
       feature: string;
+    }
+  | {
+      kind: "change_parent";
+      object: string;
+      parent: string;
     };
 
 export type CatalogMigrationStep =
@@ -185,6 +190,12 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
       for (const [name, value] of Object.entries(hook.properties ?? {})) setPropIfMissing(world, id, name, resolveCatalogValue(world, value, localObjects, localSeeds, existing));
       continue;
     }
+    if (hook.kind === "change_parent") {
+      const object = resolveObjectRef(world, hook.object, localObjects, localSeeds, existing);
+      const parent = resolveObjectRef(world, hook.parent, localObjects, localSeeds, existing);
+      world.chparentAuthoredObject(actor, object, parent);
+      continue;
+    }
     const consumer = resolveObjectRef(world, hook.consumer, localObjects, localSeeds, existing);
     const feature = resolveObjectRef(world, hook.feature, localObjects, localSeeds, existing);
     attachFeature(world, consumer, feature);
@@ -243,6 +254,14 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
       setDescriptionIfEmpty(world, id, catalogDescription(hook.description, hook.name ?? id, manifest.name));
       setNameIfMissing(world, id, hook.name ?? id);
       for (const [name, value] of Object.entries(hook.properties ?? {})) setPropIfMissing(world, id, name, resolveCatalogValue(world, value, localObjects, localSeeds, existing));
+      continue;
+    }
+    if (hook.kind === "change_parent") {
+      const object = resolveObjectRef(world, hook.object, localObjects, localSeeds, existing);
+      const parent = resolveObjectRef(world, hook.parent, localObjects, localSeeds, existing);
+      if (world.objects.has(object) && world.objects.has(parent) && world.object(object).parent !== parent && !world.isDescendantOf(parent, object)) {
+        world.chparentAuthoredObject(actor, object, parent);
+      }
       continue;
     }
     if (world.objects.has(hook.consumer) && world.objects.has(hook.feature)) attachFeature(world, hook.consumer, hook.feature);
