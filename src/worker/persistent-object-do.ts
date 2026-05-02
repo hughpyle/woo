@@ -389,7 +389,8 @@ export class PersistentObjectDO {
         return route.host;
       }
       if (localHost === WORLD_HOST && world.objects.has(id)) return localHost;
-      return await this.resolveObjectHost(id, WORLD_HOST);
+      const resolved = await this.resolveObjectHost(id, "");
+      return resolved || null;
     };
     const hostForObject = async (id: ObjRef, memo?: HostOperationMemo): Promise<string | null> => {
       if (!memo) return await hostForObjectUncached(id);

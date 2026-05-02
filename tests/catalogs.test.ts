@@ -650,7 +650,7 @@ describe("local catalogs", () => {
       { id: "the_deck", host: "the_deck", anchor: null },
       { id: "the_hot_tub", host: "the_hot_tub", anchor: null }
     ]));
-    expect(world.objectRoutes().find((route) => route.id === "the_lamp")).toBeUndefined();
+    expect(world.objectRoutes().find((route) => route.id === "the_lamp")).toEqual({ id: "the_lamp", host: "world", anchor: null });
 
     const enterRoom = await world.directCall("enter-lr", session.actor, "the_chatroom", "enter", []);
     expect(enterRoom.op).toBe("result");
@@ -680,7 +680,7 @@ describe("local catalogs", () => {
     const takeLamp = await world.directCall("take-lamp", session.actor, "the_chatroom", "take", ["lamp"]);
     expect(takeLamp.op).toBe("result");
     expect(world.object("the_lamp").location).toBe(session.actor);
-    expect(world.objectRoutes().find((route) => route.id === "the_lamp")).toBeUndefined();
+    expect(world.objectRoutes().find((route) => route.id === "the_lamp")).toEqual({ id: "the_lamp", host: "world", anchor: null });
 
     const takeCouch = await world.directCall("take-couch", session.actor, "the_chatroom", "take", ["couch"]);
     expect(takeCouch.op).toBe("error");
@@ -722,7 +722,7 @@ describe("local catalogs", () => {
     const takeTowel = await world.directCall("take-towel", session.actor, "the_deck", "take", ["towel"]);
     expect(takeTowel.op).toBe("result");
     expect(world.object("the_towel").location).toBe(session.actor);
-    expect(world.objectRoutes().find((route) => route.id === "the_towel")).toBeUndefined();
+    expect(world.objectRoutes().find((route) => route.id === "the_towel")).toEqual({ id: "the_towel", host: "world", anchor: null });
 
     const goTub = await world.directCall("enter-hot-tub", session.actor, "the_hot_tub", "enter", []);
     expect(goTub.op).toBe("result");
@@ -733,7 +733,7 @@ describe("local catalogs", () => {
     const dropTowel = await world.directCall("drop-towel", session.actor, "the_hot_tub", "drop", ["towel"]);
     expect(dropTowel.op).toBe("result");
     expect(world.object("the_towel").location).toBe("the_hot_tub");
-    expect(world.objectRoutes().find((route) => route.id === "the_towel")).toBeUndefined();
+    expect(world.objectRoutes().find((route) => route.id === "the_towel")).toEqual({ id: "the_towel", host: "world", anchor: null });
   });
 
   it("repairs stale chat room seed metadata and missing room contents", () => {

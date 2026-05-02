@@ -142,6 +142,8 @@ export type WorldSnapshot = {
   objects: Record<string, unknown>;
 };
 
+const DEFAULT_OBJECT_HOST = "world";
+
 export type ParkedTaskRun = {
   task: ParkedTaskRecord;
   frame?: AppliedFrame | ErrorFrame;
@@ -1155,7 +1157,7 @@ export class WooWorld {
     for (const id of this.objects.keys()) {
       if (this.propOrNull(id, "host_placement") === "self") selfHosted.add(id);
     }
-    const hostFor = (id: ObjRef): string | null => {
+    const hostFor = (id: ObjRef): string => {
       if (selfHosted.has(id)) return id;
       const obj = this.object(id);
       let cursor: ObjRef | null = obj.anchor;
@@ -1165,14 +1167,10 @@ export class WooWorld {
         seen.add(cursor);
         cursor = this.objects.has(cursor) ? this.object(cursor).anchor : null;
       }
-      return null;
+      return DEFAULT_OBJECT_HOST;
     };
     return Array.from(this.objects.values())
-      .map((obj) => {
-        const host = hostFor(obj.id);
-        return host ? { id: obj.id, host, anchor: obj.anchor } : null;
-      })
-      .filter((route): route is { id: ObjRef; host: string; anchor: ObjRef | null } => route !== null)
+      .map((obj) => ({ id: obj.id, host: hostFor(obj.id), anchor: obj.anchor }))
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 

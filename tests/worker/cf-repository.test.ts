@@ -5,6 +5,7 @@ import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../../src
 import type { CallContext, HostBridge, MoveObjectResult, WooWorld } from "../../src/core/world";
 import { CFObjectRepository } from "../../src/worker/cf-repository";
 import { DirectoryDO } from "../../src/worker/directory-do";
+import worker from "../../src/worker/index";
 import { signInternalRequest } from "../../src/worker/internal-auth";
 import { PersistentObjectDO, type Env } from "../../src/worker/persistent-object-do";
 
@@ -338,6 +339,98 @@ describe("CFObjectRepository production-shape coverage", () => {
     } finally {
       roomHarness.cleanup();
       homeHarness.cleanup();
+    }
+  });
+
+  it("supports no-fallback object resolution for internal host lookups", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const env = { WOO_INTERNAL_SECRET: "cf-test-secret" };
+
+    async function post(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+      const request = await signInternalRequest(env, new Request(`https://woo.internal${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      }));
+      const response = await directory.fetch(request);
+      expect(response.ok).toBe(true);
+      return await response.json() as Record<string, unknown>;
+    }
+
+    try {
+      await post("/register-objects", { routes: [{ id: "the_hot_tub", host: "the_hot_tub", anchor: null }] });
+      await expect(post("/resolve-object", { id: "the_hot_tub", fallback_host: "" }))
+        .resolves.toMatchObject({ id: "the_hot_tub", host: "the_hot_tub" });
+      await expect(post("/resolve-object", { id: "tub", fallback_host: "" }))
+        .resolves.toMatchObject({ id: "tub", host: "" });
+      await expect(post("/resolve-object", { id: "$space", fallback_host: "" }))
+        .resolves.toMatchObject({ id: "$space", host: "world" });
+    } finally {
+      directoryState.close();
+    }
+  });
+
+  it("plans enter commands on a routed room without treating aliases as object routes", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const wooStates = new Map<string, FakeDurableObjectState>();
+    const wooObjects = new Map<string, PersistentObjectDO>();
+    let env: Env;
+    const wooNamespace = new FakeDurableObjectNamespace((name) => {
+      let object = wooObjects.get(name);
+      if (!object) {
+        const state = new FakeDurableObjectState(name);
+        wooStates.set(name, state);
+        object = new PersistentObjectDO(state as unknown as DurableObjectState, env);
+        wooObjects.set(name, object);
+      }
+      return object;
+    });
+    env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-command-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "chat,pinboard",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: wooNamespace
+    } as unknown as Env;
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    async function post(path: string, body: Record<string, unknown>, session?: string): Promise<{ status: number; body: Record<string, unknown> }> {
+      const response = await worker.fetch(new Request(`https://woo.test${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(session ? { authorization: `Session ${session}` } : {})
+        },
+        body: JSON.stringify(body)
+      }), env, {});
+      return { status: response.status, body: await response.json() as Record<string, unknown> };
+    }
+
+    try {
+      const auth = await post("/api/auth", { token: "guest:cf-command-alias" });
+      expect(auth.status).toBe(200);
+      const session = String(auth.body.session);
+
+      expect((await post("/api/objects/the_chatroom/calls/enter", { args: [] }, session)).status).toBe(200);
+      expect((await post("/api/objects/the_chatroom/calls/enter", { args: [] }, session)).status).toBe(200);
+      expect((await post("/api/objects/the_chatroom/calls/southeast", { args: [] }, session)).status).toBe(200);
+
+      const tubPlan = await post("/api/objects/the_deck/calls/command_plan", { args: ["enter tub"] }, session);
+      expect(tubPlan.status).toBe(200);
+      expect(tubPlan.body.result).toMatchObject({ ok: true, route: "direct", target: "the_hot_tub", verb: "enter", args: [] });
+
+      const pinboardPlan = await post("/api/objects/the_deck/calls/command_plan", { args: ["enter pinboard"] }, session);
+      expect(pinboardPlan.status).toBe(200);
+      expect(pinboardPlan.body.result).toMatchObject({ ok: true, route: "direct", target: "the_pinboard", verb: "enter", args: [] });
+    } finally {
+      logSpy.mockRestore();
+      directoryState.close();
+      for (const state of wooStates.values()) state.close();
     }
   });
 

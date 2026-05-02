@@ -770,9 +770,9 @@ describe("woo core", () => {
     expect(reloaded.getProp("the_chatroom", "name")).toBe("Lobby");
     expect(reloaded.getProp("the_chatroom", "subscribers")).toEqual([session.actor]);
     expect(reloaded.getProp("the_chatroom", "next_seq")).toBe(42);
-    expect(reloaded.objects.has("the_lamp")).toBe(false);
-    expect(reloaded.object("the_chatroom").contents.has("the_lamp")).toBe(false);
-    expect(reloaded.objects.has("the_mug")).toBe(false);
+    expect(reloaded.objects.has("the_lamp")).toBe(true);
+    expect(reloaded.object("the_chatroom").contents.has("the_lamp")).toBe(true);
+    expect(reloaded.objects.has("the_mug")).toBe(true);
     expect(reloaded.object("the_chatroom").contents.has("the_mug")).toBe(true);
     expect(reloaded.object("the_dubspace").location).toBe("the_chatroom");
     expect(reloaded.object("the_chatroom").contents.has("the_dubspace")).toBe(true);
