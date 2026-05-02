@@ -335,6 +335,24 @@ function markMigrationApplied(world: WooWorld, id: string): void {
   if (!migrations.includes(id)) world.setProp("$system", "applied_migrations", [...migrations, id]);
 }
 
+/**
+ * Idempotent data-only migrations that must run wherever the relevant
+ * instance data lives. Self-hosted seeds (host_placement:"self", e.g.
+ * the_pinboard) live in their own DO; the gateway's copy is the post-install
+ * stub with empty/default properties. Migrations driven by the gateway-only
+ * migration framework therefore see no data to migrate. Each host's cold
+ * init must call this so data sitting on the owning host gets converted.
+ *
+ * Idempotency: each step gates on local class existence and uses
+ * hasEquivalentMigratedPin (or equivalent) to avoid duplicate work, so calling
+ * on every cold init is safe and cheap when there's nothing to do.
+ */
+export function runHostScopedDataMigrations(world: WooWorld): void {
+  if (world.objects.has("$pin") && world.objects.has("$pinboard")) {
+    world.withMutationSavepoint(() => migratePinboardNoteRecords(world));
+  }
+}
+
 function runPinboardNotesToPinsMigration(world: WooWorld, names: readonly string[], id: string): void {
   if (!names.includes("pinboard")) return;
   if (!localCatalogInstalled(world, "pinboard")) return;

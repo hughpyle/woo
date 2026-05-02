@@ -31,7 +31,7 @@
 //   private repos and content-hash caching are deferred.
 
 import { createWorld, createWorldFromSerialized, mergeHostScopedSeed, nonEmptyHostScopedWorld } from "../core/bootstrap";
-import { parseAutoInstallCatalogs } from "../core/local-catalogs";
+import { parseAutoInstallCatalogs, runHostScopedDataMigrations } from "../core/local-catalogs";
 import {
   handleRestProtocolRequest,
   handleWsProtocolFrame,
@@ -321,6 +321,12 @@ export class PersistentObjectDO {
     if (!scoped) scoped = freshSeed;
     if (!scoped) throw wooError("E_OBJNF", `no host-scoped seed for ${hostKey}`, hostKey);
     const world = createWorldFromSerialized(scoped, { repository: this.repo });
+    // Run data-only migrations on this host's actual instance data. The
+    // gateway's migration framework can't reach self-hosted seeds (their
+    // properties live here, not on the gateway), so each owning host has to
+    // do the conversion locally on cold init. Idempotent and cheap when
+    // there's nothing to do.
+    runHostScopedDataMigrations(world);
     this.scrubStaleSubscribersOnce(world);
     return world;
   }

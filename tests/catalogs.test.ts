@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { installVerb } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
 import { installCatalogManifest, updateCatalogManifest, type CatalogManifest as RuntimeCatalogManifest } from "../src/core/catalog-installer";
-import { bundledCatalogAliases, installLocalCatalogs, localCatalogStatuses } from "../src/core/local-catalogs";
+import { bundledCatalogAliases, installLocalCatalogs, localCatalogStatuses, runHostScopedDataMigrations } from "../src/core/local-catalogs";
 import type { VerbDef } from "../src/core/types";
 
 type CatalogManifest = {
@@ -641,6 +641,34 @@ describe("local catalogs", () => {
 
     expect(world.objects.has("$note")).toBe(true);
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-pinboard-v02-repair");
+  });
+
+  it("runHostScopedDataMigrations migrates legacy notes that the gateway-only framework can't reach", () => {
+    // The_pinboard is host_placement:"self", so its actual notes prop lives
+    // on its own DO. The gateway's local copy has the post-install default
+    // ([] notes), so the gateway-side data migration found nothing to do and
+    // marked itself applied. This simulates the owning DO's cold init: the
+    // data migration must run again locally there.
+    const world = createWorld();
+    expect(world.objects.has("$pin")).toBe(true);
+    // Mark every gateway-side data migration applied — those represent the
+    // gateway run that already finished without touching real data.
+    const dataMigrationIds = ["2026-05-02-pinboard-notes-to-pins", "2026-05-02-pinboard-v02-data-repair"];
+    const migrations = world.getProp("$system", "applied_migrations") as string[];
+    for (const id of dataMigrationIds) if (!migrations.includes(id)) migrations.push(id);
+    world.setProp("$system", "applied_migrations", migrations);
+    // Plant the legacy data on the_pinboard the way the owning DO sees it.
+    world.setProp("the_pinboard", "notes", [
+      { id: "n1", text: "real legacy", color: "blue", x: 10, y: 20, w: 180, h: 110, z: 4, author: "$wiz", updated_by: "$wiz" }
+    ]);
+
+    runHostScopedDataMigrations(world);
+
+    expect(world.propOrNull("the_pinboard", "notes")).toBeNull();
+    const pins = Array.from(world.object("the_pinboard").contents).filter((id) => world.isDescendantOf(id, "$pin"));
+    expect(pins).toHaveLength(1);
+    expect(world.getProp(pins[0], "text")).toEqual(["real legacy"]);
+    expect(world.getProp(pins[0], "color")).toBe("blue");
   });
 
   it("seeds the_cockatoo in the chatroom with random-pick squawk", async () => {
