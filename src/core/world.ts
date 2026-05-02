@@ -245,10 +245,10 @@ export class WooWorld {
   private dirtyTasks = new Set<string>();
   private deletedTasks = new Set<string>();
   private dirtyCounters = false;
-  // Bumped on every mutation that could affect the world's externally visible
-  // state (object/property/session/task slice writes or deletes). Consumers
-  // such as the DO layer use this as a cache key for `state(actor)`-shaped
-  // responses; cache hits are valid while the version stays the same.
+  // Invalidation token for externally visible state. It is bumped on every
+  // path that could change `state(actor)` (object/property/session/task/counter
+  // writes, deletes, accepted log rows). It may over-invalidate after rollback;
+  // callers only depend on equality meaning "safe cache hit."
   private mutationCounter = 0;
   private callDepth = 0;
   private guestFreePool = new Set<ObjRef>();
@@ -289,13 +289,14 @@ export class WooWorld {
     try { hook(event); } catch { /* metrics must never throw */ }
   }
 
-  /** Monotonically increasing counter bumped on every state-affecting
-   * mutation (object / property / session / task / counters slice writes
-   * and deletes). DO-layer caches key on this so the cache invalidates
-   * exactly when the snapshot would change. Reset implicitly on world
-   * recreation; not persisted. */
+  /** Monotonically increasing state-cache invalidation token. Reset implicitly
+   * on world recreation; not persisted. */
   mutationVersion(): number {
     return this.mutationCounter;
+  }
+
+  private bumpMutationVersion(): void {
+    this.mutationCounter += 1;
   }
 
   // Read access for the MCP host (cross-host tool enumeration). Other callers
@@ -381,6 +382,7 @@ export class WooWorld {
   }
 
   defineProperty(obj: ObjRef, def: Omit<PropertyDef, "version"> & { version?: number }): PropertyDef {
+    this.assertOrdinaryPropertyName(def.name);
     const target = this.object(obj);
     const property: PropertyDef = { ...def, version: def.version ?? 1 };
     target.propertyDefs.set(property.name, property);
@@ -400,14 +402,36 @@ export class WooWorld {
   }
 
   private setPropLocal(objRef: ObjRef, name: string, value: WooValue): void {
+    this.assertOrdinaryPropertyName(name);
     const obj = this.object(objRef);
     obj.properties.set(name, cloneValue(value));
     obj.propertyVersions.set(name, (obj.propertyVersions.get(name) ?? 0) + 1);
     obj.modified = Date.now();
   }
 
+  deleteProp(objRef: ObjRef, name: string): boolean {
+    this.assertOrdinaryPropertyName(name);
+    const obj = this.object(objRef);
+    const hadDef = obj.propertyDefs.delete(name);
+    const hadValue = obj.properties.delete(name);
+    const hadVersion = obj.propertyVersions.delete(name);
+    const hadProperty = hadDef || hadValue || hadVersion;
+    if (!hadProperty) return false;
+    obj.modified = Date.now();
+    this.deletePersistedProperty(objRef, name);
+    this.persist();
+    return true;
+  }
+
+  private assertOrdinaryPropertyName(name: string): void {
+    if (name === "owner") {
+      throw wooError("E_PERM", "owner is a read-only core field", { property: name });
+    }
+  }
+
   getProp(objRef: ObjRef, name: string): WooValue {
     const obj = this.object(objRef);
+    if (name === "owner") return obj.owner;
     if (obj.properties.has(name)) return cloneValue(obj.properties.get(name)!);
     let parent = obj.parent;
     while (parent) {
@@ -443,6 +467,10 @@ export class WooWorld {
 
   ownVerb(objRef: ObjRef, name: string): VerbDef | null {
     return this.ownVerbNamed(objRef, name);
+  }
+
+  ownVerbExact(objRef: ObjRef, name: string): VerbDef | null {
+    return this.object(objRef).verbs.find((verb) => verb.name === name) ?? null;
   }
 
   private findOwnVerbIndex(obj: WooObject, name: string): number {
@@ -585,6 +613,7 @@ export class WooWorld {
   }
 
   async definePropertyChecked(progr: ObjRef, objRef: ObjRef, def: Omit<PropertyDef, "version"> & { version?: number }): Promise<PropertyDef> {
+    this.assertOrdinaryPropertyName(def.name);
     if (await this.remoteHostForObject(objRef)) {
       throw wooError("E_CROSS_HOST_WRITE", `cross-host property definitions are not atomic: ${objRef}.${def.name}`, { progr, obj: objRef, property: def.name });
     }
@@ -624,6 +653,7 @@ export class WooWorld {
   }
 
   async setPropertyInfoChecked(progr: ObjRef, objRef: ObjRef, name: string, info: Record<string, WooValue>): Promise<void> {
+    this.assertOrdinaryPropertyName(name);
     if (await this.remoteHostForObject(objRef)) {
       throw wooError("E_CROSS_HOST_WRITE", `cross-host property metadata writes are not atomic: ${objRef}.${name}`, { progr, obj: objRef, property: name });
     }
@@ -715,6 +745,18 @@ export class WooWorld {
   }
 
   propertyInfo(objRef: ObjRef, name: string): Record<string, WooValue> {
+    if (name === "owner") {
+      const obj = this.object(objRef);
+      return {
+        name,
+        owner: obj.owner,
+        perms: "r",
+        defined_on: objRef,
+        type_hint: "obj",
+        version: 1,
+        has_value: true
+      };
+    }
     let current: ObjRef | null = objRef;
     while (current) {
       const obj = this.object(current);
@@ -1119,6 +1161,9 @@ export class WooWorld {
         const log = this.logs.get(spaceRef) ?? [];
         log.push(logEntry);
         this.logs.set(spaceRef, log);
+        // `state(actor).spaces` exposes next_seq/log_count. In repository
+        // mode, appendLog persists next_seq directly, bypassing persistProperty.
+        this.bumpMutationVersion();
 
         const observations: Observation[] = [];
         const ctx: CallContext = {
@@ -1553,6 +1598,7 @@ export class WooWorld {
 
   async programmerSetPropertyInfo(actor: ObjRef, objRef: ObjRef, name: string, opts: WooValue, surfaceClass: ObjRef): Promise<WooValue> {
     this.assertProgrammerActor(actor, surfaceClass);
+    this.assertOrdinaryPropertyName(name);
     if (await this.remoteHostForObject(objRef)) {
       throw wooError("E_CROSS_HOST_WRITE", `cross-host property metadata writes are not atomic: ${objRef}.${name}`, { actor, obj: objRef, property: name });
     }
@@ -2063,7 +2109,10 @@ export class WooWorld {
       return { current, slot: descriptor, name: current.name, append: false };
     }
     const descriptorName = assertVerbNameDescriptor(descriptor);
-    const existingIndex = obj.verbs.findIndex((verb) => verb.name === descriptorName || verb.aliases.some((alias) => verbAliasMatches(alias, descriptorName)));
+    // Installing source by name must bind the named slot, not any earlier
+    // abbreviation alias. Otherwise a verb like `exitfunc` can be mistaken for
+    // a `look` alias such as `ex*` and silently overwrite the wrong slot.
+    const existingIndex = obj.verbs.findIndex((verb) => verb.name === descriptorName);
     const current = options.append ? null : existingIndex >= 0 ? obj.verbs[existingIndex] : null;
     const name = current?.name ?? descriptorName;
     if (options.mode === "define" && current) throw wooError("E_INVARG", `verb already exists: ${objRef}:${descriptorName}`, { obj: objRef, name: descriptorName });
@@ -2212,22 +2261,49 @@ export class WooWorld {
     return Array.from(ids).sort();
   }
 
-  createRuntimeObject(parent: ObjRef, owner: ObjRef, anchor: ObjRef | null = null, options: { progr?: ObjRef; location?: ObjRef | null; name?: string } = {}): ObjRef {
-    this.object(parent);
-    this.object(owner);
-    if (anchor) this.object(anchor);
-    const progr = options.progr ?? owner;
-    this.assertCanCreateObject(progr, parent, owner);
-    const location = options.location ?? null;
-    if (location) this.object(location);
-    const scope = runtimeObjectScope(anchor ?? parent);
-    let id: ObjRef;
-    do {
-      id = `obj_${scope}_${this.objectCounter++}`;
-    } while (this.objects.has(id));
-    this.createObject({ id, parent, owner, anchor, location, name: options.name });
-    this.persistCounters();
-    return id;
+  createRuntimeObject(parent: ObjRef, owner: ObjRef, anchor: ObjRef | null = null, options: {
+    progr?: ObjRef;
+    location?: ObjRef | null;
+    name?: string;
+    description?: string;
+    aliases?: string[];
+    fertile?: boolean;
+    recyclable?: boolean;
+  } = {}): ObjRef {
+    return this.withPersistenceDeferred(() => {
+      this.object(parent);
+      this.object(owner);
+      if (anchor) this.object(anchor);
+      const progr = options.progr ?? owner;
+      this.assertCanCreateObject(progr, parent, owner);
+      const location = options.location ?? null;
+      if (location) this.object(location);
+      const scope = runtimeObjectScope(anchor ?? parent);
+      let id: ObjRef;
+      do {
+        id = `obj_${scope}_${this.objectCounter++}`;
+      } while (this.objects.has(id));
+      const flags: WooObject["flags"] = {};
+      if (typeof options.fertile === "boolean") flags.fertile = options.fertile;
+      if (typeof options.recyclable === "boolean") flags.recyclable = options.recyclable;
+      this.createObject({
+        id,
+        parent,
+        owner,
+        anchor,
+        location,
+        name: options.name,
+        flags
+      });
+      // WooObject.name is the display/core metadata; the inherited `name`
+      // property is the source-level slot read by woocode (`this.name`).
+      // Keep them mirrored while coalescing the object/property writes.
+      if (typeof options.name === "string") this.setProp(id, "name", options.name);
+      if (typeof options.description === "string") this.setProp(id, "description", options.description);
+      if (Array.isArray(options.aliases) && options.aliases.length > 0) this.setProp(id, "aliases", options.aliases);
+      this.persistCounters();
+      return id;
+    });
   }
 
   createAuthoredObject(actor: ObjRef, input: { parent: ObjRef; name?: string; description?: string; aliases?: WooValue[]; location?: ObjRef | null }): ObjRef {
@@ -3144,7 +3220,7 @@ export class WooWorld {
   }
 
   private persistObject(objRef: ObjRef): void {
-    this.mutationCounter += 1;
+    this.bumpMutationVersion();
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3159,7 +3235,7 @@ export class WooWorld {
   }
 
   private deletePersistedObject(objRef: ObjRef): void {
-    this.mutationCounter += 1;
+    this.bumpMutationVersion();
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3172,7 +3248,7 @@ export class WooWorld {
   }
 
   private persistProperty(objRef: ObjRef, name: string): void {
-    this.mutationCounter += 1;
+    this.bumpMutationVersion();
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3182,6 +3258,21 @@ export class WooWorld {
     const startedAt = Date.now();
     repo.saveProperty(objRef, this.serializeProperty(objRef, name));
     this.recordMetric({ kind: "storage_direct_write", what: "property", ms: Date.now() - startedAt });
+  }
+
+  private deletePersistedProperty(objRef: ObjRef, name: string): void {
+    this.bumpMutationVersion();
+    const repo = this.activeObjectRepository();
+    if (!repo) return;
+    if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
+      // A deferred full-object save is the simplest correct representation of
+      // a property deletion because it rewrites the object's scoped rows.
+      this.markObjectDirty(objRef);
+      return;
+    }
+    const startedAt = Date.now();
+    repo.deleteProperty(objRef, name);
+    this.recordMetric({ kind: "storage_direct_write", what: "property_delete", ms: Date.now() - startedAt });
   }
 
   private serializeProperty(objRef: ObjRef, name: string): SerializedProperty {
@@ -3199,7 +3290,7 @@ export class WooWorld {
   }
 
   private persistSession(session: Session): void {
-    this.mutationCounter += 1;
+    this.bumpMutationVersion();
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3212,7 +3303,7 @@ export class WooWorld {
   }
 
   private deletePersistedSession(sessionId: string): void {
-    this.mutationCounter += 1;
+    this.bumpMutationVersion();
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3225,7 +3316,7 @@ export class WooWorld {
   }
 
   private persistTask(task: ParkedTaskRecord): void {
-    this.mutationCounter += 1;
+    this.bumpMutationVersion();
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3238,7 +3329,7 @@ export class WooWorld {
   }
 
   private persistCounters(): void {
-    this.mutationCounter += 1;
+    this.bumpMutationVersion();
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -3253,7 +3344,7 @@ export class WooWorld {
   }
 
   private deletePersistedTask(taskId: string): void {
-    this.mutationCounter += 1;
+    this.bumpMutationVersion();
     const repo = this.activeObjectRepository();
     if (!repo) return;
     if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
@@ -4101,6 +4192,9 @@ export class WooWorld {
         const log = this.logs.get(spaceRef) ?? [];
         log.push(logEntry);
         this.logs.set(spaceRef, log);
+        // `state(actor).spaces` exposes next_seq/log_count. In repository
+        // mode, appendLog persists next_seq directly, bypassing persistProperty.
+        this.bumpMutationVersion();
 
         const observations: Observation[] = [{ type: "task_resumed", source: spaceRef, task: task.id }];
         try {
@@ -4429,6 +4523,23 @@ export class WooWorld {
     this.nativeHandlers.set("thing_moveto", async (ctx, args) => {
       const target = assertObj(args[0] ?? "$nowhere");
       return await this.movetoChecked(ctx, ctx.thisObj, target);
+    });
+    this.nativeHandlers.set("thing_look", async (ctx) => {
+      const result = await this.dispatch({ ...ctx, caller: ctx.thisObj }, ctx.thisObj, "look_self", []);
+      const text = result && typeof result === "object" && !Array.isArray(result)
+        ? String((result as Record<string, WooValue>).description ?? "")
+        : "";
+      ctx.observe({
+        type: "looked",
+        source: ctx.thisObj,
+        actor: ctx.actor,
+        to: ctx.actor,
+        room: ctx.thisObj,
+        text,
+        look: result,
+        ts: Date.now()
+      });
+      return result;
     });
     this.nativeHandlers.set("add_feature", (ctx, args) => this.addFeature(ctx.thisObj, assertObj(args[0]), ctx.actor, ctx.observations));
     this.nativeHandlers.set("remove_feature", (ctx, args) => this.removeFeature(ctx.thisObj, assertObj(args[0]), ctx.actor, ctx.observations));

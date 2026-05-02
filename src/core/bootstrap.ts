@@ -255,6 +255,7 @@ function seedUniversal(world: WooWorld): void {
   native(world, "$system", "return_guest", "return_guest", "verb :return_guest(guest) r { ... }", { perms: "r" });
   native(world, "$thing", "can_be_attached_by", "feature_can_be_attached_by", "verb :can_be_attached_by(actor) rxd { ... }", { directCallable: true });
   native(world, "$thing", "moveto", "thing_moveto", "verb :moveto(target) rxd { return moveto(this, target); }");
+  native(world, "$thing", "look", "thing_look", "verb :look() rxd { let r = this:look_self(); observe({ type: \"looked\", actor: actor, to: actor, room: this, text: r.description, look: r, ts: now() }); return r; }", { directCallable: true, aliases: ["l@ook", "ex@amine"] });
   for (const obj of ["$actor", "$space"]) {
     native(world, obj, "add_feature", "add_feature", "verb :add_feature(f) rx { ... }");
     native(world, obj, "remove_feature", "remove_feature", "verb :remove_feature(f) rx { ... }");
@@ -360,7 +361,7 @@ function reparentSeed(world: WooWorld, obj: ObjRef, parent: ObjRef): void {
 }
 
 function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: TinyBytecode, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; perms?: string } = {}): void {
-  const existing = world.ownVerb(obj, name);
+  const existing = world.ownVerbExact(obj, name);
   if (existing) {
     const parsedPerms = normalizeVerbPerms(options.perms ?? existing.perms, existing.direct_callable || options.directCallable === true);
     const next = {
@@ -390,22 +391,25 @@ function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: Tin
   });
 }
 
-function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; toolExposed?: boolean; perms?: string; argSpec?: Record<string, WooValue> } = {}): void {
-  const existing = world.ownVerb(obj, name);
+function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; toolExposed?: boolean; perms?: string; argSpec?: Record<string, WooValue>; aliases?: string[] } = {}): void {
+  const existing = world.ownVerbExact(obj, name);
   if (existing) {
     const parsedPerms = normalizeVerbPerms(options.perms ?? existing.perms, existing.direct_callable || options.directCallable === true);
+    const aliases = options.aliases ?? existing.aliases;
     const next = {
       ...existing,
       perms: parsedPerms.perms,
       direct_callable: parsedPerms.directCallable,
       skip_presence_check: existing.skip_presence_check || options.skipPresenceCheck === true,
-      tool_exposed: existing.tool_exposed || options.toolExposed === true
+      tool_exposed: existing.tool_exposed || options.toolExposed === true,
+      aliases
     };
     if (
       next.perms !== existing.perms ||
       next.direct_callable !== existing.direct_callable ||
       next.skip_presence_check !== existing.skip_presence_check ||
-      next.tool_exposed !== existing.tool_exposed
+      next.tool_exposed !== existing.tool_exposed ||
+      JSON.stringify(next.aliases ?? []) !== JSON.stringify(existing.aliases ?? [])
     ) world.addVerb(obj, next);
     return;
   }
@@ -413,7 +417,7 @@ function native(world: WooWorld, obj: ObjRef, name: string, handler: string, sou
   world.addVerb(obj, {
     kind: "native",
     name,
-    aliases: [],
+    aliases: options.aliases ?? [],
     owner: "$wiz",
     perms: parsedPerms.perms,
     arg_spec: options.argSpec ?? {},

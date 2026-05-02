@@ -66,8 +66,8 @@ The exact verb names may change. The important requirements are:
   the taskspace
 
 These verbs are catalog-authored source, not runtime-native handlers. The only
-new runtime primitive the app needs is generic `create(parent, owner)` for
-minting persistent objects.
+new runtime primitive the app needs is generic `create(parent, owner_or_options?)`
+for minting persistent objects.
 
 ## Observations
 

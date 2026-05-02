@@ -33,6 +33,11 @@ It additionally has tables of:
 - **Children** (objects whose parent is this).
 - **Contents** (objects whose location is this).
 
+Behavior source may read selected object fields through property syntax where
+that matches LambdaMOO/Core convention. In v1, `obj.owner` is a read-only core
+field projection, not an ordinary property value and not user-writable through
+`SET_PROP`.
+
 Inheritance is **single-parent**. There is no multiple inheritance and no mixin support in v1.
 
 `location` is a separate axis from `parent`. A `#sword` object's *parent* is `#weapon`; its *location* is `#room5` (it's lying on the floor). LambdaMOO conflated these in early versions; we don't.

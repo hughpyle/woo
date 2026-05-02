@@ -30,9 +30,9 @@ Builtins are functions, not verbs. They are registered with stable indices for t
 
 ### 19.4 Object
 
-`create(parent, owner)`, `recycle(obj)`, `chparent(obj, new_parent)`,  
-`has_flag(obj, name)`,  
-`compile_verb(obj, name, source, options)`,  
+`create(parent, owner_or_options?)`, `recycle(obj)`, `chparent(obj, new_parent)`,
+`has_flag(obj, name)`,
+`compile_verb(obj, name, source, options)`,
 `set_verb_code(obj, descriptor, source, expected_version, options)`,
 `set_verb_info(obj, descriptor, expected_version, info)`, `verb_info`, `verb_args`,
 `define_property(obj, name, default, perms, expected_version, type_hint)`,  
@@ -46,11 +46,16 @@ Verb descriptors follow [objects.md §9.1](objects.md#91-lookup): name-based
 descriptors resolve to the first matching local slot, and integer descriptors
 name a 1-based local slot directly.
 
-`create(parent, owner)` creates a new persistent object with the supplied parent
-and owner. In a sequenced call, the new object's anchor is the current space; in
-a direct/off-space call, the anchor is null unless a later profile adds an
-explicit placement argument. It costs 50 ticks per call (host instantiation is
-not free).
+`create(parent, owner_or_options?)` creates a new persistent object with the
+supplied parent. If the second argument is an object reference, it is the owner;
+if omitted, owner defaults to the current actor. If the second argument is a map,
+it may include `{owner, name, description, aliases, location, fertile,
+recyclable}`. This mirrors the builder-facing create surface, but still applies
+the behavior task's ordinary `create()` authority checks. In a sequenced call,
+the new object's anchor is the current space; in a direct/off-space call, the
+anchor is null. `location`, when supplied, is initial placement only; user-level
+acceptance hooks still belong to `moveto(obj, target)`. It costs 50 ticks per
+call (host instantiation is not free).
 
 Creation is permissioned. A wizard may create for any owner. A non-wizard
 creator must be a programmer, must create objects owned by itself, and may use a

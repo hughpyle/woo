@@ -260,12 +260,14 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       expect(retry).toEqual(first);
       expect(world.replay("the_dubspace", 1, 10)).toHaveLength(1);
 
+      const beforeFailedVersion = world.mutationVersion();
       const failed = await world.call("missing", session.id, "the_dubspace", message(session.actor, "delay_1", "missing_verb", []));
       expect(failed.op).toBe("applied");
       if (failed.op === "applied") {
         expect(failed.seq).toBe(2);
         expect(failed.observations[0]).toMatchObject({ type: "$error", code: "E_VERBNF" });
       }
+      expect(world.mutationVersion()).toBeGreaterThan(beforeFailedVersion);
       expect(world.getProp("delay_1", "feedback")).toBe(0.71);
       expect(world.getProp("the_dubspace", "next_seq")).toBe(3);
       expect(world.replay("the_dubspace", 1, 1).map((entry) => entry.seq)).toEqual([1]);

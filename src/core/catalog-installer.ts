@@ -441,7 +441,7 @@ function installProperty(world: WooWorld, obj: ObjRef, property: CatalogProperty
 
 function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, allowImplementationHints: boolean, repairExisting: boolean): void {
   world.object(obj);
-  const existing = world.ownVerb(obj, def.name);
+  const existing = world.ownVerbExact(obj, def.name);
   if (existing) {
     if (!repairExisting) {
       const parsedPerms = normalizeVerbPerms(def.perms ?? existing.perms, existing.direct_callable || def.direct_callable === true);

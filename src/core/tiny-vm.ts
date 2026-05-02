@@ -790,9 +790,34 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         frame.ticksRemaining -= 45;
         if (frame.ticksRemaining < 0) throw wooError("E_TICKS", "task exceeded tick budget");
         const parent = assertObj(builtinArgs[0]);
-        const owner = builtinArgs[1] === undefined || builtinArgs[1] === null ? frame.ctx.actor : assertObj(builtinArgs[1]);
+        let owner = frame.ctx.actor;
+        let options: {
+          name?: string;
+          description?: string;
+          aliases?: string[];
+          location?: ObjRef | null;
+          fertile?: boolean;
+          recyclable?: boolean;
+        } = {};
+        const createArg = builtinArgs[1];
+        if (createArg === undefined || createArg === null) {
+          owner = frame.ctx.actor;
+        } else if (typeof createArg === "object" && !Array.isArray(createArg)) {
+          const map = assertMap(createArg);
+          owner = map.owner === undefined || map.owner === null ? frame.ctx.actor : assertObj(map.owner);
+          options = {
+            name: typeof map.name === "string" ? map.name : undefined,
+            description: typeof map.description === "string" ? map.description : undefined,
+            aliases: Array.isArray(map.aliases) ? map.aliases.filter((item): item is string => typeof item === "string") : undefined,
+            location: map.location === undefined || map.location === null ? null : assertObj(map.location),
+            fertile: typeof map.fertile === "boolean" ? map.fertile : undefined,
+            recyclable: typeof map.recyclable === "boolean" ? map.recyclable : undefined
+          };
+        } else {
+          owner = assertObj(createArg);
+        }
         const anchor = frame.ctx.space === "#-1" ? null : frame.ctx.space;
-        return frame.ctx.world.createRuntimeObject(parent, owner, anchor, { progr: frame.ctx.progr });
+        return frame.ctx.world.createRuntimeObject(parent, owner, anchor, { progr: frame.ctx.progr, ...options });
       }
       case "move": {
         if (builtinArgs.length !== 2) throw wooError("E_INVARG", "move expects object and destination");

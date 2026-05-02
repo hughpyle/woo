@@ -587,6 +587,32 @@ describe("woo core", () => {
     expect(world.propertyInfo("private_box", "secret").perms).toBe("r");
   });
 
+  it("treats owner as a read-only core field projection", () => {
+    const world = createWorld();
+    const session = world.auth("guest:owner-field");
+    world.createObject({ id: "owner_probe", parent: "$thing", owner: session.actor });
+
+    expect(world.getProp("owner_probe", "owner")).toBe(session.actor);
+    expect(world.propertyInfo("owner_probe", "owner")).toMatchObject({
+      owner: session.actor,
+      perms: "r",
+      defined_on: "owner_probe",
+      has_value: true
+    });
+    expect(() => world.setProp("owner_probe", "owner", "$wiz")).toThrow();
+    expect(() => world.defineProperty("owner_probe", { name: "owner", defaultValue: "$wiz", owner: "$wiz", perms: "rw" })).toThrow();
+  });
+
+  it("separates alias-aware verb lookup from exact-slot replacement lookup", () => {
+    const world = createWorld();
+    world.createObject({ id: "alias_probe", parent: "$thing", owner: "$wiz" });
+    world.addVerb("alias_probe", { ...nativeVerb("look"), aliases: ["ex*"] });
+
+    expect(world.ownVerb("alias_probe", "examine")?.name).toBe("look");
+    expect(world.ownVerbExact("alias_probe", "examine")).toBeNull();
+    expect(world.ownVerbExact("alias_probe", "look")?.name).toBe("look");
+  });
+
   it("does not expose inherited generic root setters as public capabilities", async () => {
     const { world, session, actor } = authedWorld();
     const before = world.getProp("$wiz", "description");
