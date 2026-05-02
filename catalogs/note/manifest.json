@@ -25,7 +25,7 @@
         },
         {
           "name": "look",
-          "aliases": ["l@ook", "ex*"],
+          "aliases": ["l@ook", "ex@amine"],
           "perms": "rxd",
           "direct_callable": true,
           "skip_presence_check": true,
