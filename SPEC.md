@@ -75,6 +75,7 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 - [tasks.md](spec/semantics/tasks.md) — lifecycle, suspend, fork, read (§16)
 - [builtins.md](spec/semantics/builtins.md) — builtins, errors (§19, §20)
 - [recycle.md](spec/semantics/recycle.md) — `recycle()` semantics: cleanup, handlers, dangling refs (RC1–RC9)
+- [moveto.md](spec/semantics/moveto.md) — receiver-driven container moves with acceptable/enter/exit hooks (M1–M10)
 - [match.md](spec/semantics/match.md) — `$match` scaffolding for chat-shaped text → object/verb resolution (MA1–MA7)
 - [features.md](spec/semantics/features.md) — feature objects: composition without multiple inheritance (FT1–FT10)
 - [failures.md](spec/semantics/failures.md) — consolidated failure model (F1–F11)

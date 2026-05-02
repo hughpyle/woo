@@ -1,0 +1,119 @@
+{
+  "name": "note",
+  "version": "0.1.0",
+  "spec_version": "v1",
+  "description": "Generic note: a portable text-bearing thing. Notes are first-class movable objects so they can travel between rooms, actor inventories, bulletin boards, and other containers without losing identity. Subclass for richer behaviors (pinboard pins, recipe notes, voting notes, decision logs); the base shape is text plus readers/writers permissions.",
+  "license": "MIT",
+  "depends": ["@local:chat"],
+  "classes": [
+    {
+      "local_name": "$note",
+      "parent": "$portable",
+      "description": "A movable text artifact. The text is a list of strings, one per line. Default is publicly readable; writability is gated by owner, the writers list, or wizard. Encryption and mailme bridges are deferred to v0.2.",
+      "properties": [
+        { "name": "text", "type": "list<str>", "default": [], "perms": "" },
+        { "name": "writers", "type": "list<obj>", "default": [], "perms": "r" }
+      ],
+      "verbs": [
+        {
+          "name": "title",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :title() rxd { return this.name; }"
+        },
+        {
+          "name": "look",
+          "aliases": ["l@ook", "ex*"],
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :look() rxd { return this:look_self(); }"
+        },
+        {
+          "name": "look_self",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :look_self() rxd { let lines = length(this.text); let suffix = \" lines\"; if (lines == 1) { suffix = \" line\"; } let summary = this.name + \" — \" + to_string(lines) + suffix + \". Use 'read' to see the text.\"; observe({ type: \"looked\", actor: actor, to: actor, room: this.location, text: summary, look: { id: this, title: this.name, description: this.description, lines: lines, location: this.location }, ts: now() }); return { id: this, title: this.name, description: this.description, lines: lines, location: this.location }; }"
+        },
+        {
+          "name": "text",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :text() rxd { if (!this:is_readable_by(actor)) { raise { code: \"E_PERM\", message: \"cannot read note\", value: this }; } return this.text; }"
+        },
+        {
+          "name": "read",
+          "aliases": ["r@ead"],
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :read() rxd { let text = this:text(); observe({ type: \"note_read\", actor: actor, note: this, text: text, ts: now() }); return text; }"
+        },
+        {
+          "name": "set_text",
+          "perms": "rx",
+          "tool_exposed": true,
+          "arg_spec": { "args": ["lines"] },
+          "source": "verb :set_text(lines) rx { if (typeof(lines) != \"list\") { raise { code: \"E_INVARG\", message: \"set_text requires a list of strings\", value: lines }; } if (!this:is_writable_by(actor)) { raise { code: \"E_PERM\", message: \"cannot write note\", value: this }; } this.text = lines; observe({ type: \"note_edited\", actor: actor, note: this, text: lines, ts: now() }); return true; }"
+        },
+        {
+          "name": "write",
+          "aliases": ["w@rite"],
+          "perms": "rx",
+          "tool_exposed": true,
+          "arg_spec": { "args": ["line"] },
+          "source": "verb :write(line) rx { if (typeof(line) != \"string\") { raise { code: \"E_INVARG\", message: \"write requires a string\", value: line }; } if (!this:is_writable_by(actor)) { raise { code: \"E_PERM\", message: \"cannot write note\", value: this }; } this.text = this.text + [line]; observe({ type: \"note_edited\", actor: actor, note: this, text: this.text, ts: now() }); return length(this.text); }"
+        },
+        {
+          "name": "erase",
+          "aliases": ["er@ase"],
+          "perms": "rx",
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :erase() rx { if (!this:is_writable_by(actor)) { raise { code: \"E_PERM\", message: \"cannot erase note\", value: this }; } this.text = []; observe({ type: \"note_edited\", actor: actor, note: this, text: [], ts: now() }); return true; }"
+        },
+        {
+          "name": "delete",
+          "aliases": ["del@ete", "rem@ove"],
+          "perms": "rx",
+          "tool_exposed": true,
+          "arg_spec": { "args": ["line"] },
+          "source": "verb :delete(line) rx { if (!this:is_writable_by(actor)) { raise { code: \"E_PERM\", message: \"cannot edit note\", value: this }; } let lines = this.text; let n = length(lines); if (typeof(line) != \"number\" || line < 1 || line > n) { raise { code: \"E_RANGE\", message: \"line out of range\", value: line }; } let next = []; let i = 1; for entry in lines { if (i != line) { next = next + [entry]; } i = i + 1; } this.text = next; observe({ type: \"note_edited\", actor: actor, note: this, text: next, ts: now() }); return true; }"
+        },
+        {
+          "name": "is_readable_by",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "arg_spec": { "args": ["actor_obj"] },
+          "source": "verb :is_readable_by(actor_obj) rxd { return true; }"
+        },
+        {
+          "name": "is_writable_by",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "arg_spec": { "args": ["actor_obj"] },
+          "source": "verb :is_writable_by(actor_obj) rxd { if (this.owner == actor_obj) { return true; } if (has_flag(actor_obj, \"wizard\")) { return true; } if (actor_obj in this.writers) { return true; } return false; }"
+        }
+      ]
+    }
+  ],
+  "features": [],
+  "schemas": [
+    { "on": "$note", "type": "note_read", "shape": { "actor": "obj", "note": "obj", "text": "list<str>" } },
+    { "on": "$note", "type": "note_edited", "shape": { "actor": "obj", "note": "obj", "text": "list<str>" } }
+  ],
+  "seed_hooks": []
+}
