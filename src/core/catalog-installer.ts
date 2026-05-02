@@ -373,7 +373,7 @@ function reconcileSeedObject(
     world.object(obj.location).contents.add(id);
   }
   obj.modified = Date.now();
-  world.persist(true);
+  world.persist();
 }
 
 function populateSeedExitAliasMaps(world: WooWorld, manifest: CatalogManifest, localSeeds: Map<string, ObjRef>): void {
@@ -755,7 +755,7 @@ function renameVerbLocal(world: WooWorld, objRef: ObjRef, from: string, to: stri
 
 function touchObject(world: WooWorld, objRef: ObjRef): void {
   world.object(objRef).modified = Date.now();
-  world.persist(true);
+  world.persist();
 }
 
 function migrationStepId(step: CatalogMigrationStep, index: number): string {
