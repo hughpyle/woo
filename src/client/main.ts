@@ -115,6 +115,7 @@ const taskStatuses = ["open", "claimed", "in_progress", "blocked", "done"] as co
 const directThrottle = new Map<string, number>();
 const pendingDirect = new Map<string, (result: any) => void>();
 const pendingFrameErrors = new Map<string, (error: any) => void>();
+let pinboardNotesRefreshPending = false;
 const pendingTaskSelections = new Set<string>();
 const reconnectBaseDelayMs = 500;
 const reconnectMaxDelayMs = 5000;
@@ -135,6 +136,7 @@ let pinboardViewportTimer: number | undefined;
 let pinboardViewAnimationTimer: number | undefined;
 let lastPinboardViewportPublishAt = 0;
 let lastPinboardViewportSent: PinNoteBox & { scale: number } | undefined;
+const pinNoteClientZ = new Map<string, number>();
 
 connect();
 window.setInterval(pruneLiveControls, 700);
@@ -169,14 +171,18 @@ function connect() {
     }
     if (frame.op === "applied") {
       if (typeof frame.id === "string") pendingFrameErrors.delete(frame.id);
-      const pinboardAnimations = capturePinboardAnimations(frame.observations ?? []);
-      forgetLiveControls(frame.observations ?? []);
-      rememberTaskObservations(frame.observations ?? [], typeof frame.id === "string" ? frame.id : undefined);
-      for (const observation of frame.observations ?? []) if (isChatObservation(observation)) receiveChatEvent(observation, false);
-      state.observations.unshift({ seq: frame.seq, space: frame.space, observations: frame.observations, message: frame.message });
+      const observations = frame.observations ?? [];
+      const pinboardAnimations = capturePinboardAnimations(observations);
+      const needsPinboardNotesRefresh = observations.some((observation: any) => isPinboardObservation(observation) && pinboardObservationNeedsNotesRefresh(String(observation?.type ?? "")));
+      if (needsPinboardNotesRefresh) pinboardNotesRefreshPending = false;
+      forgetLiveControls(observations);
+      rememberTaskObservations(observations, typeof frame.id === "string" ? frame.id : undefined);
+      for (const observation of observations) if (isChatObservation(observation)) receiveChatEvent(observation, false);
+      state.observations.unshift({ seq: frame.seq, space: frame.space, observations, message: frame.message });
       trimObservations();
       rememberSeq(frame.space, frame.seq);
       await refresh();
+      if (needsPinboardNotesRefresh) refreshPinboardNotes();
       animatePinboardNotes(pinboardAnimations);
     }
     if (frame.op === "event") {
@@ -385,7 +391,7 @@ function objectView(world: any, id: string | undefined) {
   if (!id) return null;
   const obj = world.objects?.[id];
   if (!obj) return null;
-  return { id, name: obj.name ?? id, props: obj.props ?? {} };
+  return { id, name: obj.name ?? id, owner: obj.owner, parent: obj.parent, location: obj.location, props: obj.props ?? {} };
 }
 
 function objectName(world: any, id: string) {
@@ -439,13 +445,57 @@ function buildPinboardMeta(world: any) {
 function projectPinboard(world: any, meta: any) {
   const board = objectView(world, meta.board);
   const props = board?.props ?? {};
+  const legacyNotes = Array.isArray(props.notes) && props.notes.length > 0 ? props.notes : undefined;
+  const notes = legacyNotes ?? pinboardNotesFromContents(world, meta.board, props.layout);
   return {
     board,
-    notes: Array.isArray(props.notes) ? props.notes : [],
+    notes: normalizePinboardNotes(notes, state.world?.pinboard?.notes),
     present: Array.isArray(props.subscribers) ? props.subscribers.map(String) : [],
     palette: Array.isArray(props.palette) ? props.palette.map(String) : ["yellow", "blue", "green", "pink", "white"],
     viewport: props.viewport && typeof props.viewport === "object" && !Array.isArray(props.viewport) ? props.viewport : { w: 960, h: 560 }
   };
+}
+
+function pinboardNotesFromContents(world: any, boardId: string | undefined, layoutValue: any) {
+  const contents = Array.isArray(world.objects?.[boardId ?? ""]?.contents) ? world.objects[boardId ?? ""].contents : [];
+  const layout = layoutValue && typeof layoutValue === "object" && !Array.isArray(layoutValue) ? layoutValue : {};
+  return contents.map((id: string) => {
+    const obj = world.objects?.[id] ?? {};
+    const props = obj.props ?? {};
+    const entry = layout[id] && typeof layout[id] === "object" && !Array.isArray(layout[id]) ? layout[id] : {};
+    return {
+      id,
+      name: obj.name ?? id,
+      text: props.text,
+      color: props.color,
+      writers: props.writers,
+      owner: obj.owner,
+      author: obj.owner,
+      x: entry.x,
+      y: entry.y,
+      w: entry.w,
+      h: entry.h,
+      z: entry.z
+    };
+  });
+}
+
+function normalizePinboardNotes(notes: any[], previousNotes: any[] = []) {
+  const previousById = new Map((Array.isArray(previousNotes) ? previousNotes : []).map((note) => [String(note?.id ?? ""), note]));
+  return (Array.isArray(notes) ? notes : []).map((note) => ({
+    ...note,
+    id: String(note?.id ?? "")
+  })).filter((note) => note.id).map((note) => {
+    const previous = previousById.get(note.id);
+    const hasText = note?.text !== undefined && note?.text !== null;
+    return {
+      ...note,
+      text: hasText ? pinNoteText(note?.text) : pinNoteText(previous?.text),
+      author: note?.author ?? note?.owner ?? previous?.author,
+      owner: note?.owner ?? note?.author ?? previous?.owner,
+      color: typeof note?.color === "string" ? note.color : typeof previous?.color === "string" ? previous.color : null
+    };
+  });
 }
 
 function buildChatMeta(world: any) {
@@ -606,6 +656,9 @@ function receiveLiveEvent(observation: any) {
   // opening/closing the tab is the chat-side analogue of mounting the board.
   if (isPinboardObservation(observation)) {
     const pinboardAnimations = capturePinboardAnimations([observation]);
+    const pinboardType = String(observation?.type ?? "");
+    const needsNoteRefresh = pinboardObservationNeedsNotesRefresh(pinboardType);
+    if (needsNoteRefresh) pinboardNotesRefreshPending = false;
     if (observation?.type === "pinboard_left") removePinboardViewport(String(observation?.actor ?? ""));
     if (String(observation?.actor ?? "") === state.actor) {
       if (observation?.type === "pinboard_entered" && state.tab !== "pinboard") {
@@ -618,7 +671,10 @@ function receiveLiveEvent(observation: any) {
       }
     }
     const refreshed = refresh();
-    void refreshed.then(() => animatePinboardNotes(pinboardAnimations));
+    void refreshed.then(() => {
+      if (needsNoteRefresh) refreshPinboardNotes();
+      animatePinboardNotes(pinboardAnimations);
+    });
   }
   if (isDubspaceObservation(observation)) {
     if (String(observation?.actor ?? "") === state.actor) {
@@ -1266,7 +1322,8 @@ function isChatObservation(observation: any) {
     "cockatoo_ungagged",
     "cockatoo_fed",
     "cockatoo_pluck",
-    "cockatoo_shake"
+    "cockatoo_shake",
+    "cockatoo_seen"
   ].includes(String(observation?.type ?? ""));
 }
 
@@ -1283,6 +1340,11 @@ function isPinboardObservation(observation: any) {
     "pinboard_entered",
     "pinboard_left",
     "pinboard_activity",
+    "pin_added",
+    "pin_removed",
+    "pin_moved",
+    "pin_resized",
+    "pin_recolored",
     "note_added",
     "note_moved",
     "note_resized",
@@ -1295,6 +1357,19 @@ function isPinboardObservation(observation: any) {
 
 function isPinboardViewportObservation(observation: any) {
   return String(observation?.type ?? "") === "pinboard_viewport";
+}
+
+function pinboardObservationNeedsNotesRefresh(type: string) {
+  return [
+    "pin_added",
+    "pin_removed",
+    "pin_recolored",
+    "note_added",
+    "note_edited",
+    "note_color_changed",
+    "note_deleted",
+    "notes_cleared"
+  ].includes(type);
 }
 
 function receivePinboardViewport(observation: any) {
@@ -1333,9 +1408,9 @@ function capturePinboardAnimations(observations: any[]): PinNoteAnimation[] {
   const animations = new Map<string, PinNoteAnimation>();
   for (const observation of observations) {
     const type = String(observation?.type ?? "");
-    if (type !== "note_moved" && type !== "note_resized") continue;
+    if (type !== "note_moved" && type !== "note_resized" && type !== "pin_moved" && type !== "pin_resized") continue;
     if (String(observation?.actor ?? "") === state.actor) continue;
-    const id = String(observation?.id ?? "");
+    const id = String(observation?.pin ?? observation?.id ?? "");
     if (!id || animations.has(id)) continue;
     const from = pinNoteBox(id);
     if (from) animations.set(id, { id, from });
@@ -1467,7 +1542,7 @@ function chatErrorText(error: any): string {
 
 function chatLineKind(observation: any): ChatLine["kind"] {
   const type = String(observation?.type ?? "");
-  if (type === "cockatoo_squawk" || type === "cockatoo_muffled" || type === "cockatoo_taught" || type === "cockatoo_gagged" || type === "cockatoo_ungagged" || type === "cockatoo_fed" || type === "cockatoo_pluck" || type === "cockatoo_shake") return "system";
+  if (type === "cockatoo_squawk" || type === "cockatoo_muffled" || type === "cockatoo_taught" || type === "cockatoo_gagged" || type === "cockatoo_ungagged" || type === "cockatoo_fed" || type === "cockatoo_pluck" || type === "cockatoo_shake" || type === "cockatoo_seen") return "system";
   if (type === "dubspace_activity" || type === "dubspace_entered" || type === "dubspace_left") return "system";
   if (type === "pinboard_activity" || type === "pinboard_entered" || type === "pinboard_left") return "system";
   return type as ChatLine["kind"];
@@ -1475,6 +1550,7 @@ function chatLineKind(observation: any): ChatLine["kind"] {
 
 function chatSystemText(observation: any): string | undefined {
   const type = String(observation?.type ?? "");
+  if (type === "cockatoo_seen") return `The cockatoo seems ${String(observation.mood ?? "alert")}.`;
   if (type === "cockatoo_taught") return `The cockatoo learned "${String(observation.phrase ?? "")}".`;
   if (type === "cockatoo_gagged") return "The cockatoo is gagged.";
   if (type === "cockatoo_ungagged") return "The cockatoo is ungagged.";
@@ -1721,7 +1797,13 @@ function refreshChatLook() {
 
 function applyLookResult(result: any) {
   const present = Array.isArray(result?.present_actors) ? result.present_actors.map(String) : [];
-  if (present.length > 0) state.chatPresent = present;
+  if (present.length === 0) return;
+  // `look pinboard` returns the board's own subscribers; clobbering chatPresent
+  // with them hides the chat UI for anyone not also inside the board, since
+  // renderChat treats !present.includes(state.actor) as "you must enter".
+  const lookedId = typeof result?.id === "string" ? result.id : "";
+  if (lookedId && lookedId !== chatRoom()) return;
+  state.chatPresent = present;
 }
 
 function actorLabel(id: string | undefined) {
@@ -1788,7 +1870,7 @@ function renderPinboardMap(notes: any[], present: string[], width: number, heigh
 function renderPinboardMapNotes(notes: any[], model: PinboardMapModel) {
   return notes.map((note: any) => {
     const id = String(note?.id ?? "");
-    const color = pinboardPalette(state.world?.pinboard?.palette).includes(String(note?.color)) ? String(note.color) : "yellow";
+    const color = pinNoteColor(note, state.world?.pinboard?.palette);
     return `<div class="pinboard-map-note pin-note-${escapeHtml(color)}" data-pinboard-map-note="${escapeHtml(id)}" style="${pinboardMapBoxStyle(pinNoteRecordBox(note), model)}"></div>`;
   }).join("");
 }
@@ -1915,22 +1997,54 @@ function renderPinNote(note: any, editable: boolean, palette: string[]) {
   const y = pinNoteNumber(note?.y, 40);
   const w = pinNoteNumber(note?.w, 180);
   const h = pinNoteNumber(note?.h, 110);
-  const z = pinNoteNumber(note?.z, 1);
-  const color = pinboardPalette(palette).includes(String(note?.color)) ? String(note.color) : "yellow";
-  const text = String(note?.text ?? "");
+  const serverZ = pinNoteNumber(note?.z, 1);
+  const clientZ = pinNoteClientZ.get(id) ?? 0;
+  const z = Math.max(serverZ, clientZ);
+  const color = pinNoteColor(note, palette);
+  const text = pinNoteText(note?.text);
   const meta = pinNoteMeta(note);
   const aria = [text || "Pinboard note", meta.replace(/\n/g, "; ")].filter(Boolean).join("; ");
+  const action = pinNoteAction(note, editable);
+  const writable = pinNoteWritable(note, editable);
   return `
     <article class="pin-note pin-note-${escapeHtml(color)}" data-pin-note="${escapeHtml(id)}" data-note-meta="${escapeHtml(meta)}" title="${escapeHtml(meta)}" aria-label="${escapeHtml(aria)}" data-x="${x}" data-y="${y}" data-w="${w}" data-h="${h}" style="left:${x}px; top:${y}px; width:${w}px; height:${h}px; z-index:${z}">
       <div class="pin-note-head">
         <button class="pin-note-drag" data-pin-note-drag ${editable ? "" : "disabled"} aria-label="Move note">::</button>
-        <select data-pin-note-color="${escapeHtml(id)}" ${editable ? "" : "disabled"}>${pinboardPalette(palette).map((item) => `<option value="${escapeHtml(item)}" ${item === color ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}</select>
-        <button data-pin-note-delete="${escapeHtml(id)}" ${editable ? "" : "disabled"} aria-label="Delete note">x</button>
+        <select data-pin-note-color="${escapeHtml(id)}" ${writable ? "" : "disabled"}>${pinboardPalette(palette).map((item) => `<option value="${escapeHtml(item)}" ${item === color ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}</select>
+        ${action ? `<button data-pin-note-action="${escapeHtml(action.verb)}" data-pin-note-id="${escapeHtml(id)}" aria-label="${escapeHtml(action.label)}">${escapeHtml(action.text)}</button>` : ""}
       </div>
-      <textarea data-pin-note-text="${escapeHtml(id)}" data-original="${escapeHtml(text)}" ${editable ? "" : "readonly"}>${escapeHtml(text)}</textarea>
+      <textarea data-pin-note-text="${escapeHtml(id)}" data-original="${escapeHtml(text)}" ${writable ? "" : "readonly"}>${escapeHtml(text)}</textarea>
       <button class="pin-note-resize" data-pin-note-resize ${editable ? "" : "disabled"} aria-label="Resize note"></button>
     </article>
   `;
+}
+
+function pinNoteWritable(note: any, editable: boolean): boolean {
+  if (!editable || !state.actor) return false;
+  const owner = typeof note?.owner === "string" ? note.owner : typeof note?.author === "string" ? note.author : "";
+  const writers = Array.isArray(note?.writers) ? note.writers.map(String) : [];
+  return owner === state.actor || writers.includes(state.actor);
+}
+
+function pinNoteAction(note: any, editable: boolean): { verb: "take" | "eject"; label: string; text: string } | null {
+  if (!editable || !state.actor) return null;
+  const owner = typeof note?.owner === "string" ? note.owner : typeof note?.author === "string" ? note.author : "";
+  const boardOwner = typeof state.world?.pinboard?.board?.owner === "string" ? state.world.pinboard.board.owner : "";
+  if (owner === state.actor) return { verb: "take", label: "Take note", text: "x" };
+  if (boardOwner === state.actor) return { verb: "eject", label: "Eject note", text: "x" };
+  return null;
+}
+
+function pinNoteText(value: any): string {
+  if (Array.isArray(value)) return value.map((line) => typeof line === "string" ? line : String(line ?? "")).join("\n");
+  return typeof value === "string" ? value : "";
+}
+
+function pinNoteColor(note: any, palette: any): string {
+  const colors = pinboardPalette(palette);
+  if (typeof note?.color === "string" && colors.includes(note.color)) return note.color;
+  if (note?.color == null) return "white";
+  return colors[0] ?? "white";
 }
 
 function pinNoteMeta(note: any): string {
@@ -1975,25 +2089,44 @@ function bindPinboard() {
       const text = input.value;
       if (!id || text === input.dataset.original) return;
       input.dataset.original = text;
-      pinboardCall("edit_note", [id, text]);
+      pinboardTargetCall(id, "set_text", [text.split(/\r?\n/)]);
     });
   });
   document.querySelectorAll<HTMLSelectElement>("[data-pin-note-color]").forEach((select) => {
     select.addEventListener("change", () => {
       const id = select.dataset.pinNoteColor ?? "";
-      if (id) pinboardCall("set_note_color", [id, select.value]);
+      if (id) pinboardTargetCall(id, "set_color", [select.value]);
     });
   });
-  document.querySelectorAll<HTMLButtonElement>("[data-pin-note-delete]").forEach((button) => {
+  document.querySelectorAll<HTMLButtonElement>("[data-pin-note-action]").forEach((button) => {
     button.addEventListener("click", () => {
-      const id = button.dataset.pinNoteDelete ?? "";
-      if (id) pinboardCall("delete_note", [id]);
+      const id = button.dataset.pinNoteId ?? "";
+      const verb = button.dataset.pinNoteAction === "eject" ? "eject" : "take";
+      if (id) pinboardCall(verb, [id]);
     });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-pin-note-drag]").forEach(bindPinNoteDrag);
   document.querySelectorAll<HTMLButtonElement>("[data-pin-note-resize]").forEach(bindPinNoteResize);
+  document.querySelectorAll<HTMLElement>("[data-pin-note]").forEach((note) => {
+    note.addEventListener("pointerdown", () => bringPinNoteToTop(note.dataset.pinNote ?? ""));
+  });
   bindPinboardMap();
   bindPinboardViewport();
+}
+
+function bringPinNoteToTop(id: string) {
+  if (!id) return;
+  const notes = Array.isArray(state.world?.pinboard?.notes) ? state.world.pinboard.notes : [];
+  let max = 0;
+  for (const n of notes) {
+    const z = pinNoteNumber(n?.z, 1);
+    if (z > max) max = z;
+  }
+  for (const z of pinNoteClientZ.values()) if (z > max) max = z;
+  const next = max + 1;
+  pinNoteClientZ.set(id, next);
+  const el = pinNoteElement(id);
+  if (el) el.style.zIndex = String(next);
 }
 
 function bindPinboardMap() {
@@ -2336,7 +2469,7 @@ function bindPinNoteDrag(handle: HTMLButtonElement) {
   handle.addEventListener("pointerup", () => {
     if (!active) return;
     active = false;
-    pinboardCall("move_note", [note.dataset.pinNote ?? "", pinNoteNumber(note.dataset.x, 0), pinNoteNumber(note.dataset.y, 0)]);
+    pinboardCall("move_pin", [note.dataset.pinNote ?? "", pinNoteNumber(note.dataset.x, 0), pinNoteNumber(note.dataset.y, 0)]);
   });
   handle.addEventListener("pointercancel", () => {
     active = false;
@@ -2373,7 +2506,7 @@ function bindPinNoteResize(handle: HTMLButtonElement) {
   handle.addEventListener("pointerup", () => {
     if (!active) return;
     active = false;
-    pinboardCall("resize_note", [note.dataset.pinNote ?? "", pinNoteNumber(note.dataset.w, 180), pinNoteNumber(note.dataset.h, 110)]);
+    pinboardCall("resize_pin", [note.dataset.pinNote ?? "", pinNoteNumber(note.dataset.w, 180), pinNoteNumber(note.dataset.h, 110)]);
   });
   handle.addEventListener("pointercancel", () => {
     active = false;
@@ -2385,6 +2518,7 @@ function enterPinboard() {
   if (!board || !canSendDirect()) return;
   direct(board, "enter", [], (result) => {
     setPinboardPresent(result);
+    refreshPinboardNotes();
     if (state.tab === "pinboard") render();
   });
 }
@@ -2421,6 +2555,28 @@ function setPinboardPresent(result: any) {
 function pinboardCall(verb: string, args: any[] = []) {
   const board = pinboardSpace();
   if (board) call(board, board, verb, args);
+}
+
+function pinboardTargetCall(target: string, verb: string, args: any[] = []) {
+  const board = pinboardSpace();
+  if (board && target) call(board, target, verb, args);
+}
+
+function refreshPinboardNotes() {
+  const board = pinboardSpace();
+  if (!board || !canSendDirect() || !state.world?.pinboard || pinboardNotesRefreshPending) return;
+  pinboardNotesRefreshPending = true;
+  window.setTimeout(() => {
+    pinboardNotesRefreshPending = false;
+  }, 2500);
+  direct(board, "list_notes", [], (result) => {
+    pinboardNotesRefreshPending = false;
+    if (!Array.isArray(result) || !state.world?.pinboard) return;
+    state.world.pinboard.notes = normalizePinboardNotes(result);
+    if (state.tab === "pinboard") render();
+  }, () => {
+    pinboardNotesRefreshPending = false;
+  });
 }
 
 function pinNoteNumber(value: any, fallback: number) {

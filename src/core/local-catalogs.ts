@@ -1,6 +1,6 @@
 import { BUNDLED_CATALOGS } from "../generated/bundled-catalogs";
 import { installCatalogManifest, repairCatalogManifest, type CatalogManifest } from "./catalog-installer";
-import type { WooValue } from "./types";
+import type { ObjRef, WooValue } from "./types";
 import type { WooWorld } from "./world";
 
 export type LocalCatalogName = string;
@@ -28,6 +28,8 @@ const LOCAL_CATALOG_PINBOARD_VIEWPORT_PRESENCE_MIGRATION = "2026-05-01-pinboard-
 const LOCAL_CATALOG_PINBOARD_FREE_COORDS_MIGRATION = "2026-05-01-pinboard-free-coordinates";
 const LOCAL_CATALOG_DUBSPACE_SOURCE_PRESENCE_MIGRATION = "2026-05-01-dubspace-source-presence";
 const LOCAL_CATALOG_PINBOARD_SOURCE_PRESENCE_MIGRATION = "2026-05-01-pinboard-source-presence";
+const LOCAL_CATALOG_PINBOARD_PINS_MODEL_MIGRATION = "2026-05-02-pinboard-pins-model";
+const LOCAL_CATALOG_PINBOARD_NOTES_TO_PINS_MIGRATION = "2026-05-02-pinboard-notes-to-pins";
 const LOCAL_CATALOG_CHAT_SOURCE_MOVEMENT_MIGRATION = "2026-05-01-chat-source-movement";
 const LOCAL_CATALOG_CHAT_ROOM_EXIT_MODEL_MIGRATION = "2026-05-02-chat-room-exit-model";
 const LOCAL_CATALOG_CHAT_EXIT_PRIVILEGE_REPAIR_MIGRATION = "2026-05-02-chat-exit-privilege-repair";
@@ -96,6 +98,8 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): v
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_PINBOARD_FREE_COORDS_MIGRATION, { allowImplementationHints: true, only: "pinboard" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_DUBSPACE_SOURCE_PRESENCE_MIGRATION, { allowImplementationHints: true, only: "dubspace" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_PINBOARD_SOURCE_PRESENCE_MIGRATION, { allowImplementationHints: true, only: "pinboard" });
+  runLocalCatalogMigration(world, names, LOCAL_CATALOG_PINBOARD_PINS_MODEL_MIGRATION, { allowImplementationHints: true, reconcileSeedHooks: true, only: "pinboard" });
+  runPinboardNotesToPinsMigration(world, names);
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_SOURCE_MOVEMENT_MIGRATION, { allowImplementationHints: true, only: "chat" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_ROOM_EXIT_MODEL_MIGRATION, { allowImplementationHints: true, reconcileSeedHooks: true, only: "chat" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_EXIT_PRIVILEGE_REPAIR_MIGRATION, { allowImplementationHints: true, only: "chat" });
@@ -139,7 +143,7 @@ function sortCatalogNames(names: readonly string[]): string[] {
     visiting.add(name);
     for (const dependency of manifest.depends ?? []) {
       const dependencyName = localDependencyName(dependency);
-      if (selected.has(dependencyName)) visit(dependencyName);
+      if (LOCAL_CATALOGS.has(dependencyName)) visit(dependencyName);
     }
     visiting.delete(name);
     visited.add(name);
@@ -175,4 +179,87 @@ function markMigrationApplied(world: WooWorld, id: string): void {
   const raw = world.propOrNull("$system", "applied_migrations");
   const migrations = Array.isArray(raw) ? raw.map(String) : [];
   if (!migrations.includes(id)) world.setProp("$system", "applied_migrations", [...migrations, id]);
+}
+
+function runPinboardNotesToPinsMigration(world: WooWorld, names: readonly string[]): void {
+  if (!names.includes("pinboard")) return;
+  if (!localCatalogInstalled(world, "pinboard")) return;
+  if (migrationApplied(world, LOCAL_CATALOG_PINBOARD_NOTES_TO_PINS_MIGRATION)) return;
+  if (!world.objects.has("$pin") || !world.objects.has("$pinboard")) return;
+  world.withMutationSavepoint(() => {
+    migratePinboardNoteRecords(world);
+    markMigrationApplied(world, LOCAL_CATALOG_PINBOARD_NOTES_TO_PINS_MIGRATION);
+  });
+}
+
+function migratePinboardNoteRecords(world: WooWorld): void {
+  for (const board of pinboardInstances(world)) {
+    const rawNotes = world.propOrNull(board, "notes");
+    const staleRecords = Array.isArray(rawNotes) ? rawNotes : [];
+    let layout = mapValue(world.propOrNull(board, "layout"));
+    let nextZ = numberValue(world.propOrNull(board, "next_z"), 1);
+    let index = 0;
+    for (const raw of staleRecords) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const record = raw as Record<string, WooValue>;
+      const owner = pinOwner(world, board, record.author);
+      const pin = world.createRuntimeObject("$pin", owner, board, {
+        progr: "$wiz",
+        location: board,
+        name: "sticky note",
+        description: `A sticky note pinned to ${world.object(board).name}.`
+      });
+      const lines = noteTextLines(record.text);
+      world.setProp(pin, "text", lines);
+      world.setProp(pin, "color", typeof record.color === "string" ? record.color : null);
+      const z = numberValue(record.z, nextZ);
+      layout = {
+        ...layout,
+        [pin]: {
+          x: numberValue(record.x, 48 + index * 32),
+          y: numberValue(record.y, 48 + index * 26),
+          w: numberValue(record.w, 180),
+          h: numberValue(record.h, 110),
+          z
+        }
+      };
+      nextZ = Math.max(nextZ, z + 1);
+      index += 1;
+    }
+    world.setProp(board, "layout", layout);
+    world.deleteProp(board, "notes");
+    world.deleteProp(board, "next_note_id");
+    world.setProp(board, "next_z", nextZ);
+  }
+}
+
+function pinboardInstances(world: WooWorld): ObjRef[] {
+  const boards: ObjRef[] = [];
+  // The bundled migration is a one-time boot repair; a full scan avoids adding
+  // catalog-specific instance indexes to the runtime.
+  for (const id of world.objects.keys()) {
+    if (id.startsWith("$")) continue;
+    if (world.isDescendantOf(id, "$pinboard")) boards.push(id);
+  }
+  return boards.sort();
+}
+
+function pinOwner(world: WooWorld, board: ObjRef, value: WooValue | undefined): ObjRef {
+  if (typeof value === "string" && world.objects.has(value)) return value;
+  const owner = world.object(board).owner;
+  return world.objects.has(owner) ? owner : "$wiz";
+}
+
+function noteTextLines(value: WooValue | undefined): string[] {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  if (typeof value === "string") return value.split(/\r?\n/);
+  return [];
+}
+
+function mapValue(value: WooValue): Record<string, WooValue> {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, WooValue>) } : {};
+}
+
+function numberValue(value: WooValue | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }

@@ -412,11 +412,16 @@ describe("local catalogs", () => {
     expect(world.getProp("the_dubspace", "operators")).toEqual([]);
   });
 
-  it("installs pinboard from source and keeps notes as board-local records", async () => {
+  it("installs pinboard from source and keeps notes as board-contained pin objects", async () => {
     const world = createWorld({ catalogs: false });
     installCatalogManifest(world, readManifest("chat") as unknown as RuntimeCatalogManifest, {
       tap: "github:hugh/woo",
       alias: "chat",
+      allowImplementationHints: false
+    });
+    installCatalogManifest(world, readManifest("note") as unknown as RuntimeCatalogManifest, {
+      tap: "github:hugh/woo",
+      alias: "note",
       allowImplementationHints: false
     });
     installCatalogManifest(world, readManifest("pinboard") as unknown as RuntimeCatalogManifest, {
@@ -425,15 +430,20 @@ describe("local catalogs", () => {
       allowImplementationHints: false
     });
 
+    expect(world.object("$pin").parent).toBe("$note");
+    expect(world.propOrNull("$pinboard", "notes")).toBeNull();
+    expect(world.propOrNull("$pinboard", "layout")).toEqual({});
     expect(world.ownVerb("$pinboard", "add_note")?.kind).toBe("bytecode");
     expect(world.ownVerb("$pinboard", "enter")?.kind).toBe("bytecode");
     expect(world.object("the_pinboard").location).toBe("the_deck");
     expect(world.object("the_deck").contents.has("the_pinboard")).toBe(true);
 
     const session = world.auth("guest:catalog-pinboard");
+    const other = world.auth("guest:catalog-pinboard-other");
     const entered = await world.directCall("pinboard-enter", session.actor, "the_pinboard", "enter", []);
     expect(entered.op).toBe("result");
     expect(world.hasPresence(session.actor, "the_pinboard")).toBe(true);
+    await world.directCall("pinboard-enter-other", other.actor, "the_pinboard", "enter", []);
 
     const added = await world.call("pinboard-add", session.id, "the_pinboard", {
       actor: session.actor,
@@ -443,43 +453,85 @@ describe("local catalogs", () => {
     });
     expect(added.op).toBe("applied");
     if (added.op !== "applied") return;
-    expect(added.observations.map((obs) => obs.type)).toEqual(["note_added", "pinboard_activity"]);
+    expect(added.observations.map((obs) => obs.type)).toEqual(["pin_added", "pinboard_activity", "note_edited", "pin_recolored", "note_added"]);
     const note = added.observations.find((obs) => obs.type === "note_added")?.note as Record<string, unknown>;
-    expect(note).toMatchObject({ id: "n1", color: "blue", x: 12, y: 24, w: 160, h: 88 });
-    expect(world.getProp("the_pinboard", "notes")).toHaveLength(1);
-    expect([...world.objects.keys()].filter((id) => id.includes("note"))).not.toContain("n1");
+    expect(note).toMatchObject({ text: "Bring the towel to the hot tub", color: "blue", x: 12, y: 24, w: 160, h: 88 });
+    const pin = String(note.id);
+    expect(pin).toMatch(/^obj_/);
+    expect(world.object(pin).parent).toBe("$pin");
+    expect(world.object(pin).owner).toBe(session.actor);
+    expect(world.object(pin).location).toBe("the_pinboard");
+    expect(world.object("the_pinboard").contents.has(pin)).toBe(true);
+    expect(world.getProp(pin, "text")).toEqual(["Bring the towel to the hot tub"]);
+    expect(world.getProp(pin, "color")).toBe("blue");
+    expect(world.propOrNull("the_pinboard", "notes")).toBeNull();
+    expect(world.getProp("the_pinboard", "layout")).toMatchObject({ [pin]: { x: 12, y: 24, w: 160, h: 88 } });
 
-    const addedAgain = await world.call("pinboard-add-2", session.id, "the_pinboard", {
-      actor: session.actor,
-      target: "the_pinboard",
-      verb: "add_note",
-      args: ["Bring the mug too", "yellow", 48, 50, 160, 88]
+    const listed = await world.directCall("pinboard-list", session.actor, "the_pinboard", "list_notes", []);
+    expect(listed.op).toBe("result");
+    if (listed.op === "result") {
+      expect(listed.result).toEqual([expect.objectContaining({ id: pin, text: ["Bring the towel to the hot tub"], color: "blue", owner: session.actor })]);
+    }
+
+    await world.call("pinboard-take", session.id, "the_pinboard", { actor: session.actor, target: "the_pinboard", verb: "take", args: [pin] });
+    expect(world.object(pin).location).toBe(session.actor);
+    expect(world.object("the_pinboard").contents.has(pin)).toBe(false);
+    expect(world.getProp("the_pinboard", "layout")).not.toHaveProperty(pin);
+
+    await world.call("pinboard-post", session.id, "the_pinboard", { actor: session.actor, target: "the_pinboard", verb: "post", args: [pin] });
+    expect(world.object(pin).location).toBe("the_pinboard");
+    expect(world.getProp("the_pinboard", "layout")).toHaveProperty(pin);
+
+    const deniedTake = await world.call("pinboard-take-denied", other.id, "the_pinboard", { actor: other.actor, target: "the_pinboard", verb: "take", args: [pin] });
+    expect(deniedTake.op).toBe("applied");
+    if (deniedTake.op === "applied") expect(deniedTake.observations.find((obs) => obs.type === "$error")?.code).toBe("E_PERM");
+
+    const deniedEject = await world.call("pinboard-eject-denied", other.id, "the_pinboard", { actor: other.actor, target: "the_pinboard", verb: "eject", args: [pin] });
+    expect(deniedEject.op).toBe("applied");
+    if (deniedEject.op === "applied") expect(deniedEject.observations.find((obs) => obs.type === "$error")?.code).toBe("E_PERM");
+
+    await world.call("pinboard-move", session.id, "the_pinboard", { actor: session.actor, target: "the_pinboard", verb: "move_pin", args: [pin, 80, 96] });
+    await world.call("pinboard-edit", session.id, "the_pinboard", { actor: session.actor, target: pin, verb: "set_text", args: [["Towel is ready"]] });
+    await world.call("pinboard-color", session.id, "the_pinboard", { actor: session.actor, target: pin, verb: "set_color", args: ["green"] });
+    expect(world.getProp(pin, "text")).toEqual(["Towel is ready"]);
+    expect(world.getProp(pin, "color")).toBe("green");
+    const clearedColor = await world.call("pinboard-color-white", session.id, "the_pinboard", { actor: session.actor, target: pin, verb: "set_color", args: ["white"] });
+    expect(clearedColor.op).toBe("applied");
+    if (clearedColor.op === "applied") expect(clearedColor.observations.find((obs) => obs.type === "pin_recolored")?.color).toBeNull();
+    expect(world.getProp(pin, "color")).toBeNull();
+    expect(world.getProp("the_pinboard", "layout")).toMatchObject({ [pin]: { x: 80, y: 96 } });
+  });
+
+  it("migrates v0.1 pinboard note records into pin objects", () => {
+    const world = createWorld();
+    const session = world.auth("guest:pinboard-migration");
+    const migrations = (world.getProp("$system", "applied_migrations") as string[]).filter((id) => id !== "2026-05-02-pinboard-notes-to-pins");
+    world.setProp("$system", "applied_migrations", migrations);
+    world.setProp("the_pinboard", "layout", {});
+    world.setProp("the_pinboard", "notes", [
+      { id: "n1", text: "Alpha\nBeta", color: "pink", x: -20, y: 30, w: 220, h: 120, z: 4, author: session.actor },
+      { id: "n2", text: "Missing author", color: null, x: 60, y: 80, w: 180, h: 110, z: 5, author: "recycled_guest" }
+    ]);
+    world.setProp("the_pinboard", "next_note_id", 3);
+
+    installLocalCatalogs(world, ["pinboard"]);
+
+    const pins = Array.from(world.object("the_pinboard").contents).filter((id) => world.isDescendantOf(id, "$pin")).sort();
+    expect(pins).toHaveLength(2);
+    expect(world.object(pins[0]).owner).toBe(session.actor);
+    expect(world.object(pins[1]).owner).toBe(world.object("the_pinboard").owner);
+    expect(world.getProp(pins[0], "text")).toEqual(["Alpha", "Beta"]);
+    expect(world.getProp(pins[1], "text")).toEqual(["Missing author"]);
+    expect(world.getProp(pins[0], "color")).toBe("pink");
+    expect(world.getProp(pins[1], "color")).toBeNull();
+    expect(world.getProp("the_pinboard", "layout")).toMatchObject({
+      [pins[0]]: { x: -20, y: 30, w: 220, h: 120, z: 4 },
+      [pins[1]]: { x: 60, y: 80, w: 180, h: 110, z: 5 }
     });
-    expect(addedAgain.op).toBe("applied");
-    const appendedNotes = world.getProp("the_pinboard", "notes") as Record<string, unknown>[];
-    expect(appendedNotes).toHaveLength(2);
-    expect(appendedNotes.map((item) => item.id)).toEqual(["n1", "n2"]);
-    expect(appendedNotes[0]).toMatchObject({ text: "Bring the towel to the hot tub", color: "blue" });
-    expect(appendedNotes[1]).toMatchObject({ text: "Bring the mug too", color: "yellow" });
-
-    await world.call("pinboard-add-defaults", session.id, "the_pinboard", {
-      actor: session.actor,
-      target: "the_pinboard",
-      verb: "add_note",
-      args: ["Default-position note", "green"]
-    });
-    const defaultedNotes = world.getProp("the_pinboard", "notes") as Record<string, unknown>[];
-    expect(defaultedNotes).toHaveLength(3);
-    expect(defaultedNotes.map((item) => item.id)).toEqual(["n1", "n2", "n3"]);
-    expect(defaultedNotes[2]).toMatchObject({ text: "Default-position note", color: "green", x: 112, y: 100 });
-
-    await world.call("pinboard-move", session.id, "the_pinboard", { actor: session.actor, target: "the_pinboard", verb: "move_note", args: ["n1", 80, 96] });
-    await world.call("pinboard-edit", session.id, "the_pinboard", { actor: session.actor, target: "the_pinboard", verb: "edit_note", args: ["n1", "Towel is ready"] });
-    const notes = world.getProp("the_pinboard", "notes") as Record<string, unknown>[];
-    expect(notes).toHaveLength(3);
-    expect(notes[0]).toMatchObject({ id: "n1", text: "Towel is ready", x: 80, y: 96, updated_by: session.actor });
-    expect(notes[1]).toMatchObject({ id: "n2", text: "Bring the mug too" });
-    expect(notes[2]).toMatchObject({ id: "n3", text: "Default-position note" });
+    expect(world.propOrNull("the_pinboard", "notes")).toBeNull();
+    expect(world.propOrNull("the_pinboard", "next_note_id")).toBeNull();
+    expect(world.getProp("the_pinboard", "next_z")).toBeGreaterThanOrEqual(6);
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-pinboard-notes-to-pins");
   });
 
   it("seeds the_cockatoo in the chatroom with random-pick squawk", async () => {
