@@ -16,6 +16,7 @@ type AppState = {
   chatPresent: string[];
   chatDraft: string;
   observations: any[];
+  observationsCollapsed: boolean;
   selectedObject: string;
   selectedTask?: string;
   taskExpanded: Record<string, boolean>;
@@ -87,6 +88,7 @@ const state: AppState = {
   chatPresent: [],
   chatDraft: "",
   observations: [],
+  observationsCollapsed: true,
   selectedObject: "",
   taskExpanded: {},
   taskStatusFilter: { open: true, claimed: true, in_progress: true, blocked: true, done: false },
@@ -123,6 +125,7 @@ const PINBOARD_ZOOM_STEP = 1.2;
 const PINBOARD_GRID_SIZE = 24;
 const PINBOARD_VIEW_ANIMATION_MS = 480;
 const PINBOARD_VIEWPORT_MIN_MS = 110;
+const PINBOARD_MAP_DEFAULT_ASPECT = 0.42;
 let reconnectDelayMs = reconnectBaseDelayMs;
 let reconnectTimer: number | undefined;
 let heartbeatTimer: number | undefined;
@@ -134,7 +137,10 @@ let lastPinboardViewportSent: PinNoteBox & { scale: number } | undefined;
 
 connect();
 window.setInterval(pruneLiveControls, 700);
-window.addEventListener("resize", () => schedulePinboardViewportPublish());
+window.addEventListener("resize", () => {
+  schedulePinboardViewportPublish();
+  window.requestAnimationFrame(updatePinboardMapViewports);
+});
 
 function connect() {
   if (state.socket?.readyState === WebSocket.OPEN || state.socket?.readyState === WebSocket.CONNECTING) return;
@@ -722,7 +728,7 @@ function render() {
   const focus = captureRenderFocus();
   const app = document.querySelector<HTMLDivElement>("#app")!;
   app.innerHTML = `
-    <div class="shell">
+    <div class="shell ${state.observationsCollapsed ? "observations-collapsed" : ""}">
       <aside class="nav">
         <div class="brand">Woo</div>
         <div class="actor">${escapeHtml(state.actor ?? "connecting...")}</div>
@@ -742,12 +748,7 @@ function render() {
         ${state.tab === "chat" ? renderChat() : ""}
         ${state.tab === "ide" ? renderIde() : ""}
       </main>
-      <aside class="events">
-        <h2>Observations</h2>
-        <div class="event-list">
-          ${state.observations.map((item) => `<pre>${escapeHtml(JSON.stringify(item, null, 2))}</pre>`).join("") || "<p>No observations yet.</p>"}
-        </div>
-      </aside>
+      ${renderObservationsPanel()}
     </div>
   `;
 
@@ -824,6 +825,23 @@ function navButton(tab: AppState["tab"], label: string) {
   return `<button class="nav-button ${state.tab === tab ? "active" : ""}" data-tab="${tab}">${label}</button>`;
 }
 
+function renderObservationsPanel() {
+  const collapsed = state.observationsCollapsed;
+  return `
+    <aside class="events ${collapsed ? "collapsed" : ""}">
+      <div class="events-header">
+        <h2>${collapsed ? "Obs" : "Observations"}</h2>
+        <button class="events-toggle" data-observations-toggle aria-expanded="${collapsed ? "false" : "true"}" aria-label="${collapsed ? "Show observations" : "Hide observations"}" title="${collapsed ? "Show observations" : "Hide observations"}">${collapsed ? ">" : "<"}</button>
+      </div>
+      ${collapsed ? "" : `
+        <div class="event-list">
+          ${state.observations.map((item) => `<pre>${escapeHtml(JSON.stringify(item, null, 2))}</pre>`).join("") || "<p>No observations yet.</p>"}
+        </div>
+      `}
+    </aside>
+  `;
+}
+
 function bindCommon() {
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -835,6 +853,10 @@ function bindCommon() {
       if (next === "dubspace") enterDubspace();
       if (next === "pinboard") enterPinboard();
     });
+  });
+  document.querySelector<HTMLButtonElement>("[data-observations-toggle]")?.addEventListener("click", () => {
+    state.observationsCollapsed = !state.observationsCollapsed;
+    render();
   });
 }
 
@@ -1720,8 +1742,8 @@ function renderPinboardMap(notes: any[], present: string[], width: number, heigh
     <div class="pinboard-map" data-pinboard-map data-min-x="${roundCss(model.minX)}" data-min-y="${roundCss(model.minY)}" data-span-x="${roundCss(model.spanX)}" data-span-y="${roundCss(model.spanY)}" aria-label="Pinboard overview">
       ${renderPinboardMapNotes(notes, model)}
       ${renderPinboardMapViewports(present, model, width, height)}
+      ${present.length === 0 ? `<p class="pinboard-map-empty">No one is here.</p>` : ""}
     </div>
-    ${present.length === 0 ? `<p class="pinboard-map-empty">No one is here.</p>` : ""}
   `;
 }
 
@@ -1761,7 +1783,7 @@ function pinboardMapBoxPercent(box: PinNoteBox, model: PinboardMapModel) {
   };
 }
 
-function pinboardMapModel(notes: any[], present: string[], width: number, height: number): PinboardMapModel {
+function pinboardMapModel(notes: any[], present: string[], width: number, height: number, renderedAspect = pinboardRenderedMapAspect()): PinboardMapModel {
   const boxes: PinNoteBox[] = notes.map(pinNoteRecordBox);
   boxes.push(...pinboardMapViewports(present, width, height));
   if (boxes.length === 0) boxes.push({ x: 0, y: 0, w: width, h: height });
@@ -1770,14 +1792,34 @@ function pinboardMapModel(notes: any[], present: string[], width: number, height
   const maxX = Math.max(...boxes.map((box) => box.x + box.w));
   const maxY = Math.max(...boxes.map((box) => box.y + box.h));
   const padding = Math.max(80, Math.min(240, Math.max(maxX - minX, maxY - minY) * 0.12));
-  const paddedMinX = minX - padding;
-  const paddedMinY = minY - padding;
+  let spanX = Math.max(1, maxX - minX + padding * 2);
+  let spanY = Math.max(1, maxY - minY + padding * 2);
+  let paddedMinX = minX - padding;
+  let paddedMinY = minY - padding;
+  const aspect = Math.max(0.05, pinNoteNumber(renderedAspect, PINBOARD_MAP_DEFAULT_ASPECT));
+  const modelAspect = spanX / spanY;
+  if (modelAspect < aspect) {
+    const nextSpanX = spanY * aspect;
+    paddedMinX -= (nextSpanX - spanX) / 2;
+    spanX = nextSpanX;
+  } else if (modelAspect > aspect) {
+    const nextSpanY = spanX / aspect;
+    paddedMinY -= (nextSpanY - spanY) / 2;
+    spanY = nextSpanY;
+  }
   return {
     minX: paddedMinX,
     minY: paddedMinY,
-    spanX: Math.max(1, maxX - minX + padding * 2),
-    spanY: Math.max(1, maxY - minY + padding * 2)
+    spanX,
+    spanY
   };
+}
+
+function pinboardRenderedMapAspect(map: HTMLElement | null = document.querySelector<HTMLElement>("[data-pinboard-map]")) {
+  if (!map) return PINBOARD_MAP_DEFAULT_ASPECT;
+  const rect = map.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return PINBOARD_MAP_DEFAULT_ASPECT;
+  return rect.width / rect.height;
 }
 
 function pinboardMapViewports(present: string[], width: number, height: number): PinboardViewportPresence[] {
@@ -1917,7 +1959,8 @@ function bindPinboard() {
 }
 
 function bindPinboardMap() {
-  document.querySelector<HTMLElement>("[data-pinboard-map]")?.addEventListener("click", (event) => {
+  const mapElement = document.querySelector<HTMLElement>("[data-pinboard-map]");
+  mapElement?.addEventListener("click", (event) => {
     const map = event.currentTarget as HTMLElement;
     const rect = map.getBoundingClientRect();
     const spanX = pinNoteNumber(map.dataset.spanX, 1);
@@ -1928,6 +1971,7 @@ function bindPinboardMap() {
     const y = minY + ((event.clientY - rect.top) / Math.max(1, rect.height)) * spanY;
     centerPinboardOn(x, y);
   });
+  if (mapElement) window.requestAnimationFrame(updatePinboardMapViewports);
 }
 
 function newPinNotePlacement(): PinNoteBox {
@@ -1957,7 +2001,7 @@ function updatePinboardMapViewports() {
   const map = document.querySelector<HTMLElement>("[data-pinboard-map]");
   const data = pinboardMapData();
   if (!map || !data) return;
-  const model = pinboardMapModel(data.notes, data.present, data.width, data.height);
+  const model = pinboardMapModel(data.notes, data.present, data.width, data.height, pinboardRenderedMapAspect(map));
   setPinboardMapData(map, model);
   document.querySelectorAll<HTMLElement>("[data-pinboard-map-note]").forEach((note) => {
     const id = note.dataset.pinboardMapNote ?? "";

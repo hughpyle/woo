@@ -51,7 +51,7 @@ import { signInternalRequest, verifyInternalRequest } from "./internal-auth";
 
 // Re-import WooWorld type. Note `import type` must reach the world module
 // without dragging Node-only deps into the Worker bundle.
-import type { CallContext, DeferredHostEffect, HostBridge, HostOperationMemo, MoveObjectResult, WooWorld } from "../core/world";
+import type { CallContext, DeferredHostEffect, HostBridge, HostObjectSummary, HostOperationMemo, MoveObjectResult, WooWorld } from "../core/world";
 
 export interface Env {
   WOO: DurableObjectNamespace;
@@ -428,6 +428,46 @@ export class PersistentObjectDO {
         if (memo) return await memoizeHostOperation(memo.reads, `describe:${nameActor}:${readActor}:${objRef}`, read);
         return await read();
       },
+      describeObjects: async (nameActor, readActor, objRefs, memo) => {
+        const out: Record<ObjRef, HostObjectSummary> = {};
+        const missingByHost = new Map<string, ObjRef[]>();
+        for (const objRef of objRefs) {
+          const key = `describe:${nameActor}:${readActor}:${objRef}`;
+          const cached = memo?.reads.get(key) as Promise<HostObjectSummary> | undefined;
+          if (cached) {
+            out[objRef] = await cached;
+            continue;
+          }
+          const host = await hostForObject(objRef, memo);
+          if (!host || host === localHost) {
+            const summary = {
+              name: world.object(objRef).name,
+              description: world.propOrNullForActor(readActor, objRef, "description"),
+              aliases: world.propOrNullForActor(readActor, objRef, "aliases")
+            };
+            out[objRef] = summary;
+            if (memo) memo.reads.set(key, Promise.resolve(summary));
+            continue;
+          }
+          const list = missingByHost.get(host) ?? [];
+          list.push(objRef);
+          missingByHost.set(host, list);
+        }
+        await Promise.all(Array.from(missingByHost, async ([host, ids]) => {
+          const response = await this.forwardInternalChecked<{ objects: Record<ObjRef, HostObjectSummary> }>(
+            host,
+            "/__internal/remote-describe-many",
+            { name_actor: nameActor, read_actor: readActor, ids }
+          );
+          for (const id of ids) {
+            const summary = response.objects?.[id];
+            if (!summary) continue;
+            out[id] = summary;
+            if (memo) memo.reads.set(`describe:${nameActor}:${readActor}:${id}`, Promise.resolve(summary));
+          }
+        }));
+        return out;
+      },
       resolveVerb: async (target, verbName, memo) => {
         const read = async () => {
           const host = await hostForObject(target, memo);
@@ -591,10 +631,10 @@ export class PersistentObjectDO {
   }
 
   // Sample high-rate metric kinds so a noisy gateway doesn't blow up the log
-  // pipeline. `applied` and `compose_look` already have natural 1-per-call
-  // bounds; `broadcast` and `cross_host_rpc` can fire many times per call so
-  // we cap each kind at SAMPLE_BUDGET per SAMPLE_WINDOW_MS and emit a
-  // periodic dropped-count summary.
+  // pipeline. `applied`, `direct_call`, and `compose_look` already have
+  // natural 1-per-call bounds; `broadcast` and `cross_host_rpc` can fire many
+  // times per call so we cap each kind at SAMPLE_BUDGET per SAMPLE_WINDOW_MS
+  // and emit a periodic dropped-count summary.
   private emitMetric(event: MetricEvent, hostKey: string): void {
     if (event.kind === "broadcast" || event.kind === "cross_host_rpc") {
       const counter = this.metricSampleCounters[event.kind];
@@ -855,6 +895,25 @@ export class PersistentObjectDO {
           description: world.propOrNullForActor(readActor, obj, "description"),
           aliases: world.propOrNullForActor(readActor, obj, "aliases")
         });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/remote-describe-many") {
+        const readActor = String(body.read_actor ?? "") as ObjRef;
+        const ids = Array.isArray(body.ids) ? body.ids.filter((item): item is ObjRef => typeof item === "string") : [];
+        const objects: Record<ObjRef, HostObjectSummary> = {};
+        for (const obj of ids) {
+          try {
+            objects[obj] = {
+              name: world.object(obj).name,
+              description: world.propOrNullForActor(readActor, obj, "description"),
+              aliases: world.propOrNullForActor(readActor, obj, "aliases")
+            };
+          } catch {
+            // A stale route should not poison the whole batch; callers can
+            // fall back to id-only matching/rendering for missing entries.
+          }
+        }
+        return jsonResponse({ objects });
       }
 
       if (request.method === "POST" && pathname === "/__internal/remote-resolve-verb") {

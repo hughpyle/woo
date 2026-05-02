@@ -3,7 +3,7 @@ import { compileVerb, definePropertyVersioned, definePropertyVersionedAs, instal
 import { bootstrap, createWorld, createWorldFromSerialized, mergeHostScopedSeed, nonEmptyHostScopedWorld, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
 import type { CallContext, HostBridge, HostObjectSummary, HostOperationMemo, MoveObjectResult, WooWorld } from "../src/core/world";
-import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
+import type { Message, MetricEvent, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
 
 function message(actor: string, target: string, verb: string, args: unknown[] = []): Message {
   return { actor, target, verb, args: args as any[] };
@@ -58,6 +58,7 @@ function bytecodeVerb(name: string, bytecode: TinyBytecode, owner = "$wiz", perm
 class LocalHostBridge implements HostBridge {
   readonly getPropCalls = new Map<string, number>();
   readonly describeCalls = new Map<string, number>();
+  readonly describeManyCalls: ObjRef[][] = [];
 
   constructor(
     readonly localHost: string,
@@ -92,6 +93,24 @@ class LocalHostBridge implements HostBridge {
     };
     if (!memo) return await read();
     return await memoizeTestOperation(memo.reads, key, read);
+  }
+
+  async describeObjects(nameActor: ObjRef, readActor: ObjRef, objRefs: ObjRef[], memo?: HostOperationMemo): Promise<Record<ObjRef, HostObjectSummary>> {
+    this.describeManyCalls.push([...objRefs]);
+    const out: Record<ObjRef, HostObjectSummary> = {};
+    for (const objRef of objRefs) {
+      const key = `describe:${nameActor}:${readActor}:${objRef}`;
+      const read = async () => {
+        const world = this.worldFor(objRef);
+        return {
+          name: world.object(objRef).name,
+          description: world.propOrNullForActor(readActor, objRef, "description"),
+          aliases: world.propOrNullForActor(readActor, objRef, "aliases")
+        };
+      };
+      out[objRef] = memo ? await memoizeTestOperation(memo.reads, key, read) : await read();
+    }
+    return out;
   }
 
   async location(objRef: ObjRef): Promise<ObjRef | null> {
@@ -425,21 +444,27 @@ describe("woo core", () => {
     expect(bridge.getPropCalls.get(`prop:${actor}:remote_box:value`)).toBe(1);
   });
 
-  it("bundles remote look descriptions into one host read per object", async () => {
+  it("batches remote look descriptions into one host read per host", async () => {
     const { world: home, actor } = authedWorld();
     const remote = createWorld({ catalogs: false });
     const worlds = new Map<string, WooWorld>([
       ["home", home],
       ["remote", remote]
     ]);
-    const routes = new Map<ObjRef, string>([["remote_lamp", "remote"]]);
+    const routes = new Map<ObjRef, string>([
+      ["remote_lamp", "remote"],
+      ["remote_mug", "remote"]
+    ]);
     const bridge = new LocalHostBridge("home", worlds, routes);
     home.setHostBridge(bridge);
     remote.setHostBridge(new LocalHostBridge("remote", worlds, routes));
 
     remote.createObject({ id: "remote_lamp", name: "Remote Lamp", parent: "$thing", owner: "$wiz" });
     remote.setProp("remote_lamp", "description", "A lamp hosted on a different object host.");
+    remote.createObject({ id: "remote_mug", name: "Remote Mug", parent: "$thing", owner: "$wiz" });
+    remote.setProp("remote_mug", "description", "A mug hosted beside the lamp.");
     home.object("the_chatroom").contents.add("remote_lamp");
+    home.object("the_chatroom").contents.add("remote_mug");
 
     const entered = await home.directCall(undefined, actor, "the_chatroom", "enter", []);
     expect(entered.op).toBe("result");
@@ -451,10 +476,13 @@ describe("woo core", () => {
         title: "Remote Lamp",
         description: "A lamp hosted on a different object host."
       });
+      expect(look.contents.find((item) => item.id === "remote_mug")).toMatchObject({
+        title: "Remote Mug",
+        description: "A mug hosted beside the lamp."
+      });
     }
-    const describeKey = Array.from(bridge.describeCalls.keys()).find((key) => key.endsWith(`:${actor}:remote_lamp`));
-    expect(describeKey).toBeDefined();
-    expect(bridge.describeCalls.get(describeKey!)).toBe(1);
+    expect(bridge.describeManyCalls).toEqual([expect.arrayContaining(["remote_lamp", "remote_mug"])]);
+    expect(bridge.describeCalls.size).toBe(0);
     expect(Array.from(bridge.getPropCalls.keys()).some((key) => key.endsWith(":remote_lamp:name"))).toBe(false);
     expect(Array.from(bridge.getPropCalls.keys()).some((key) => key.endsWith(":remote_lamp:description"))).toBe(false);
   });
@@ -862,6 +890,30 @@ describe("woo core", () => {
     expect(world.getProp("delay_1", "feedback")).toBe(0.77);
     expect(world.getProp("filter_1", "cutoff")).toBe(1440);
     expect(world.replay("the_dubspace", 2, 1).map((entry) => entry.seq)).toEqual([2]);
+  });
+
+  it("emits metrics for direct and sequenced call routes", async () => {
+    const { world, session, actor } = authedWorld();
+    const metrics: MetricEvent[] = [];
+    world.setMetricsHook((event) => metrics.push(event));
+
+    const direct = await world.directCall("direct-metric", actor, "the_chatroom", "enter", []);
+    const sequenced = await world.call("sequenced-metric", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.64]));
+
+    expect(direct.op).toBe("result");
+    expect(sequenced.op).toBe("applied");
+    expect(metrics.find((event) => event.kind === "direct_call")).toMatchObject({
+      kind: "direct_call",
+      target: "the_chatroom",
+      verb: "enter",
+      audience: "the_chatroom",
+      status: "ok"
+    });
+    expect(metrics.find((event) => event.kind === "applied")).toMatchObject({
+      kind: "applied",
+      space: "the_dubspace",
+      verb: "set_control"
+    });
   });
 
   it("resumes a live session token", async () => {

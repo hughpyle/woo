@@ -98,6 +98,7 @@ export type HostBridge = {
   hostForObject(id: ObjRef, memo?: HostOperationMemo): string | null | Promise<string | null>;
   getPropChecked(progr: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue>;
   describeObject?(nameActor: ObjRef, readActor: ObjRef, objRef: ObjRef, memo?: HostOperationMemo): Promise<HostObjectSummary>;
+  describeObjects?(nameActor: ObjRef, readActor: ObjRef, objRefs: ObjRef[], memo?: HostOperationMemo): Promise<Record<ObjRef, HostObjectSummary>>;
   resolveVerb?(target: ObjRef, verbName: string, memo?: HostOperationMemo): Promise<CommandVerbSummary | null>;
   location(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef | null>;
   dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue>;
@@ -885,6 +886,7 @@ export class WooWorld {
   }
 
   private async directCallNow(frameId: string | undefined, actor: ObjRef, target: ObjRef, verbName: string, args: WooValue[], options: DirectCallOptions = {}): Promise<DirectResultFrame | ErrorFrame> {
+    const startedAt = Date.now();
     try {
       assertObj(actor);
       assertObj(target);
@@ -957,6 +959,7 @@ export class WooWorld {
       // for self-hosted spaces is stale.
       const crossHostAudience = (dispatchCtx as { crossHostAudience?: { audienceActors?: ObjRef[]; observationAudiences?: ObjRef[][] } }).crossHostAudience;
       const liveAudiences = crossHostAudience ?? this.directLiveAudiences(audience, observations);
+      this.recordMetric({ kind: "direct_call", target, verb: verbName, audience, observations: observations.length, ms: Date.now() - startedAt, status: "ok" });
       return {
         op: "result",
         id: frameId,
@@ -967,7 +970,9 @@ export class WooWorld {
         observationAudiences: liveAudiences.observationAudiences
       };
     } catch (err) {
-      return { op: "error", id: frameId, error: normalizeError(err) };
+      const error = normalizeError(err);
+      this.recordMetric({ kind: "direct_call", target, verb: verbName, audience: null, observations: 0, ms: Date.now() - startedAt, status: "error", error: error.code });
+      return { op: "error", id: frameId, error };
     }
   }
 
@@ -3550,10 +3555,9 @@ export class WooWorld {
     const startedAt = Date.now();
     const present = await this.chatPresentAsync(room, ctx.progr);
     const items = (await this.objectContents(room, ctx.hostMemo)).filter((item) => !this.isActorForLook(item, present));
-    let remoteTitles = 0;
+    const remoteSummaries = await this.objectSummariesForLook(ctx, items);
     const contents = await Promise.all(items.map(async (item) => {
-      if (await this.remoteHostForObject(item, ctx.hostMemo)) remoteTitles += 1;
-      return await this.lookEntryFor(ctx, room, item);
+      return await this.lookEntryFor(ctx, room, item, remoteSummaries.summaries.get(item) ?? null);
     }));
     const look = {
       id: room,
@@ -3562,7 +3566,15 @@ export class WooWorld {
       present_actors: present,
       contents
     } as unknown as Record<string, WooValue>;
-    this.recordMetric({ kind: "compose_look", room, present_count: present.length, contents_count: items.length, remote_titles: remoteTitles, ms: Date.now() - startedAt });
+    this.recordMetric({
+      kind: "compose_look",
+      room,
+      present_count: present.length,
+      contents_count: items.length,
+      remote_titles: remoteSummaries.remoteCount,
+      remote_describe_batches: remoteSummaries.batchCount,
+      ms: Date.now() - startedAt
+    });
     return look;
   }
 
@@ -3587,8 +3599,8 @@ export class WooWorld {
     }
   }
 
-  private async lookEntryFor(ctx: CallContext, room: ObjRef, item: ObjRef): Promise<Record<string, WooValue>> {
-    const summary = await this.objectSummaryForLook(ctx, item);
+  private async lookEntryFor(ctx: CallContext, room: ObjRef, item: ObjRef, prefetchedSummary: HostObjectSummary | null = null): Promise<Record<string, WooValue>> {
+    const summary = prefetchedSummary ?? await this.objectSummaryForLook(ctx, item);
     if (summary) {
       return {
         id: item,
@@ -3611,6 +3623,36 @@ export class WooWorld {
     } catch {
       return null;
     }
+  }
+
+  private async objectSummariesForLook(ctx: CallContext, items: ObjRef[]): Promise<{ summaries: Map<ObjRef, HostObjectSummary>; remoteCount: number; batchCount: number }> {
+    const summaries = new Map<ObjRef, HostObjectSummary>();
+    const remoteIds: ObjRef[] = [];
+    const remoteHosts = new Set<string>();
+    for (const item of items) {
+      const host = await this.remoteHostForObject(item, ctx.hostMemo);
+      if (!host) continue;
+      remoteIds.push(item);
+      remoteHosts.add(host);
+    }
+    if (remoteIds.length === 0 || !this.hostBridge) return { summaries, remoteCount: 0, batchCount: 0 };
+    if (this.hostBridge.describeObjects) {
+      try {
+        const batch = await this.hostBridge.describeObjects(ctx.progr, ctx.actor, remoteIds, ctx.hostMemo);
+        for (const id of remoteIds) {
+          const summary = batch[id];
+          if (summary) summaries.set(id, summary);
+        }
+        return { summaries, remoteCount: remoteIds.length, batchCount: remoteHosts.size };
+      } catch {
+        summaries.clear();
+      }
+    }
+    await Promise.all(remoteIds.map(async (id) => {
+      const summary = await this.objectSummaryForLook(ctx, id);
+      if (summary) summaries.set(id, summary);
+    }));
+    return { summaries, remoteCount: remoteIds.length, batchCount: remoteIds.length };
   }
 
   private async observeRoomLook(ctx: CallContext, room: ObjRef, look: Record<string, WooValue>): Promise<void> {
@@ -3949,11 +3991,12 @@ export class WooWorld {
     const exact: ObjRef[] = [];
     const alias: ObjRef[] = [];
     const prefix: ObjRef[] = [];
+    const remoteSummaries = await this.objectSummariesForLook(ctx, candidates);
     for (const id of candidates) {
       const names = [id];
       const aliases: string[] = [];
       if (await this.remoteHostForObject(id, ctx.hostMemo)) {
-        const summary = await this.objectSummaryForLook(ctx, id);
+        const summary = remoteSummaries.summaries.get(id) ?? await this.objectSummaryForLook(ctx, id);
         if (summary) {
           names.push(titleFromSummary(id, summary));
           if (Array.isArray(summary.aliases)) aliases.push(...summary.aliases.map((item) => String(item)));

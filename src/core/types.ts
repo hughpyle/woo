@@ -179,11 +179,12 @@ export type WooObject = {
 // v1; new kinds need a spec note + emission point.
 export type MetricEvent =
   | { kind: "broadcast"; audience_size: number; obs_count: number; ms: number; origin_session?: string }
-  | { kind: "compose_look"; room: ObjRef; present_count: number; contents_count: number; remote_titles: number; ms: number }
+  | { kind: "compose_look"; room: ObjRef; present_count: number; contents_count: number; remote_titles: number; remote_describe_batches: number; ms: number }
   | { kind: "cross_host_rpc"; route: string; host: string; ms: number }
   | { kind: "storage_flush"; objects: number; properties: number; sessions: number; deleted_sessions: number; tasks: number; deleted_tasks: number; counters: boolean; ms: number }
   | { kind: "subscribers_write"; space: ObjRef; size: number; delta: number }
   | { kind: "applied"; space: ObjRef; seq: number; verb: string; ms: number }
+  | { kind: "direct_call"; target: ObjRef; verb: string; audience: ObjRef | null; observations: number; ms: number; status: "ok" | "error"; error?: string }
   | { kind: "mcp_request"; method: string; tool?: string; ms: number; status: "ok" | "error" }
   | { kind: "init"; phase: "world" | "mcp_gateway"; ms: number };
 

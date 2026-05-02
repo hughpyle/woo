@@ -49,6 +49,7 @@ Trace storage is operator policy: defaults to 7-day retention with structured qu
 Each persistent host emits standard metrics:
 
 - `calls_per_sec` (rate)
+- `direct_calls_per_sec` and sequenced `applied` frames (rates by route)
 - `call_latency_p50/p95/p99` (histogram, ms)
 - `error_rate` (rate, per error code)
 - `tick_budget_consumed_p99` (histogram)

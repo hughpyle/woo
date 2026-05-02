@@ -45,10 +45,9 @@ Shape:
 
 - `composeRoomLook()` gathers room contents and calls `lookEntryFor()` per
   visible item.
-- Remote items use `describeObject()`; this is already better than separate
-  `name`/`description`/`aliases` reads, but still one RPC per remote item.
-- `matchObjectInCandidatesAsync()` does the same kind of per-candidate remote
-  metadata read for command matching.
+- **Fixed in current worktree:** remote items can use `describeObjects()`, which
+  batches `name`/`description`/`aliases` reads by host for both room look and
+  command matching.
 
 Why it matters:
 
@@ -58,17 +57,15 @@ Why it matters:
 
 Good next shape:
 
-- Add `HostBridge.describeObjects(nameActor, readActor, ids, memo)` and
-  `/__internal/remote-describe-many`.
-- Group IDs by host, fetch all display metadata for that host in one RPC, and
-  populate the operation memo from the batch result.
-- Use the same batch in room look, object matching, and any future inspector
-  projections.
+- Keep extending the same batch-read pattern to future inspector projections.
+- Use `cross_host_rpc` and `compose_look.remote_describe_batches` metrics to
+  confirm one room look pays one describe RPC per remote host.
 
 Instrumentation gap:
 
-- Existing `compose_look` logs `remote_titles`, `contents_count`, and ms. Add
-  `remote_describe_rpc_count` or infer it through `cross_host_rpc` route counts.
+- Existing `compose_look` now logs `remote_titles`,
+  `remote_describe_batches`, `contents_count`, and ms. Exact CF subrequest
+  counts can be confirmed through `cross_host_rpc` route counts.
 
 ### 3. Cold Route Resolution Is Serial Per Object
 

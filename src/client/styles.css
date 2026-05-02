@@ -45,6 +45,10 @@ textarea {
   grid-template-columns: 190px minmax(0, 1fr) 360px;
 }
 
+.shell.observations-collapsed {
+  grid-template-columns: 190px minmax(0, 1fr) 3.25rem;
+}
+
 .nav,
 .events {
   border-right: 1px solid #d0d7cd;
@@ -89,9 +93,53 @@ textarea {
   min-height: 0;
 }
 
-.events h2 {
+.events-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
   margin: 0 0 0.65rem;
+}
+
+.events h2 {
+  margin: 0;
   font-size: 0.95rem;
+}
+
+.events-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 1.45rem;
+  height: 1.45rem;
+  min-width: 0;
+  padding: 0;
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+.events.collapsed {
+  align-items: center;
+  padding: 0.7rem 0.45rem;
+  overflow: hidden;
+}
+
+.events.collapsed .events-header {
+  flex: 1 1 auto;
+  margin: 0;
+  flex-direction: column-reverse;
+  justify-content: flex-end;
+}
+
+.events.collapsed h2 {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 0.78rem;
+  letter-spacing: 0;
+  color: #697366;
+}
+
+.events.collapsed .event-list {
+  display: none;
 }
 
 .brand {
@@ -782,8 +830,9 @@ input[type="range"] {
 
 .pinboard-presence {
   display: grid;
-  grid-template-rows: auto minmax(0, auto);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 0.6rem;
+  overflow: hidden;
 }
 
 .pinboard-presence h2 {
@@ -795,6 +844,11 @@ input[type="range"] {
   overflow: hidden;
   padding: 0;
   min-height: 420px;
+}
+
+[data-pinboard-map-shell] {
+  min-height: 0;
+  height: 100%;
 }
 
 .pinboard-stage {
@@ -878,7 +932,7 @@ input[type="range"] {
 .pinboard-map {
   position: relative;
   width: 100%;
-  aspect-ratio: 1 / 1.15;
+  height: 100%;
   min-height: 11rem;
   overflow: hidden;
   border: 1px solid rgb(74 84 71 / 0.28);
@@ -928,9 +982,13 @@ input[type="range"] {
 }
 
 .pinboard-map-empty {
-  margin: 0.5rem 0 0;
+  position: absolute;
+  left: 0.65rem;
+  top: 0.55rem;
+  margin: 0;
   color: #697266;
   font-size: 0.78rem;
+  pointer-events: none;
 }
 
 .pin-note {
@@ -1104,6 +1162,10 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .shell.observations-collapsed {
+    grid-template-columns: 1fr;
+  }
+
   .nav {
     display: grid;
     grid-template-columns: auto minmax(7rem, 1fr) repeat(5, minmax(0, max-content));
@@ -1121,6 +1183,22 @@ textarea {
     border: 0;
     position: static;
     height: min(42vh, 22rem);
+  }
+
+  .events.collapsed {
+    height: auto;
+    padding: 0.55rem;
+    align-items: stretch;
+  }
+
+  .events.collapsed .events-header {
+    flex-direction: row;
+    justify-content: space-between;
+  }
+
+  .events.collapsed h2 {
+    writing-mode: horizontal-tb;
+    transform: none;
   }
 
   .brand,
