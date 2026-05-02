@@ -214,10 +214,15 @@ literal  := one or more characters from [a-zA-Z0-9_-], min length 1
 ```
 
 - A bare `literal` matches the literal exactly: `look` matches only `"look"`.
-- `literal*` matches `literal` followed by zero or more characters from `[a-zA-Z0-9_-]`: `ex*` matches `ex`, `exa`, `examine`, `extra`. Useful for "abbreviation acceptable past this prefix."
-- `literal@` matches the literal exactly *or* any prefix of it down to the literal's first character: `l@ook` matches `l`, `lo`, `loo`, `look` — i.e., `l@ook` is shorthand for "any prefix of `look` of length ≥ 1." (Same as `l@ook` in LambdaCore convention.) The `@` must immediately follow a literal segment.
+- `literal@` matches the literal exactly *or* any prefix of it down to the literal's first character: `l@ook` matches `l`, `lo`, `loo`, `look` — i.e., `l@ook` is shorthand for "any prefix of `look` of length ≥ 1." This is the LambdaCore abbreviation convention. The `@` must immediately follow a literal segment.
+- `literal*` is a legacy wildcard form: it matches `literal` followed by zero or more characters from `[a-zA-Z0-9_-]`: `ex*` matches `ex`, `exa`, `examine`, and also `extra`. It is **not** LambdaCore abbreviation syntax. First-party catalogs should use `@` for abbreviations; `*` is retained in v1 only for existing data and for deliberately broad wildcard aliases.
 - `|` is segment union within one pattern: `look|l@ook` permits both `look` and any prefix.
 - Patterns are case-sensitive. A space-separated string of patterns (`"look l@ examine"`) is parsed as a list of three patterns; do not confuse this with a single pattern containing spaces (which is invalid).
+
+**Compatibility note.** A single trailing `*` with no `@` is easy to
+misread as LambdaCore-style abbreviation. New source and catalog manifests
+should prefer `@` (`ex@amine`, `sq@uawk`). A future catalog/install lint pass
+should warn on trailing-`*` aliases that appear to be abbreviations.
 
 **Resolution order.** When multiple patterns from different ancestors match the invocation name:
 
