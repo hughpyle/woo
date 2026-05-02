@@ -68,6 +68,7 @@ const INTERNAL_ORIGIN = "https://woo.internal";
 const MAX_JSON_BODY_BYTES = 1 * 1024 * 1024;
 const METRIC_SAMPLE_BUDGET = 10;
 const METRIC_SAMPLE_WINDOW_MS = 1000;
+const HOST_STATE_CACHE_LIMIT = 32;
 
 export class PersistentObjectDO {
   private state: DurableObjectState;
@@ -710,9 +711,27 @@ export class PersistentObjectDO {
     // state.object_routes / state.spaces / state.objects) can't mutate the
     // cached copy. structuredClone on a ~127KB plain object is much cheaper
     // than rebuilding state via the full object-graph walk.
-    if (hit && hit.version === version) return structuredClone(hit.payload);
+    if (hit && hit.version === version) {
+      this.hostStateCache.delete(actor);
+      this.hostStateCache.set(actor, hit);
+      return this.withFreshStateClock(structuredClone(hit.payload));
+    }
     const payload = world.state(actor) as unknown as Record<string, unknown>;
+    this.hostStateCache.delete(actor);
     this.hostStateCache.set(actor, { version, payload: structuredClone(payload) });
+    while (this.hostStateCache.size > HOST_STATE_CACHE_LIMIT) {
+      const oldest = this.hostStateCache.keys().next().value as ObjRef | undefined;
+      if (!oldest) break;
+      this.hostStateCache.delete(oldest);
+    }
+    return this.withFreshStateClock(payload);
+  }
+
+  private withFreshStateClock(payload: Record<string, unknown>): Record<string, unknown> {
+    // Mutates only the response object being returned. On cache hits that is a
+    // clone of the cached payload; on misses the cache already stored its own
+    // clone before this clock field is stamped.
+    payload.server_time = Date.now();
     return payload;
   }
 

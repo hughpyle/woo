@@ -434,6 +434,54 @@ describe("CFObjectRepository production-shape coverage", () => {
     }
   });
 
+  it("keeps cached api state clock fresh", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const gatewayState = new FakeDurableObjectState("world");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-state-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: new FakeDurableObjectNamespace((name) => {
+        throw new Error(`unexpected Woo DO ${name}`);
+      })
+    } as unknown as Env;
+    const gateway = new PersistentObjectDO(gatewayState as unknown as DurableObjectState, env);
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_000);
+      const auth = await gateway.fetch(new Request("https://woo.test/api/auth", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: "guest:cf-state-clock" })
+      }));
+      expect(auth.ok).toBe(true);
+      const { session } = await auth.json() as { session: string };
+
+      const first = await gateway.fetch(new Request("https://woo.test/api/state", {
+        headers: { authorization: `Session ${session}` }
+      }));
+      expect(first.ok).toBe(true);
+      expect((await first.json() as Record<string, unknown>).server_time).toBe(1_000_000);
+
+      vi.setSystemTime(1_005_000);
+      const second = await gateway.fetch(new Request("https://woo.test/api/state", {
+        headers: { authorization: `Session ${session}` }
+      }));
+      expect(second.ok).toBe(true);
+      expect((await second.json() as Record<string, unknown>).server_time).toBe(1_005_000);
+    } finally {
+      vi.useRealTimers();
+      directoryState.close();
+      gatewayState.close();
+    }
+  });
+
   it("publishes Worker-installed self-hosted tap objects before serving host seeds", async () => {
     const directoryState = new FakeDurableObjectState("directory");
     const gatewayState = new FakeDurableObjectState("world");
