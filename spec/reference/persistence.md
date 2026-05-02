@@ -58,6 +58,7 @@ CREATE TABLE property_value (
 -- splitting them across columns saves nothing and complicates round-tripping.
 CREATE TABLE verb (
   object_id    TEXT NOT NULL,
+  slot         INTEGER NOT NULL,   -- 1-based local verb position
   name         TEXT NOT NULL,
   aliases      TEXT NOT NULL,      -- JSON list
   owner        TEXT NOT NULL,
@@ -71,8 +72,10 @@ CREATE TABLE verb (
   line_map     TEXT NOT NULL,      -- JSON
   flags        TEXT NOT NULL,      -- JSON {direct_callable?, skip_presence_check?}
   version      INTEGER NOT NULL DEFAULT 1,
-  PRIMARY KEY (object_id, name)
+  PRIMARY KEY (object_id, slot)
 );
+
+CREATE INDEX verb_object_name ON verb(object_id, name);
 
 -- Inheritance children: objects whose parent is one of the hosted objects.
 CREATE TABLE child (

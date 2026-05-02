@@ -67,6 +67,7 @@ export const SQL_SCHEMA_STATEMENTS = [
   )`,
   `CREATE TABLE IF NOT EXISTS verb (
     object_id TEXT NOT NULL,
+    slot INTEGER NOT NULL,
     name TEXT NOT NULL,
     kind TEXT NOT NULL,
     aliases TEXT NOT NULL,
@@ -80,8 +81,9 @@ export const SQL_SCHEMA_STATEMENTS = [
     native TEXT,
     bytecode TEXT,
     flags TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (object_id, name)
+    PRIMARY KEY (object_id, slot)
   )`,
+  "CREATE INDEX IF NOT EXISTS verb_object_name ON verb(object_id, name)",
   `CREATE TABLE IF NOT EXISTS child (
     object_id TEXT NOT NULL,
     child_ref TEXT NOT NULL,
@@ -170,6 +172,38 @@ export const SQL_SPACE_MESSAGE_OUTCOME_REBUILD_STATEMENTS = [
 
 export const SQL_SPACE_MESSAGE_OUTCOME_REBUILD_SCRIPT = `${SQL_SPACE_MESSAGE_OUTCOME_REBUILD_STATEMENTS.join(";\n")};`;
 
+export const SQL_VERB_ORDER_REBUILD_STATEMENTS = [
+  "DROP INDEX IF EXISTS verb_object_name",
+  "ALTER TABLE verb RENAME TO verb_old_name_pk",
+  `CREATE TABLE verb (
+    object_id TEXT NOT NULL,
+    slot INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    aliases TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    perms TEXT NOT NULL,
+    arg_spec TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    line_map TEXT NOT NULL,
+    native TEXT,
+    bytecode TEXT,
+    flags TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (object_id, slot)
+  )`,
+  `INSERT INTO verb(object_id, slot, name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode, flags)
+    SELECT object_id,
+           ROW_NUMBER() OVER (PARTITION BY object_id ORDER BY name),
+           name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode, COALESCE(flags, '{}')
+    FROM verb_old_name_pk`,
+  "DROP TABLE verb_old_name_pk",
+  "CREATE INDEX IF NOT EXISTS verb_object_name ON verb(object_id, name)"
+] as const;
+
+export const SQL_VERB_ORDER_REBUILD_SCRIPT = `${SQL_VERB_ORDER_REBUILD_STATEMENTS.join(";\n")};`;
+
 export function sqlGroupBy<T extends SqlRow>(rows: T[], key: string): Map<string, T[]> {
   const groups = new Map<string, T[]>();
   for (const row of rows) {
@@ -207,6 +241,7 @@ export function flagsFromSqlInt(flags: number): SerializedObject["flags"] {
 export function verbFromSqlRow(row: SqlRow): VerbDef {
   const flags = row.flags ? (parseSqlValue(row.flags) as Record<string, unknown>) : {};
   const base = {
+    slot: row.slot == null ? undefined : Number(row.slot),
     name: String(row.name),
     aliases: parseSqlValue(row.aliases) as string[],
     owner: String(row.owner),

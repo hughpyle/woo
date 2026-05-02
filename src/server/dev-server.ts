@@ -32,8 +32,8 @@ if (process.env.WOO_METRICS !== "off") {
 const mcpGateway = new McpGateway(world, {
   serverName: "woo-dev",
   broadcasts: {
-    broadcastApplied: (frame) => broadcastApplied(frame),
-    broadcastLiveEvents: (result) => broadcastLiveEvents(result)
+    broadcastApplied: (frame, originSessionId) => broadcastApplied(frame, undefined, originSessionId),
+    broadcastLiveEvents: (result, originSessionId) => broadcastLiveEvents(result, originSessionId)
   }
 });
 type AttachedSocket = { sessionId: string; actor: string; socketId: string };
@@ -254,14 +254,14 @@ function authoringEnabled(): boolean {
   return process.env.NODE_ENV !== "production" || process.env.WOO_DEV === "1";
 }
 
-function broadcastApplied(frame: AppliedFrame, originator?: WebSocket): void {
+function broadcastApplied(frame: AppliedFrame, originator?: WebSocket, originMcpSessionId?: string | null): void {
   for (const [ws, session] of sockets) {
     if (ws.readyState !== ws.OPEN || !world.hasPresence(session.actor, frame.space)) continue;
     const visibleFrame = ws === originator ? frame : { ...frame, id: undefined };
     ws.send(JSON.stringify(visibleFrame));
   }
   broadcastAppliedSse(frame);
-  mcpGateway.routeAppliedFrame(frame);
+  mcpGateway.routeAppliedFrame(frame, originMcpSessionId ?? null);
 }
 
 function broadcastTaskResult(result: ParkedTaskRun): void {
@@ -277,12 +277,12 @@ function broadcastTaskResult(result: ParkedTaskRun): void {
   }
 }
 
-function broadcastLiveEvents(result: DirectResultFrame): void {
+function broadcastLiveEvents(result: DirectResultFrame, originMcpSessionId?: string | null): void {
   if (!result.audience) return;
   result.observations.forEach((observation, index) => {
     broadcastLiveEvent({ op: "event", observation }, result.audience!, result.observationAudiences?.[index] ?? result.audienceActors);
   });
-  mcpGateway.routeLiveEvents(result);
+  mcpGateway.routeLiveEvents(result, originMcpSessionId ?? null);
 }
 
 function broadcastLiveEvent(frame: LiveEventFrame, audience: ObjRef, audienceActors?: ObjRef[]): void {

@@ -358,7 +358,7 @@ function reparentSeed(world: WooWorld, obj: ObjRef, parent: ObjRef): void {
 }
 
 function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: TinyBytecode, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; perms?: string } = {}): void {
-  const existing = world.object(obj).verbs.get(name);
+  const existing = world.ownVerb(obj, name);
   if (existing) {
     const parsedPerms = normalizeVerbPerms(options.perms ?? existing.perms, existing.direct_callable || options.directCallable === true);
     const next = {
@@ -389,7 +389,7 @@ function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: Tin
 }
 
 function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; toolExposed?: boolean; perms?: string; argSpec?: Record<string, WooValue> } = {}): void {
-  const existing = world.object(obj).verbs.get(name);
+  const existing = world.ownVerb(obj, name);
   if (existing) {
     const parsedPerms = normalizeVerbPerms(options.perms ?? existing.perms, existing.direct_callable || options.directCallable === true);
     const next = {

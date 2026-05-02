@@ -42,7 +42,7 @@ The runtime stores the resolved id-to-host map in **Directory** ([§R2](#r2-sing
 
 **Bundled object descriptions.** Read-heavy projections such as room `:look` and `$match` object resolution should use a bundled cross-host describe RPC where available, returning the common display fields (`name`, `description`, `aliases`) in one host call. `name` is the object's display name; property fields use the same per-property read filtering the separate `getProp` calls would apply. This is an optimization, not a new authority surface: callers must still pass the actor/progr identities used for the equivalent reads, and a host may return `null` for fields the actor cannot read.
 
-**Remote command planning reads.** A room-hosted command planner may need to inspect a visible object's verb metadata when that object is hosted elsewhere. The host RPC returns only the canonical verb name and `direct_callable` flag needed to build a plan; actual execution still routes through ordinary direct or sequenced dispatch and re-checks permissions on the object host.
+**Remote command planning reads.** A room-hosted command planner may need to inspect a visible object's verb metadata when that object is hosted elsewhere. The host RPC returns only the slot, canonical verb name, aliases/arg spec needed for planning, and `direct_callable` flag; actual execution still routes through ordinary direct or sequenced dispatch and re-checks permissions on the object host.
 
 ### R1.7 Contents-mirror invariants
 
@@ -253,9 +253,9 @@ The concrete CF SQLite encoding lives in [persistence.md](persistence.md). The s
 |---|---|
 | `getProp(id, name, expected_version?)` | Property read with lazy version check ([persistence.md §15.3](persistence.md#153-lazy-version-check)). Returns `{value, version, perms}` or `E_PROPNF`/`E_PERM`. |
 | `describeObject(id, actor)` | Bundled read of display `name`, actor-readable `description`, and actor-readable `aliases` for look/match projections. |
-| `resolveVerb(id, name)` | Read-only verb metadata lookup for command planning; returns canonical name and `direct_callable`, not executable code. |
+| `resolveVerb(id, descriptor)` | Read-only verb metadata lookup for command planning; descriptor is name or 1-based local slot. Returns slot, canonical name, and `direct_callable`, not executable code. |
 | `contents(id)` | Read a container's contents mirror for look/match projections. |
-| `getVerb(id, name, expected_version?)` | Verb fetch for the cross-host bytecode cache. Returns `{bytecode, version, owner, perms, definer}`. |
+| `getVerb(id, descriptor, expected_version?)` | Verb fetch for the cross-host bytecode cache. Returns `{slot, bytecode, version, owner, perms, definer}`. |
 | `getAncestorChain(id, expected_version?)` | Chain walk for cache population. |
 | `setProp(id, name, value, expected_version)` | Versioned write; `E_VERSION` on stale. |
 | `defineVerb(id, ...args, expected_version)` | Authoring; same versioning. |
@@ -594,7 +594,9 @@ Logpush configuration is per-account, not in wrangler — `wrangler logpush crea
 - Per-DO 1k req/sec soft cap means a single hot object naturally rate-limits incoming traffic. Adversarial saturation against one object cannot bring down the world.
 - AE writes are inexpensive; one per call site is well under cost concern at v1 traffic.
 - DO storage cost is per-object SQLite size; small objects (~few KB) are nearly free.
-- Real cost numbers go here once the implementation exists; tracked in [LATER.md](../../LATER.md).
+- DO SQLite billing counts rows written, including deletes and index updates. Runtime commits must therefore flush only dirty object/property/session/task slices, not the whole host graph, and should emit `storage_flush` metrics so operators can find write-amplified verbs.
+- Continuous UI gestures should use direct live observations for previews and coalesce durable writes at the application edge. Generic sequenced calls are never debounced by the host: once a call returns an applied frame, its log outcome and dirty state are durable.
+- Real deployment cost numbers are tracked in operator notes as traffic grows.
 
 ---
 

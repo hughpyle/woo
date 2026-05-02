@@ -800,7 +800,7 @@ describe("woo core", () => {
     ]);
     expect(reloaded.getProp("the_pinboard", "next_note_id")).toBe(2);
     expect(reloaded.getProp("the_pinboard", "next_z")).toBe(2);
-    expect(reloaded.object("$pinboard").verbs.get("add_note")).toBeDefined();
+    expect(reloaded.ownVerb("$pinboard", "add_note")).toBeDefined();
   });
 
   it("normalizes legacy d permission shorthand while importing worlds", async () => {
@@ -816,6 +816,36 @@ describe("woo core", () => {
     const info = reloaded.verbInfo("$root", "describe");
     expect(info.perms).toBe("rx");
     expect(info.direct_callable).toBe(true);
+  });
+
+  it("stores local verbs as ordered slots and resolves the first matching name", async () => {
+    const world = createWorld({ catalogs: false });
+    world.createObject({ id: "ordered_probe", name: "Ordered Probe", parent: "$root", owner: "$wiz" });
+    world.addVerb("ordered_probe", nativeVerb("same"));
+    world.addVerb(
+      "ordered_probe",
+      {
+        ...nativeVerb("same"),
+        aliases: ["tw*o"],
+        source_hash: "test-same-second",
+        version: 2
+      },
+      { append: true }
+    );
+
+    expect(world.object("ordered_probe").verbs.map((verb) => [verb.name, verb.slot, verb.source_hash])).toEqual([
+      ["same", 1, "test-same"],
+      ["same", 2, "test-same-second"]
+    ]);
+    expect(world.resolveVerb("ordered_probe", "same").verb.source_hash).toBe("test-same");
+    expect(world.resolveVerb("ordered_probe", "two").verb.source_hash).toBe("test-same-second");
+    expect(world.progResolveVerb("$wiz", "ordered_probe", 2)).toMatchObject({ slot: 2, source_hash: "test-same-second" });
+
+    const reloaded = createWorldFromSerialized(world.exportWorld(), { persist: false });
+    expect(reloaded.object("ordered_probe").verbs.map((verb) => [verb.name, verb.slot, verb.source_hash])).toEqual([
+      ["same", 1, "test-same"],
+      ["same", 2, "test-same-second"]
+    ]);
   });
 
   it("sequences calls and emits observations", async () => {
@@ -1356,6 +1386,77 @@ describe("authoring", () => {
     if (escalated.op === "error") expect(escalated.error.code).toBe("E_PERM");
   });
 
+  it("exposes LambdaCore-shaped prog read tools as actor-gated builtins", async () => {
+    const world = createWorld();
+    const programmer = world.auth("guest:prog-reader");
+    const other = world.auth("guest:prog-reader-other");
+    const actorObj = world.object(programmer.actor);
+    actorObj.owner = programmer.actor;
+    actorObj.flags.programmer = true;
+
+    const probe = world.createObject({ id: "prog_probe", name: "Prog Probe", parent: "$thing", owner: "$wiz" }).id;
+    expect(installVerb(world, probe, "compile_source", `verb :compile_source(source) rxd {
+  return prog_compile(source);
+}`, null).ok).toBe(true);
+    expect(installVerb(world, probe, "inspect_object", `verb :inspect_object(id) rxd {
+  return prog_inspect(id, { include_source: true });
+}`, null).ok).toBe(true);
+    expect(installVerb(world, probe, "resolve_named", `verb :resolve_named(id, name) rxd {
+  return prog_resolve_verb(id, name);
+}`, null).ok).toBe(true);
+    expect(installVerb(world, probe, "search_world", `verb :search_world(query) rxd {
+  return prog_search(query, { scope: "actor_context" });
+}`, null).ok).toBe(true);
+
+    const base = world.createAuthoredObject(programmer.actor, { parent: "$thing", name: "Prog Base" });
+    const widget = world.createAuthoredObject(programmer.actor, {
+      parent: base,
+      name: "Widget",
+      description: "A programmer-owned widget.",
+      location: programmer.actor
+    });
+    definePropertyVersionedAs(world, programmer.actor, widget, "secret_note", "private", "w", null, "str");
+    expect(installVerbAs(world, programmer.actor, base, "title", `verb :title() rx {
+  return this.name;
+}`, null).ok).toBe(true);
+
+    const compiled = await world.directCall("prog-compile", programmer.actor, probe, "compile_source", [`verb :demo() rx {
+  return "ok";
+}`]);
+    expect(compiled.op).toBe("result");
+    if (compiled.op === "result") {
+      expect(compiled.result).toMatchObject({ ok: true, metadata: { name: "demo", perms: "rx" } });
+      expect((compiled.result as Record<string, unknown>).bytecode).toMatchObject({ op_count: expect.any(Number) });
+    }
+
+    const resolved = await world.directCall("prog-resolve", programmer.actor, probe, "resolve_named", [widget, "title"]);
+    expect(resolved.op).toBe("result");
+    if (resolved.op === "result") {
+      expect(resolved.result).toMatchObject({ definer: base, name: "title", readable: true });
+      expect((resolved.result as Record<string, unknown>).source).toContain("return this.name");
+    }
+
+    const inspected = await world.directCall("prog-inspect", programmer.actor, probe, "inspect_object", [widget]);
+    expect(inspected.op).toBe("result");
+    if (inspected.op === "result") {
+      const result = inspected.result as Record<string, unknown>;
+      expect(result).toMatchObject({ id: widget, parent: base, owner: programmer.actor });
+      expect(result.inherited_verbs).toEqual(expect.arrayContaining([expect.objectContaining({ name: "title", definer: base })]));
+      expect(result.own_properties).toEqual(expect.arrayContaining([expect.objectContaining({ name: "secret_note", readable: true })]));
+    }
+
+    const searched = await world.directCall("prog-search", programmer.actor, probe, "search_world", ["widget"]);
+    expect(searched.op).toBe("result");
+    if (searched.op === "result") {
+      expect(searched.result).toMatchObject({ query: "widget", scope: "actor_context" });
+      expect((searched.result as { results: Array<Record<string, unknown>> }).results).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "object", id: widget })]));
+    }
+
+    const denied = await world.directCall("prog-denied", other.actor, probe, "compile_source", [`verb :demo() rx { return true; }`]);
+    expect(denied.op).toBe("error");
+    if (denied.op === "error") expect(denied.error.code).toBe("E_PERM");
+  });
+
   it("compiles string interpolation and dynamic index get/set", async () => {
     const { world, session, actor } = authedWorld();
     const source = `verb :index_and_interp(name, value) rx {
@@ -1524,6 +1625,51 @@ describe("authoring", () => {
     expect(compileVerb(JSON.stringify({ ...base, max_ticks: 1_000_001 }), { format: "t0-json-bytecode" })).toMatchObject({ ok: false });
     expect(compileVerb(JSON.stringify({ ...base, num_locals: 1_025 }), { format: "t0-json-bytecode" })).toMatchObject({ ok: false });
     expect(compileVerb(JSON.stringify({ ...base, literals: ["x".repeat(512 * 1024)] }), { format: "t0-json-bytecode" })).toMatchObject({ ok: false });
+  });
+
+  it("rejects malformed raw JSON bytecode before install", async () => {
+    const compileRaw = (bytecode: Partial<TinyBytecode>) => compileVerb(JSON.stringify({
+      literals: [],
+      num_locals: 0,
+      max_stack: 1,
+      version: 1,
+      ...bytecode
+    }), { format: "t0-json-bytecode" });
+
+    expect(compileRaw({ ops: [] })).toMatchObject({ ok: false });
+    expect(compileRaw({ ops: [["RETURN"]] })).toMatchObject({ ok: false });
+    expect(compileRaw({ ops: [["PUSH_LIT", 0], ["RETURN"]] })).toMatchObject({ ok: false });
+    expect(compileRaw({ ops: [["PUSH_INT", 1, 2], ["RETURN"]] })).toMatchObject({ ok: false });
+    expect(compileRaw({ ops: [["JUMP", 10]] })).toMatchObject({ ok: false });
+    expect(compileRaw({ ops: [["PUSH_INT", 1], ["JUMP_IF_TRUE_KEEP", 1], ["PUSH_INT", 2], ["RETURN"], ["RETURN"]] })).toMatchObject({ ok: false });
+    expect(compileRaw({ literals: [[]], ops: [["PUSH_LIT", 0], ["SPLAT"], ["RETURN"]] })).toMatchObject({ ok: false });
+  });
+
+  it("preserves installed verb metadata when replacing source", async () => {
+    const world = createWorld();
+    world.createObject({ id: "metadata_probe", name: "Metadata Probe", parent: "$thing", owner: "$wiz" });
+    world.addVerb("metadata_probe", {
+      ...nativeVerb("ping", "describe"),
+      aliases: ["p*ing"],
+      direct_callable: true,
+      skip_presence_check: true,
+      tool_exposed: true
+    });
+    const pingBefore = world.ownVerb("metadata_probe", "ping");
+    expect(pingBefore?.aliases).toContain("p*ing");
+    expect(pingBefore?.tool_exposed).toBe(true);
+    expect(pingBefore?.skip_presence_check).toBe(true);
+    expect(pingBefore?.direct_callable).toBe(true);
+
+    const pingInstalled = installVerb(world, "metadata_probe", "ping", `verb :ping() rxd {
+  return "ok";
+}`, pingBefore?.version ?? null);
+    expect(pingInstalled.ok).toBe(true);
+    const pingAfter = world.ownVerb("metadata_probe", "ping");
+    expect(pingAfter?.aliases).toEqual(pingBefore?.aliases);
+    expect(pingAfter?.tool_exposed).toBe(true);
+    expect(pingAfter?.skip_presence_check).toBe(true);
+    expect(pingAfter?.direct_callable).toBe(true);
   });
 
   it("uses structural map equality in T0 EQ", async () => {

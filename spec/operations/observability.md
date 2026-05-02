@@ -54,6 +54,7 @@ Each persistent host emits standard metrics:
 - `tick_budget_consumed_p99` (histogram)
 - `memory_peak_bytes` (histogram)
 - `storage_bytes_used` (gauge)
+- `storage_flush_slices` (histogram/counter by slice kind: objects, properties, sessions, tasks, counters)
 - `parked_tasks` (gauge)
 - `inbound_rate_drops` (counter)
 - `outbound_overflow_drops` (counter)

@@ -113,6 +113,8 @@ export type VerbDef =
       source_hash: string;
       bytecode: TinyBytecode;
       version: number;
+      /** 1-based local verb slot, assigned from the object's ordered verb list. */
+      slot?: number;
       line_map: Record<string, WooValue>;
       direct_callable?: boolean;
       skip_presence_check?: boolean;
@@ -128,6 +130,8 @@ export type VerbDef =
       source: string;
       source_hash: string;
       version: number;
+      /** 1-based local verb slot, assigned from the object's ordered verb list. */
+      slot?: number;
       line_map: Record<string, WooValue>;
       native: string;
       direct_callable?: boolean;
@@ -162,7 +166,7 @@ export type WooObject = {
   propertyDefs: Map<string, PropertyDef>;
   properties: Map<string, WooValue>;
   propertyVersions: Map<string, number>;
-  verbs: Map<string, VerbDef>;
+  verbs: VerbDef[];
   children: Set<ObjRef>;
   contents: Set<ObjRef>;
   eventSchemas: Map<string, Record<string, WooValue>>;
@@ -177,6 +181,7 @@ export type MetricEvent =
   | { kind: "broadcast"; audience_size: number; obs_count: number; ms: number; origin_session?: string }
   | { kind: "compose_look"; room: ObjRef; present_count: number; contents_count: number; remote_titles: number; ms: number }
   | { kind: "cross_host_rpc"; route: string; host: string; ms: number }
+  | { kind: "storage_flush"; objects: number; properties: number; sessions: number; deleted_sessions: number; tasks: number; deleted_tasks: number; counters: boolean; ms: number }
   | { kind: "subscribers_write"; space: ObjRef; size: number; delta: number }
   | { kind: "applied"; space: ObjRef; seq: number; verb: string; ms: number }
   | { kind: "mcp_request"; method: string; tool?: string; ms: number; status: "ok" | "error" }

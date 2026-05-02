@@ -23,7 +23,10 @@ Every object has:
 
 It additionally has tables of:
 
-- **Verbs** defined locally (name, source, compiled bytecode, owner, perms, version).
+- **Verbs** defined locally as an ordered list of slots (slot, name, aliases,
+  source, compiled bytecode, owner, perms, arg spec, version). Multiple local
+  slots may share the same name; descriptors may refer to a verb by name or by
+  1-based slot number.
 - **Property values** locally (name, value, owner override, perms override).
 - **Property definitions** locally (name, default value, type hint, owner, perms) — these introduce a new property visible to descendants.
 - **Event schemas** declared locally (event-type → JSON-Schema-ish).
@@ -180,12 +183,20 @@ There is no global object registry, by design. "All instances of `$room`" is ans
 
 ### 9.1 Lookup
 
+Each object's local verbs are an ordered list, not a name-keyed map. The slot
+number is the verb's 1-based index in that local list, matching LambdaMOO's
+`verbs(obj)` / `@verb#` convention. Slot numbers are stable until a local verb is
+inserted or deleted; deleting a slot compacts later slots.
+
 Given `obj:name(args)`:
 
-1. Start at `obj`. If verb `name` is defined locally, use it.
-2. Else recurse to `obj.parent`, repeat.
-3. If no ancestor defines `name` and `obj` is `$actor`- or `$space`-descended, search `obj.features` per [features.md §FT2](features.md#ft2-verb-lookup-with-features).
-4. If still no match, raise `E_VERBNF`.
+1. Start at `obj`. Scan local verb slots in slot order. The first slot whose
+   canonical `name` matches wins.
+2. If no canonical name matches locally, scan the same local slots in slot order
+   for aliases matching `name`.
+3. Else recurse to `obj.parent`, repeat.
+4. If no ancestor defines `name` and `obj` is `$actor`- or `$space`-descended, search `obj.features` per [features.md §FT2](features.md#ft2-verb-lookup-with-features).
+5. If still no match, raise `E_VERBNF`.
 
 Aliases: a verb's `aliases` field is a list of patterns. Lookup matches the invocation name against the union of the verb's canonical `name` and its alias patterns. Patterns are compiled at `setVerb` time and cached.
 
@@ -205,9 +216,10 @@ literal  := one or more characters from [a-zA-Z0-9_-], min length 1
 
 **Resolution order.** When multiple patterns from different ancestors match the invocation name:
 
-1. Walk ancestor chain from `this` upward (per §9.1 step 1–2).
-2. The first ancestor with *any* matching pattern (canonical `name` or alias) wins.
-3. Within that ancestor, ties between `name` and an alias prefer `name`.
+1. Walk ancestor chain from `this` upward (per §9.1 step 1–3).
+2. The first ancestor with *any* matching local slot wins.
+3. Within that ancestor, canonical names are tested before aliases, and slot
+   order breaks ties.
 
 **Forbidden.** Patterns with no literal characters (e.g., `*` alone, `@` alone), patterns containing whitespace or special shell characters, and patterns longer than 64 characters all raise `E_INVARG` at `setVerb` time.
 

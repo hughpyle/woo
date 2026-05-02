@@ -15,8 +15,8 @@ import { directedRecipients, wooError } from "../core/types";
 // same way REST-initiated calls do. Without these, an MCP agent's chat would
 // be invisible to humans on the gateway's WS.
 export type McpBroadcastHooks = {
-  broadcastApplied?: (frame: AppliedFrame) => void | Promise<void>;
-  broadcastLiveEvents?: (result: DirectResultFrame) => void | Promise<void>;
+  broadcastApplied?: (frame: AppliedFrame, originSessionId?: string | null) => void | Promise<void>;
+  broadcastLiveEvents?: (result: DirectResultFrame, originSessionId?: string | null) => void | Promise<void>;
 };
 
 const QUEUE_HARD_CAP = 4096;
@@ -575,7 +575,7 @@ export class McpHost {
       let cursor: ObjRef | null = start;
       while (cursor && this.world.objects.has(cursor)) {
         const obj = this.world.object(cursor);
-        for (const verb of obj.verbs.values()) {
+        for (const verb of obj.verbs) {
           if (seen.has(verb.name)) continue;
           seen.add(verb.name);
           if (verb.tool_exposed !== true) continue;
@@ -651,15 +651,7 @@ export class McpHost {
         // Other sessions' queues do see them via the normal broadcast path
         // (dev-server / DO call McpHost.routeLiveEvents with originSessionId).
         if (this.broadcasts.broadcastLiveEvents && result.audience) {
-          // Tag the originating MCP session so the broadcast path can skip
-          // re-enqueueing the caller's own observations (already returned in
-          // the tool result). Other sessions still receive them.
-          (result as { originMcpSessionId?: string }).originMcpSessionId = sessionId;
-          try {
-            await this.broadcasts.broadcastLiveEvents(result);
-          } finally {
-            delete (result as { originMcpSessionId?: string }).originMcpSessionId;
-          }
+          await this.broadcasts.broadcastLiveEvents(result, sessionId);
         }
         await this.refreshToolList(sessionId, actor);
         return { result: result.result, observations: result.observations };
@@ -675,12 +667,7 @@ export class McpHost {
       : await this.world.call(undefined, sessionId, space, message);
     if (frame.op === "error") throw fromError(frame.error);
     if (this.broadcasts.broadcastApplied) {
-      (frame as { originMcpSessionId?: string }).originMcpSessionId = sessionId;
-      try {
-        await this.broadcasts.broadcastApplied(frame);
-      } finally {
-        delete (frame as { originMcpSessionId?: string }).originMcpSessionId;
-      }
+      await this.broadcasts.broadcastApplied(frame, sessionId);
     }
     await this.refreshToolList(sessionId, actor);
     const errObs = frame.observations.find((o) => o.type === "$error");
@@ -841,7 +828,8 @@ function extractFirstParagraph(source: string): string {
 }
 
 function argSpecToJsonSchema(spec: Record<string, WooValue>): Record<string, unknown> {
-  const args = Array.isArray(spec.args) ? spec.args.filter((item): item is string => typeof item === "string") : [];
+  const rawArgs = Array.isArray(spec.args) ? spec.args : Array.isArray(spec.params) ? spec.params : [];
+  const args = rawArgs.filter((item): item is string => typeof item === "string");
   const types = (spec.types && typeof spec.types === "object" && !Array.isArray(spec.types)) ? spec.types as Record<string, WooValue> : {};
   const properties: Record<string, unknown> = {};
   const required: string[] = [];

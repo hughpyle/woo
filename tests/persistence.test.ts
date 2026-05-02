@@ -35,10 +35,22 @@ function addBytecodeVerb(name: string, bytecode: TinyBytecode): VerbDef {
 
 class CountingLocalSQLiteRepository extends LocalSQLiteRepository {
   saves = 0;
+  objectSaves: string[] = [];
+  propertySaves: string[] = [];
 
   save(world: SerializedWorld): void {
     this.saves += 1;
     super.save(world);
+  }
+
+  saveObject(obj: Parameters<LocalSQLiteRepository["saveObject"]>[0]): void {
+    this.objectSaves.push(obj.id);
+    super.saveObject(obj);
+  }
+
+  saveProperty(id: Parameters<LocalSQLiteRepository["saveProperty"]>[0], prop: Parameters<LocalSQLiteRepository["saveProperty"]>[1]): void {
+    this.propertySaves.push(`${id}.${prop.name}`);
+    super.saveProperty(id, prop);
   }
 }
 
@@ -152,8 +164,12 @@ describe("sqlite persistence", () => {
       firstRepo.saves = 0;
 
       const session = firstWorld.auth("guest:incremental");
+      firstRepo.objectSaves = [];
+      firstRepo.propertySaves = [];
       const applied = await firstWorld.call("incremental-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.73]));
       expect(applied.op).toBe("applied");
+      expect(firstRepo.objectSaves).toEqual([]);
+      expect(firstRepo.propertySaves).toEqual(["the_dubspace.next_seq", "delay_1.wet"]);
       firstWorld.saveSnapshot("the_dubspace");
       firstRepo.close();
       expect(firstRepo.saves).toBe(0);
@@ -166,6 +182,27 @@ describe("sqlite persistence", () => {
       const resumed = secondWorld.auth(`session:${session.id}`);
       expect(resumed.actor).toBe(session.actor);
       secondRepo.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("coalesces deferred property writes to one dirty property save", () => {
+    const { dir, path } = tempDb();
+    try {
+      const repo = new CountingLocalSQLiteRepository(path);
+      const world = createWorld({ repository: repo });
+      repo.objectSaves = [];
+      repo.propertySaves = [];
+
+      world.withPersistenceDeferred(() => {
+        world.setProp("delay_1", "wet", 0.24);
+        world.setProp("delay_1", "wet", 0.61);
+      });
+
+      expect(repo.objectSaves).toEqual([]);
+      expect(repo.propertySaves).toEqual(["delay_1.wet"]);
+      repo.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

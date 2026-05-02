@@ -76,10 +76,10 @@ describe("local catalogs", () => {
     const world = createWorld({ catalogs: false });
     installLocalCatalogs(world, ["chat", "dubspace", "pinboard"]);
 
-    expect(world.object("$dubspace").verbs.get("enter")?.kind).toBe("bytecode");
-    expect(world.object("$dubspace").verbs.get("leave")?.kind).toBe("bytecode");
-    expect(world.object("$pinboard").verbs.get("enter")?.kind).toBe("bytecode");
-    expect(world.object("$pinboard").verbs.get("leave")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$dubspace", "enter")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$dubspace", "leave")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$pinboard", "enter")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$pinboard", "leave")?.kind).toBe("bytecode");
   });
 
   it("rejects missing catalog dependencies with the installed set in the error", async () => {
@@ -250,11 +250,11 @@ describe("local catalogs", () => {
       allowImplementationHints: false
     });
 
-    expect(world.object("$conversational").verbs.get("say")?.kind).toBe("bytecode");
-    expect(world.object("$conversational").verbs.get("enter")?.kind).toBe("bytecode");
-    expect(world.object("$conversational").verbs.get("leave")?.kind).toBe("bytecode");
-    expect(world.object("$conversational").verbs.get("command_plan")?.kind).toBe("bytecode");
-    expect(world.object("$match").verbs.get("parse_command")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$conversational", "say")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$conversational", "enter")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$conversational", "leave")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$conversational", "command_plan")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$match", "parse_command")?.kind).toBe("bytecode");
 
     const first = world.auth("guest:catalog-chat-1");
     const second = world.auth("guest:catalog-chat-2");
@@ -303,7 +303,7 @@ describe("local catalogs", () => {
       allowImplementationHints: false
     });
 
-    const verb = world.object("$shorthand_probe").verbs.get("ping");
+    const verb = world.ownVerb("$shorthand_probe", "ping");
     expect(verb?.perms).toBe("rx");
     expect(verb?.direct_callable).toBe(true);
     expect((await world.directCall("catalog-shorthand-ping", "$wiz", "$shorthand_probe", "ping", [])).op).toBe("result");
@@ -322,8 +322,8 @@ describe("local catalogs", () => {
       allowImplementationHints: false
     });
 
-    expect(world.object("$taskspace").verbs.get("create_task")?.kind).toBe("bytecode");
-    expect(world.object("$task").verbs.get("set_status")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$taskspace", "create_task")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$task", "set_status")?.kind).toBe("bytecode");
 
     const session = world.auth("guest:catalog-taskspace");
     const created = await world.call("create-task", session.id, "the_taskspace", {
@@ -357,10 +357,10 @@ describe("local catalogs", () => {
 
     expect(world.object("the_dubspace").location).toBe("the_chatroom");
     expect(world.object("the_chatroom").contents.has("the_dubspace")).toBe(true);
-    expect(world.object("$dubspace").verbs.get("set_control")?.kind).toBe("bytecode");
-    expect(world.object("$dubspace").verbs.get("set_drum_step")?.kind).toBe("bytecode");
-    expect(world.object("$dubspace").verbs.get("save_scene")?.kind).toBe("bytecode");
-    expect(world.object("$dubspace").verbs.get("enter")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$dubspace", "set_control")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$dubspace", "set_drum_step")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$dubspace", "save_scene")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$dubspace", "enter")?.kind).toBe("bytecode");
 
     const session = world.auth("guest:catalog-dubspace");
     const actor = session.actor;
@@ -425,8 +425,8 @@ describe("local catalogs", () => {
       allowImplementationHints: false
     });
 
-    expect(world.object("$pinboard").verbs.get("add_note")?.kind).toBe("bytecode");
-    expect(world.object("$pinboard").verbs.get("enter")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$pinboard", "add_note")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$pinboard", "enter")?.kind).toBe("bytecode");
     expect(world.object("the_pinboard").location).toBe("the_deck");
     expect(world.object("the_deck").contents.has("the_pinboard")).toBe(true);
 
@@ -551,8 +551,8 @@ describe("local catalogs", () => {
     const world = createWorld();
     const first = world.auth("guest:chat-command-first");
     const second = world.auth("guest:chat-command-second");
-    expect(world.object("$conversational").verbs.get("command_plan")?.kind).toBe("native");
-    expect(world.object("$match").verbs.get("parse_command")?.kind).toBe("native");
+    expect(world.ownVerb("$conversational", "command_plan")?.kind).toBe("native");
+    expect(world.ownVerb("$match", "parse_command")?.kind).toBe("native");
     await world.directCall("enter-first", first.actor, "the_chatroom", "enter", []);
     await world.directCall("enter-second", second.actor, "the_chatroom", "enter", []);
 
@@ -822,8 +822,8 @@ describe("local catalogs", () => {
       "2026-05-01-chat-observation-output",
       "2026-05-01-chat-room-contents-repair"
     ]);
-    const createTask = world.object("$taskspace").verbs.get("create_task");
-    const setControl = world.object("$dubspace").verbs.get("set_control");
+    const createTask = world.ownVerb("$taskspace", "create_task");
+    const setControl = world.ownVerb("$dubspace", "set_control");
     expect(createTask).toBeDefined();
     expect(setControl).toBeDefined();
     if (!createTask || !setControl) return;
@@ -832,8 +832,8 @@ describe("local catalogs", () => {
 
     installLocalCatalogs(world, ["chat", "taskspace", "dubspace"]);
 
-    expect(world.object("$taskspace").verbs.get("create_task")?.tool_exposed).toBe(true);
-    expect(world.object("$dubspace").verbs.get("set_control")?.tool_exposed).toBe(true);
+    expect(world.ownVerb("$taskspace", "create_task")?.tool_exposed).toBe(true);
+    expect(world.ownVerb("$dubspace", "set_control")?.tool_exposed).toBe(true);
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-01-agent-tool-exposure-repair");
   });
 
@@ -862,7 +862,7 @@ describe("local catalogs", () => {
   it("migrates stale local catalog native verbs to current catalog implementations", async () => {
     const world = createWorld();
     world.setProp("$system", "applied_migrations", []);
-    const look = world.object("$conversational").verbs.get("look")!;
+    const look = world.ownVerb("$conversational", "look")!;
     world.addVerb("$conversational", {
       kind: "native",
       name: look.name,
@@ -878,7 +878,7 @@ describe("local catalogs", () => {
       direct_callable: look.direct_callable,
       skip_presence_check: look.skip_presence_check
     });
-    const enter = world.object("$conversational").verbs.get("enter")!;
+    const enter = world.ownVerb("$conversational", "enter")!;
     world.addVerb("$conversational", {
       kind: "native",
       name: enter.name,
@@ -894,7 +894,7 @@ describe("local catalogs", () => {
       direct_callable: enter.direct_callable,
       skip_presence_check: enter.skip_presence_check
     });
-    const addSubtask = world.object("$task").verbs.get("add_subtask")!;
+    const addSubtask = world.ownVerb("$task", "add_subtask")!;
     world.addVerb("$task", {
       kind: "native",
       name: addSubtask.name,
@@ -913,13 +913,13 @@ describe("local catalogs", () => {
 
     installLocalCatalogs(world, ["chat", "taskspace"]);
 
-    const migratedEnter = world.object("$conversational").verbs.get("enter");
+    const migratedEnter = world.ownVerb("$conversational", "enter");
     expect(migratedEnter?.kind).toBe("bytecode");
     expect(migratedEnter?.source).toContain("set_presence");
-    const migratedLook = world.object("$conversational").verbs.get("look");
+    const migratedLook = world.ownVerb("$conversational", "look");
     expect(migratedLook?.kind).toBe("bytecode");
     expect(migratedLook?.source).toContain("look_self");
-    expect(world.object("$task").verbs.get("add_subtask")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$task", "add_subtask")?.kind).toBe("bytecode");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-source-catalog-verbs");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-catalog-placement-metadata");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-room-look-self");

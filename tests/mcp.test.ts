@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { installVerb } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
 import { McpHost, type McpTool } from "../src/mcp/host";
 import { McpGateway } from "../src/mcp/gateway";
@@ -156,6 +157,30 @@ describe("McpHost", () => {
 
     // Tool names are unique.
     expect(new Set(tools.map((t) => t.name)).size).toBe(tools.length);
+  });
+
+  it("builds input schemas from source-compiled parameter specs", async () => {
+    const world = bootstrapWorld();
+    const session = world.auth("guest:mcp-source-params");
+    const host = new McpHost(world);
+    host.bindSession(session.id, session.actor);
+    await world.directCall(undefined, session.actor, "the_chatroom", "enter", []);
+
+    world.createObject({ id: "schema_widget", name: "Schema Widget", parent: "$thing", owner: "$wiz", location: "the_chatroom" });
+    const installed = installVerb(world, "schema_widget", "paint", `verb :paint(color, count) rxd {
+  return color;
+}`, null);
+    expect(installed.ok).toBe(true);
+    const verb = world.ownVerb("schema_widget", "paint");
+    expect(verb).toBeDefined();
+    if (verb) verb.tool_exposed = true;
+
+    const tool = (await host.enumerateTools(session.actor)).find((candidate) => candidate.object === "schema_widget" && candidate.verb === "paint");
+    expect(tool).toBeDefined();
+    const schema = tool?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+    expect(schema.properties).toHaveProperty("color");
+    expect(schema.properties).toHaveProperty("count");
+    expect(schema.required).toEqual(["color", "count"]);
   });
 
   it("lists reachable tools with bounded default scope and explicit expansion", async () => {
@@ -753,7 +778,7 @@ describe("McpGateway", () => {
   it("keeps stable actor-control tools available when dynamic actor tools are hidden", async () => {
     const world = bootstrapWorld();
     for (const name of ["wait", "focus"]) {
-      const verb = world.object("$actor").verbs.get(name);
+      const verb = world.ownVerb("$actor", name);
       expect(verb).toBeDefined();
       if (verb) verb.tool_exposed = false;
     }

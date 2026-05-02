@@ -33,8 +33,8 @@ Builtins are functions, not verbs. They are registered with stable indices for t
 `create(parent, owner)`, `recycle(obj)`, `chparent(obj, new_parent)`,  
 `has_flag(obj, name)`,  
 `compile_verb(obj, name, source, options)`,  
-`set_verb_code(obj, name, source, expected_version, options)`,  
-`set_verb_info(obj, name, expected_version, info)`, `verb_info`, `verb_args`,  
+`set_verb_code(obj, descriptor, source, expected_version, options)`,
+`set_verb_info(obj, descriptor, expected_version, info)`, `verb_info`, `verb_args`,
 `define_property(obj, name, default, perms, expected_version, type_hint)`,  
 `set_property_info(obj, name, expected_version, info)`,  
 `delete_property(obj, name, expected_version)`, `property_info`, `properties(obj)`, `verbs(obj)`,  
@@ -42,6 +42,9 @@ Builtins are functions, not verbs. They are registered with stable indices for t
 
 The authoring-facing contract for compile/install, expected-version conflicts,
 and diagnostics is in [../authoring/minimal-ide.md](../authoring/minimal-ide.md).
+Verb descriptors follow [objects.md §9.1](objects.md#91-lookup): name-based
+descriptors resolve to the first matching local slot, and integer descriptors
+name a 1-based local slot directly.
 
 `create(parent, owner)` creates a new persistent object with the supplied parent
 and owner. In a sequenced call, the new object's anchor is the current space; in

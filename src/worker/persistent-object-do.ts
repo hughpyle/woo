@@ -233,8 +233,8 @@ export class PersistentObjectDO {
           }
         },
         broadcasts: {
-          broadcastApplied: (frame) => this.handleAppliedFrame(world, frame),
-          broadcastLiveEvents: (result) => this.broadcastLiveEvents(world, result)
+          broadcastApplied: (frame, originSessionId) => this.handleAppliedFrame(world, frame, undefined, originSessionId),
+          broadcastLiveEvents: (result, originSessionId) => this.broadcastLiveEvents(world, result, originSessionId)
         }
       });
       world.recordMetric({ kind: "init", phase: "mcp_gateway", ms: Date.now() - initStart });
@@ -1278,7 +1278,7 @@ export class PersistentObjectDO {
     };
   }
 
-  private broadcastApplied(world: WooWorld, frame: AppliedFrame, originator?: WebSocket): void {
+  private broadcastApplied(world: WooWorld, frame: AppliedFrame, originator?: WebSocket, originMcpSessionId?: string | null): void {
     const startedAt = Date.now();
     const data = JSON.stringify(frame);
     const dataNoId = JSON.stringify({ ...frame, id: undefined });
@@ -1293,13 +1293,13 @@ export class PersistentObjectDO {
         // socket gone; webSocketClose will clean up
       }
     }
-    this.mcpGateway?.routeAppliedFrame(frame);
+    this.mcpGateway?.routeAppliedFrame(frame, originMcpSessionId ?? null);
     world.recordMetric({ kind: "broadcast", audience_size: audienceSize, obs_count: frame.observations.length, ms: Date.now() - startedAt });
   }
 
-  private async handleAppliedFrame(world: WooWorld, frame: AppliedFrame, originator?: WebSocket): Promise<void> {
+  private async handleAppliedFrame(world: WooWorld, frame: AppliedFrame, originator?: WebSocket, originMcpSessionId?: string | null): Promise<void> {
     if (this.durableHostKey() === WORLD_HOST) await this.registerIncrementalObjectRoutes(world);
-    this.broadcastApplied(world, frame, originator);
+    this.broadcastApplied(world, frame, originator, originMcpSessionId);
   }
 
   private broadcastTaskResult(world: WooWorld, result: ParkedTaskRun): void {
@@ -1316,7 +1316,7 @@ export class PersistentObjectDO {
     }
   }
 
-  private broadcastLiveEvents(world: WooWorld, result: DirectResultFrame): void {
+  private broadcastLiveEvents(world: WooWorld, result: DirectResultFrame, originMcpSessionId?: string | null): void {
     if (!result.audience) return;
     const startedAt = Date.now();
     let audienceSize = 0;
@@ -1324,7 +1324,7 @@ export class PersistentObjectDO {
       const frame: LiveEventFrame = { op: "event", observation };
       audienceSize += this.broadcastLiveEvent(world, frame, result.audience!, result.observationAudiences?.[index] ?? result.audienceActors);
     });
-    this.mcpGateway?.routeLiveEvents(result);
+    this.mcpGateway?.routeLiveEvents(result, originMcpSessionId ?? null);
     world.recordMetric({ kind: "broadcast", audience_size: audienceSize, obs_count: result.observations.length, ms: Date.now() - startedAt });
   }
 

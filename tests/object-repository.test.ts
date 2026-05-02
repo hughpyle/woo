@@ -133,6 +133,24 @@ describe.each(backends)("ObjectRepository contract: $name", ({ make }) => {
     }
   });
 
+  it("preserves ordered duplicate verb slots", async () => {
+    const { repo, cleanup } = make();
+    try {
+      repo.saveObject(object("space"));
+      repo.saveVerb("space", { ...nativeVerb("same"), slot: 1, source_hash: "first" });
+      repo.saveVerb("space", { ...nativeVerb("same"), aliases: ["second"], slot: 2, source_hash: "second" });
+
+      expect(repo.listVerbNames("space")).toEqual(["same", "same"]);
+      expect(repo.loadVerb("space", "same")?.source_hash).toBe("first");
+      expect(repo.loadObject("space")?.verbs.map((verb) => [verb.name, verb.slot, verb.source_hash])).toEqual([
+        ["same", 1, "first"],
+        ["same", 2, "second"]
+      ]);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("uses a savepoint to roll back behavior while preserving the accepted log row", async () => {
     const { repo, cleanup } = make();
     try {

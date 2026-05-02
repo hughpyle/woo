@@ -143,7 +143,7 @@ Custom worlds can extend this list by overriding `$match.prepositions` (a list p
 - **Spell correction or fuzzy matching.** Prefix matching is the only forgiveness offered. Worlds that want Damerau-Levenshtein or phonetic matching layer it on top.
 - **Verb suggestion (`:huh`).** When `:match_verb` returns null, the caller can choose to call `room:huh(cmd)` (a convention, not a built-in). LambdaMOO's `:huh` lives on rooms; same here.
 - **Cross-room search.** `:match_object` only walks `location.contents` and `actor.contents`, even when those containers are remote. A world that wants global search adds a verb that walks an index.
-- **Arg-pattern overload selection.** LambdaMOO's `do_command` chooses among same-named verb candidates by matching `(dobj kind, preposition, iobj kind)` against each verb's arg spec. The v0 woo parser resolves by verb name only and lowers to the target verb's current argument shape. Full arg-pattern dispatch is deferred until the object model supports same-name verb candidates and the authoring surface exposes the grammar clearly.
+- **Arg-pattern overload selection.** LambdaMOO's `do_command` chooses among same-named verb candidates by matching `(dobj kind, preposition, iobj kind)` against each verb's arg spec. Woo now stores ordered same-name verb slots, but the chat parser still resolves by verb name only and lowers to the first matching target verb's current argument shape. Full arg-pattern dispatch is deferred until the authoring surface exposes the grammar clearly and command planning consumes it.
 
 These deferrals keep `$match` small. The pattern is "scaffolding for the 80% case"; the 20% extends it.
 

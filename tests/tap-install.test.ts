@@ -105,7 +105,7 @@ describe("GitHub catalog taps", () => {
     expect(world.object("$remote_control").parent).toBe("$thing");
     expect(world.object("remote_control_1").parent).toBe("$remote_control");
     expect(world.object("catalog_remote").parent).toBe("$catalog");
-    const ping = world.object("$remote_control").verbs.get("ping");
+    const ping = world.ownVerb("$remote_control", "ping");
     expect(ping?.kind).toBe("bytecode");
     expect(ping?.perms).toBe("rx");
     expect(ping?.direct_callable).toBe(true);

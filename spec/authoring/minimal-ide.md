@@ -146,6 +146,7 @@ remains the bitset defined in [objects.md §4](../semantics/objects.md#4-objects
 
 ```ts
 {
+  slot: int,
   name: str,
   aliases: str[],
   definer: ObjRef,
@@ -156,6 +157,11 @@ remains the bitset defined in [objects.md §4](../semantics/objects.md#4-objects
   readable: bool
 }
 ```
+
+`slot` is the 1-based position of the verb in `definer`'s local ordered verb
+list. Names are not unique: multiple slots may share the same `name` and differ
+by aliases or `arg_spec`. Name-based authoring updates the first matching slot
+unless the caller supplies an explicit slot descriptor.
 
 `VerbInfo` extends `VerbSummary`:
 
@@ -183,8 +189,8 @@ The IDE needs compile and install to be separate operations.
 
 ```ts
 compile_verb(obj, name, source, options?) -> CompileResult
-set_verb_code(obj, name, source, expected_version, options?) -> InstallResult
-set_verb_info(obj, name, expected_version, info) -> InstallResult
+set_verb_code(obj, descriptor, source, expected_version, options?) -> InstallResult
+set_verb_info(obj, descriptor, expected_version, info) -> InstallResult
 define_property(obj, name, default, perms, expected_version, type_hint?) -> PropertyInfo
 set_property_value(obj, name, value, expected_version?) -> PropertyInfo
 set_property_info(obj, name, expected_version, info) -> PropertyInfo

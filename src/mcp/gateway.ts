@@ -107,14 +107,12 @@ export class McpGateway {
   // ----- broadcast routing — called by the host runtime so external
   // observations reach MCP-attached agents the same way they reach WS clients.
 
-  routeAppliedFrame(frame: AppliedFrame): void {
-    const origin = (frame as { originMcpSessionId?: string }).originMcpSessionId ?? null;
-    this.host.routeAppliedFrame(frame, origin);
+  routeAppliedFrame(frame: AppliedFrame, originSessionId?: string | null): void {
+    this.host.routeAppliedFrame(frame, originSessionId ?? null);
   }
 
-  routeLiveEvents(result: DirectResultFrame): void {
-    const origin = (result as { originMcpSessionId?: string }).originMcpSessionId ?? null;
-    this.host.routeLiveEvents(result, origin);
+  routeLiveEvents(result: DirectResultFrame, originSessionId?: string | null): void {
+    this.host.routeLiveEvents(result, originSessionId ?? null);
   }
 
   closeSession(id: string): void {

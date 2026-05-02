@@ -365,8 +365,8 @@ function installProperty(world: WooWorld, obj: ObjRef, property: CatalogProperty
 }
 
 function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, allowImplementationHints: boolean, repairExisting: boolean): void {
-  const target = world.object(obj);
-  const existing = target.verbs.get(def.name);
+  world.object(obj);
+  const existing = world.ownVerb(obj, def.name);
   if (existing) {
     if (!repairExisting) {
       const parsedPerms = normalizeVerbPerms(def.perms ?? existing.perms, existing.direct_callable || def.direct_callable === true);
@@ -601,7 +601,7 @@ function applyMigrationStep(
     case "drop_verb": {
       const classRef = resolveObjectRef(world, step.class, localObjects, localSeeds, installed);
       const obj = world.object(classRef);
-      obj.verbs.delete(step.verb);
+      obj.verbs = obj.verbs.filter((verb) => verb.name !== step.verb).map((verb, index) => ({ ...verb, slot: index + 1 }));
       touchObject(world, classRef);
       return;
     }
@@ -658,10 +658,15 @@ function dropPropertyLocal(world: WooWorld, objRef: ObjRef, name: string): void 
 
 function renameVerbLocal(world: WooWorld, objRef: ObjRef, from: string, to: string): void {
   const obj = world.object(objRef);
-  const verb = obj.verbs.get(from);
+  const index = obj.verbs.findIndex((verb) => verb.name === from);
+  const verb = index >= 0 ? obj.verbs[index] : null;
   if (!verb) return;
-  if (!obj.verbs.has(to)) obj.verbs.set(to, { ...verb, name: to, version: verb.version + 1 });
-  obj.verbs.delete(from);
+  if (!obj.verbs.some((item) => item.name === to)) {
+    obj.verbs[index] = { ...verb, name: to, version: verb.version + 1 };
+  } else {
+    obj.verbs.splice(index, 1);
+  }
+  obj.verbs = obj.verbs.map((item, slotIndex) => ({ ...item, slot: slotIndex + 1 }));
   touchObject(world, objRef);
 }
 

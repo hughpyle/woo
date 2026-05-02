@@ -473,8 +473,11 @@ export class InMemoryObjectRepository implements ObjectRepository, WorldReposito
 
   saveVerb(id: ObjRef, verb: SerializedVerb): void {
     const obj = this.requireObject(id);
-    obj.verbs = obj.verbs.filter((item) => item.name !== verb.name);
-    obj.verbs.push(cloneRepoValue(verb as unknown as WooValue) as unknown as SerializedVerb);
+    const index = typeof verb.slot === "number" ? verb.slot - 1 : obj.verbs.findIndex((item) => item.name === verb.name);
+    const next = cloneRepoValue(verb as unknown as WooValue) as unknown as SerializedVerb;
+    if (index >= 0 && index < obj.verbs.length) obj.verbs[index] = next;
+    else obj.verbs.push(next);
+    obj.verbs = obj.verbs.map((item, slot) => ({ ...item, slot: slot + 1 }) as SerializedVerb);
   }
 
   deleteVerb(id: ObjRef, name: string): void {
@@ -485,7 +488,6 @@ export class InMemoryObjectRepository implements ObjectRepository, WorldReposito
   listVerbNames(id: ObjRef): string[] {
     return this.requireObject(id)
       .verbs.map((verb) => verb.name)
-      .sort();
   }
 
   loadChildren(id: ObjRef): ObjRef[] {
@@ -695,7 +697,7 @@ function cloneSerializedObject(obj: SerializedObject): SerializedObject {
     propertyDefs: obj.propertyDefs.map((def) => ({ ...def, defaultValue: cloneRepoValue(def.defaultValue) })),
     properties: obj.properties.map(([name, value]) => [name, cloneRepoValue(value)]),
     propertyVersions: obj.propertyVersions.map(([name, version]) => [name, version]),
-    verbs: obj.verbs.map((verb) => cloneRepoValue(verb as unknown as WooValue) as unknown as VerbDef),
+    verbs: obj.verbs.map((verb, index) => ({ ...(cloneRepoValue(verb as unknown as WooValue) as VerbDef), slot: index + 1 })),
     children: [...obj.children],
     contents: [...obj.contents],
     eventSchemas: obj.eventSchemas.map(([type, schema]) => [type, cloneRepoValue(schema as WooValue) as Record<string, WooValue>])

@@ -7,6 +7,7 @@ import {
   isErrorValue,
   valuesEqual,
   type AppliedFrame,
+  type CompileResult,
   type DirectResultFrame,
   type ErrorFrame,
   type ErrorValue,
@@ -23,10 +24,11 @@ import {
   type WooValue,
   wooError
 } from "./types";
-import type { ObjectRepository, ParkedTaskRecord, SerializedObject, SerializedSession, SerializedWorld, SpaceSnapshotRecord, WorldRepository } from "./repository";
+import type { ObjectRepository, ParkedTaskRecord, SerializedObject, SerializedProperty, SerializedSession, SerializedWorld, SpaceSnapshotRecord, WorldRepository } from "./repository";
 import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializedTinyVmTaskWithInput, runTinyVm, type SerializedVmTask } from "./tiny-vm";
 import { installCatalogManifest, updateCatalogManifest, type CatalogManifest, type CatalogMigrationManifest } from "./catalog-installer";
 import { normalizeVerbPerms } from "./verb-perms";
+import { compileVerb } from "./authoring";
 
 export type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
 const GUEST_SESSION_GRACE_MS = 60_000;
@@ -168,6 +170,18 @@ type BehaviorSavepoint = {
   parkedTaskCounter: number;
   sessionCounter: number;
   guestFreePool: Set<ObjRef>;
+  persistence: PersistenceDirtyState;
+};
+
+type PersistenceDirtyState = {
+  dirtyObjects: Set<ObjRef>;
+  dirtyProperties: Map<ObjRef, Set<string>>;
+  dirtySessions: Set<string>;
+  deletedSessions: Set<string>;
+  dirtyTasks: Set<string>;
+  deletedTasks: Set<string>;
+  dirtyCounters: boolean;
+  dirty: boolean;
 };
 
 const MAX_CALL_DEPTH = 128;
@@ -201,6 +215,13 @@ export class WooWorld {
   // ObjectRepository-backed worlds persist each touched slice directly.
   private persistenceDeferred = 0;
   private persistenceDirty = false;
+  private dirtyObjects = new Set<ObjRef>();
+  private dirtyProperties = new Map<ObjRef, Set<string>>();
+  private dirtySessions = new Set<string>();
+  private deletedSessions = new Set<string>();
+  private dirtyTasks = new Set<string>();
+  private deletedTasks = new Set<string>();
+  private dirtyCounters = false;
   private callDepth = 0;
   private guestFreePool = new Set<ObjRef>();
   private objectRepository: ObjectRepository | null;
@@ -290,7 +311,7 @@ export class WooWorld {
       propertyDefs: new Map(),
       properties: new Map(),
       propertyVersions: new Map(),
-      verbs: new Map(),
+      verbs: [],
       children: new Set(),
       contents: new Set(),
       eventSchemas: new Map()
@@ -337,7 +358,7 @@ export class WooWorld {
 
   setProp(objRef: ObjRef, name: string, value: WooValue): void {
     this.setPropLocal(objRef, name, value);
-    this.persistObject(objRef);
+    this.persistProperty(objRef, name);
     this.persist();
   }
 
@@ -361,13 +382,43 @@ export class WooWorld {
     throw wooError("E_PROPNF", `property not found: ${name}`, name);
   }
 
-  addVerb(objRef: ObjRef, verb: VerbDef): VerbDef {
+  addVerb(objRef: ObjRef, verb: VerbDef, options: { append?: boolean; slot?: number } = {}): VerbDef {
+    const obj = this.object(objRef);
     const parsedPerms = normalizeVerbPerms(verb.perms, verb.direct_callable === true);
+    const index =
+      options.slot !== undefined
+        ? options.slot - 1
+        : options.append === true
+          ? -1
+          : this.findOwnVerbIndex(obj, verb.name);
     const normalized = { ...verb, perms: parsedPerms.perms, direct_callable: parsedPerms.directCallable };
-    this.object(objRef).verbs.set(verb.name, normalized);
+    const writtenIndex = index >= 0 && index < obj.verbs.length ? index : obj.verbs.length;
+    if (index >= 0 && index < obj.verbs.length) {
+      obj.verbs[index] = this.withVerbSlot(normalized, index);
+    } else {
+      obj.verbs.push(this.withVerbSlot(normalized, obj.verbs.length));
+    }
+    this.reindexVerbs(obj);
     this.persistObject(objRef);
     this.persist();
-    return normalized;
+    return obj.verbs[writtenIndex];
+  }
+
+  ownVerb(objRef: ObjRef, name: string): VerbDef | null {
+    return this.ownVerbNamed(objRef, name);
+  }
+
+  private findOwnVerbIndex(obj: WooObject, name: string): number {
+    return obj.verbs.findIndex((verb) => verb.name === name);
+  }
+
+  private withVerbSlot(verb: VerbDef, index: number): VerbDef {
+    return { ...verb, slot: index + 1 } as VerbDef;
+  }
+
+  private reindexVerbs(obj: WooObject): void {
+    obj.verbs = obj.verbs.map((verb, index) => this.withVerbSlot(verb, index));
+    obj.modified = Date.now();
   }
 
   defineEventSchema(objRef: ObjRef, type: string, shape: Record<string, WooValue>): void {
@@ -397,11 +448,8 @@ export class WooWorld {
     let current: ObjRef | null = startRef;
     while (current) {
       const obj = this.object(current);
-      const exact = obj.verbs.get(name);
-      if (exact) return { definer: current, verb: exact };
-      for (const verb of obj.verbs.values()) {
-        if (verb.aliases.some((alias) => verbAliasMatches(alias, name))) return { definer: current, verb };
-      }
+      const verb = this.ownVerbNamed(current, name);
+      if (verb) return { definer: current, verb };
       current = obj.parent;
     }
     if (!required) return null;
@@ -609,6 +657,7 @@ export class WooWorld {
     const { definer, verb } = this.resolveVerb(objRef, name);
     const base: Record<string, WooValue> = {
       name: verb.name,
+      slot: verb.slot ?? 0,
       aliases: verb.aliases,
       definer,
       owner: verb.owner,
@@ -1188,6 +1237,325 @@ export class WooWorld {
     return { ...described, props };
   }
 
+  progCompile(actor: ObjRef, source: string): WooValue {
+    this.assertProgrammerActor(actor);
+    const compiled = compileVerb(source);
+    return compileResultSummary(compiled) as WooValue;
+  }
+
+  progResolveVerb(actor: ObjRef, objRef: ObjRef, descriptor: WooValue): WooValue {
+    this.assertProgrammerActor(actor);
+    const walk: Record<string, WooValue>[] = [];
+    const resolved =
+      typeof descriptor === "number"
+        ? this.resolveVerbSlotWithWalk(actor, objRef, descriptor, walk)
+        : this.resolveVerbWithWalk(actor, objRef, assertVerbNameDescriptor(descriptor), walk);
+    return {
+      ...this.verbSummaryForActor(actor, resolved.definer, resolved.verb, { includeSource: true }),
+      walk: walk as unknown as WooValue
+    };
+  }
+
+  progInspect(actor: ObjRef, objRef: ObjRef, opts: WooValue = null): WooValue {
+    this.assertProgrammerActor(actor);
+    const options = progOptions(opts);
+    const includeSource = optionBool(options, "include_source", false);
+    const maxChildren = optionInt(options, "max_children", 50, 0, 500);
+    const maxInstances = optionInt(options, "max_instances", 50, 0, 500);
+    const maxValueBytes = optionInt(options, "max_value_bytes", 512, 0, 16_384);
+    const obj = this.object(objRef);
+    const children = Array.from(obj.children).sort();
+    const fertileChildren = children.filter((child) => this.object(child).flags.fertile === true);
+    const instances = children.filter((child) => this.object(child).flags.fertile !== true);
+    const parentChain: Record<string, WooValue>[] = [];
+    let current: ObjRef | null = objRef;
+    while (current) {
+      const item = this.object(current);
+      parentChain.push({
+        id: current,
+        name: item.name,
+        owner: item.owner,
+        own_verbs: item.verbs.length,
+        own_properties: item.propertyDefs.size
+      });
+      current = item.parent;
+    }
+
+    const features = this.canCarryFeatures(objRef)
+      ? this.featureList(objRef).map((feature) => {
+          const featureObj = this.object(feature);
+          return {
+            id: feature,
+            name: featureObj.name,
+            verbs_contributed: uniqueVerbNames(featureObj.verbs).sort()
+          };
+        })
+      : [];
+    const attachedTo = this.attachedConsumersOf(objRef).slice(0, maxInstances);
+    const ownProperties = this.ownPropertySummaries(actor, objRef, maxValueBytes);
+    const inheritedProperties = this.inheritedPropertySummaries(actor, objRef, maxValueBytes);
+    const ownVerbs = obj.verbs
+      .map((verb) => this.verbSummaryForActor(actor, objRef, verb, { includeSource }));
+    const inheritedVerbs = this.inheritedVerbSummaries(actor, objRef, includeSource);
+
+    return {
+      id: obj.id,
+      owner: obj.owner,
+      flags: {
+        wizard: obj.flags.wizard === true,
+        programmer: obj.flags.programmer === true,
+        fertile: obj.flags.fertile === true,
+        recyclable: obj.flags.recyclable === true
+      },
+      name: obj.name,
+      description: this.propOrNullForActor(actor, objRef, "description"),
+      parent: obj.parent,
+      parent_chain: parentChain as unknown as WooValue,
+      features: features as unknown as WooValue,
+      children: children.slice(0, maxChildren),
+      fertile_children: fertileChildren.slice(0, maxChildren),
+      instances: instances.slice(0, maxInstances),
+      attached_to: attachedTo,
+      impact: {
+        child_count: children.length,
+        instance_count: instances.length,
+        attached_to_count: this.attachedConsumersOf(objRef).length
+      },
+      location: obj.location,
+      contents: Array.from(obj.contents).sort(),
+      own_verbs: ownVerbs as unknown as WooValue,
+      inherited_verbs: inheritedVerbs as unknown as WooValue,
+      own_properties: ownProperties as unknown as WooValue,
+      inherited_properties: inheritedProperties as unknown as WooValue
+    };
+  }
+
+  progSearch(actor: ObjRef, query: string, opts: WooValue = null): WooValue {
+    this.assertProgrammerActor(actor);
+    const options = progOptions(opts);
+    const normalized = query.trim().toLowerCase();
+    const scope = optionString(options, "scope", "actor_context");
+    const limit = optionInt(options, "limit", 50, 1, 500);
+    const channels = new Set(optionStringList(options, "channels", ["object_name", "verb_name", "verb_source", "property_name", "property_value"]));
+    const results: Record<string, WooValue>[] = [];
+    let total = 0;
+    const addResult = (result: Record<string, WooValue>): void => {
+      total += 1;
+      if (results.length < limit) results.push(result);
+    };
+
+    for (const id of this.progScopeObjectIds(actor, scope)) {
+      const obj = this.object(id);
+      if (channels.has("object_name") && textMatches(normalized, obj.id, obj.name, this.propOrNullForActor(actor, id, "description"))) {
+        addResult({ kind: "object", channel: "object_name", id, name: obj.name });
+      }
+      if (channels.has("verb_name") || channels.has("verb_source")) {
+        for (const verb of obj.verbs) {
+          if (channels.has("verb_name") && textMatches(normalized, verb.name, ...verb.aliases)) {
+            addResult({ kind: "verb", channel: "verb_name", id, verb: verb.name, definer: id, owner: verb.owner });
+          }
+          if (channels.has("verb_source") && this.canReadVerb(actor, verb) && textMatches(normalized, verb.source)) {
+            addResult({ kind: "verb", channel: "verb_source", id, verb: verb.name, definer: id, owner: verb.owner });
+          }
+        }
+      }
+      if (channels.has("property_name") || channels.has("property_value")) {
+        const propNames = new Set<string>([...obj.propertyDefs.keys(), ...obj.properties.keys()]);
+        for (const prop of Array.from(propNames).sort()) {
+          if (channels.has("property_name") && textMatches(normalized, prop)) {
+            addResult({ kind: "property", channel: "property_name", id, property: prop });
+          }
+          if (channels.has("property_value") && this.canReadProperty(actor, id, prop)) {
+            const value = this.propOrNullForActor(actor, id, prop);
+            if (textMatches(normalized, valueSummary(value, 512))) {
+              addResult({ kind: "property", channel: "property_value", id, property: prop });
+            }
+          }
+        }
+      }
+    }
+
+    return { query, scope, total, limit, results: results as unknown as WooValue };
+  }
+
+  canReadVerb(actor: ObjRef, verb: VerbDef): boolean {
+    return this.canBypassPerms(actor) || verb.owner === actor || verb.perms.includes("r");
+  }
+
+  private assertProgrammerActor(actor: ObjRef): void {
+    const obj = this.object(actor);
+    if (obj.flags.programmer === true || obj.flags.wizard === true) return;
+    throw wooError("E_PERM", "programmer flag required", actor);
+  }
+
+  private resolveVerbWithWalk(actor: ObjRef, objRef: ObjRef, name: string, walk: Record<string, WooValue>[]): ResolvedVerb {
+    let current: ObjRef | null = objRef;
+    while (current) {
+      const match = this.ownVerbNamed(current, name);
+      walk.push({ id: current, kind: "parent", matched: match !== null });
+      if (match) return { definer: current, verb: match };
+      current = this.object(current).parent;
+    }
+    if (this.canCarryFeatures(objRef)) {
+      for (const feature of this.featureList(objRef)) {
+        let featureCurrent: ObjRef | null = feature;
+        while (featureCurrent) {
+          const match = this.ownVerbNamed(featureCurrent, name);
+          walk.push({ id: featureCurrent, kind: "feature", feature, matched: match !== null });
+          if (match) return { definer: featureCurrent, verb: match };
+          featureCurrent = this.object(featureCurrent).parent;
+        }
+      }
+    }
+    throw wooError("E_VERBNF", `verb not found: ${objRef}:${name}`, { obj: objRef, name, actor });
+  }
+
+  private resolveVerbSlotWithWalk(actor: ObjRef, objRef: ObjRef, slot: number, walk: Record<string, WooValue>[]): ResolvedVerb {
+    if (!Number.isInteger(slot) || slot < 1) throw wooError("E_INVARG", "verb slot must be a positive integer", slot);
+    const obj = this.object(objRef);
+    const verb = obj.verbs[slot - 1];
+    walk.push({ id: objRef, kind: "slot", slot, matched: verb !== undefined });
+    if (!verb) throw wooError("E_VERBNF", `verb slot not found: ${objRef}:${slot}`, { obj: objRef, slot, actor });
+    return { definer: objRef, verb };
+  }
+
+  private ownVerbNamed(objRef: ObjRef, name: string): VerbDef | null {
+    const obj = this.object(objRef);
+    for (const verb of obj.verbs) {
+      if (verb.name === name) return verb;
+    }
+    for (const verb of obj.verbs) {
+      if (verb.aliases.some((alias) => verbAliasMatches(alias, name))) return verb;
+    }
+    return null;
+  }
+
+  private verbSummaryForActor(actor: ObjRef, definer: ObjRef, verb: VerbDef, options: { includeSource: boolean }): Record<string, WooValue> {
+    const readable = this.canReadVerb(actor, verb);
+    const summary: Record<string, WooValue> = {
+      name: verb.name,
+      slot: verb.slot ?? 0,
+      aliases: verb.aliases,
+      definer,
+      owner: verb.owner,
+      perms: verb.perms,
+      arg_spec: verb.arg_spec as WooValue,
+      version: verb.version,
+      direct_callable: verb.direct_callable === true,
+      tool_exposed: verb.tool_exposed === true,
+      readable
+    };
+    if (readable && options.includeSource) {
+      summary.source = verb.source;
+      summary.source_hash = verb.source_hash;
+      summary.line_map = verb.line_map as WooValue;
+    }
+    return summary;
+  }
+
+  private inheritedVerbSummaries(actor: ObjRef, objRef: ObjRef, includeSource: boolean): Record<string, WooValue>[] {
+    const shadowed = new Set<string>(this.object(objRef).verbs.map((verb) => verb.name));
+    const summaries: Record<string, WooValue>[] = [];
+    let current = this.object(objRef).parent;
+    while (current) {
+      const obj = this.object(current);
+      for (const verb of obj.verbs) {
+        if (shadowed.has(verb.name)) continue;
+        summaries.push(this.verbSummaryForActor(actor, current, verb, { includeSource }));
+      }
+      for (const verb of obj.verbs) shadowed.add(verb.name);
+      current = obj.parent;
+    }
+    if (this.canCarryFeatures(objRef)) {
+      for (const feature of this.featureList(objRef)) {
+        let featureCurrent: ObjRef | null = feature;
+        while (featureCurrent) {
+          const obj = this.object(featureCurrent);
+          for (const verb of obj.verbs) {
+            if (shadowed.has(verb.name)) continue;
+            summaries.push({ ...this.verbSummaryForActor(actor, featureCurrent, verb, { includeSource }), feature });
+          }
+          for (const verb of obj.verbs) shadowed.add(verb.name);
+          featureCurrent = obj.parent;
+        }
+      }
+    }
+    return summaries.sort((left, right) => String(left.name).localeCompare(String(right.name)));
+  }
+
+  private ownPropertySummaries(actor: ObjRef, objRef: ObjRef, maxValueBytes: number): Record<string, WooValue>[] {
+    const obj = this.object(objRef);
+    const names = new Set<string>([...obj.propertyDefs.keys(), ...obj.properties.keys()]);
+    return Array.from(names).sort().map((name) => this.propertySummaryForActor(actor, objRef, name, maxValueBytes, objRef));
+  }
+
+  private inheritedPropertySummaries(actor: ObjRef, objRef: ObjRef, maxValueBytes: number): Record<string, WooValue>[] {
+    const seen = new Set<string>(this.object(objRef).propertyDefs.keys());
+    const summaries: Record<string, WooValue>[] = [];
+    let current = this.object(objRef).parent;
+    while (current) {
+      const obj = this.object(current);
+      for (const name of obj.propertyDefs.keys()) {
+        if (seen.has(name)) continue;
+        seen.add(name);
+        summaries.push(this.propertySummaryForActor(actor, objRef, name, maxValueBytes, current));
+      }
+      current = obj.parent;
+    }
+    return summaries;
+  }
+
+  private propertySummaryForActor(actor: ObjRef, objRef: ObjRef, name: string, maxValueBytes: number, fallbackDefiner: ObjRef): Record<string, WooValue> {
+    const info = this.propertyInfo(objRef, name);
+    const readable = this.canReadProperty(actor, objRef, name);
+    const summary: Record<string, WooValue> = {
+      name,
+      owner: info.owner,
+      perms: info.perms,
+      defined_on: info.defined_on ?? fallbackDefiner,
+      type_hint: info.type_hint ?? null,
+      version: info.version,
+      has_value: info.has_value === true,
+      readable
+    };
+    if (readable) summary.value_summary = valueSummary(this.propOrNullForActor(actor, objRef, name), maxValueBytes);
+    return summary;
+  }
+
+  private attachedConsumersOf(feature: ObjRef): ObjRef[] {
+    const attached: ObjRef[] = [];
+    for (const obj of this.objects.values()) {
+      if (!this.canCarryFeatures(obj.id)) continue;
+      if (this.featureList(obj.id).includes(feature)) attached.push(obj.id);
+    }
+    return attached.sort();
+  }
+
+  private progScopeObjectIds(actor: ObjRef, scope: string): ObjRef[] {
+    const ids = new Set<ObjRef>();
+    const add = (id: ObjRef | null | undefined): void => {
+      if (id && this.objects.has(id)) ids.add(id);
+    };
+    const actorObj = this.object(actor);
+    if (scope === "all") {
+      for (const id of this.objects.keys()) add(id);
+    } else if (scope === "owned") {
+      for (const obj of this.objects.values()) if (obj.owner === actor) add(obj.id);
+    } else {
+      add(actor);
+      add(actorObj.location);
+      for (const item of actorObj.contents) add(item);
+      if (actorObj.location && this.objects.has(actorObj.location)) {
+        for (const item of this.object(actorObj.location).contents) add(item);
+      }
+      if (this.canCarryFeatures(actor)) {
+        for (const feature of this.featureList(actor)) add(feature);
+      }
+      if (scope !== "actor_context" && scope !== "here") throw wooError("E_INVARG", `unknown prog search scope: ${scope}`, scope);
+    }
+    return Array.from(ids).sort();
+  }
+
   createRuntimeObject(parent: ObjRef, owner: ObjRef, anchor: ObjRef | null = null, options: { progr?: ObjRef; location?: ObjRef | null; name?: string } = {}): ObjRef {
     this.object(parent);
     this.object(owner);
@@ -1555,13 +1923,10 @@ export class WooWorld {
           propertyDefs: new Map(item.propertyDefs.map((def) => [def.name, { ...def, defaultValue: cloneValue(def.defaultValue) }])),
           properties: new Map(item.properties.map(([name, value]) => [name, cloneValue(value)])),
           propertyVersions: new Map(item.propertyVersions),
-          verbs: new Map(
-            item.verbs.map((verb) => {
-              const parsedPerms = normalizeVerbPerms(verb.perms, verb.direct_callable === true);
-              const normalized = { ...verb, perms: parsedPerms.perms, direct_callable: parsedPerms.directCallable };
-              return [normalized.name, normalized] as const;
-            })
-          ),
+          verbs: item.verbs.map((verb, index) => {
+            const parsedPerms = normalizeVerbPerms(verb.perms, verb.direct_callable === true);
+            return { ...verb, perms: parsedPerms.perms, direct_callable: parsedPerms.directCallable, slot: index + 1 } as VerbDef;
+          }),
           children: new Set(item.children),
           contents: new Set(item.contents),
           eventSchemas: new Map(item.eventSchemas)
@@ -1599,7 +1964,7 @@ export class WooWorld {
       propertyDefs: Array.from(obj.propertyDefs.values()).map((def) => ({ ...def, defaultValue: cloneValue(def.defaultValue) })),
       properties: Array.from(obj.properties.entries()).map(([name, value]) => [name, cloneValue(value)]),
       propertyVersions: Array.from(obj.propertyVersions.entries()),
-      verbs: Array.from(obj.verbs.values()).map((verb) => cloneValue(verb as unknown as WooValue) as unknown as VerbDef),
+      verbs: obj.verbs.map((verb) => cloneValue(verb as unknown as WooValue) as unknown as VerbDef),
       children: Array.from(obj.children),
       contents: Array.from(obj.contents),
       eventSchemas: Array.from(obj.eventSchemas.entries()).map(([type, schema]) => [type, cloneValue(schema as WooValue) as Record<string, WooValue>])
@@ -1690,7 +2055,7 @@ export class WooWorld {
     for (const value of obj.properties.values()) this.scanValueRefs(value, add);
     for (const def of obj.propertyDefs.values()) this.scanValueRefs(def.defaultValue, add);
     for (const [, schema] of obj.eventSchemas) this.scanValueRefs(schema as WooValue, add);
-    for (const verb of obj.verbs.values()) {
+    for (const verb of obj.verbs) {
       this.scanValueRefs(verb.arg_spec as WooValue, add);
       if (verb.kind === "bytecode") this.scanValueRefs(verb.bytecode.literals as WooValue, add);
     }
@@ -1801,12 +2166,12 @@ export class WooWorld {
   persist(force = false): void {
     if (!this.repository) return;
     if (this.activeObjectRepository()) {
-      if (!force && this.persistencePaused > 0) {
+      if (!force && (this.persistencePaused > 0 || this.persistenceDeferred > 0)) {
         this.persistenceDirty = true;
         return;
       }
-      if (force) this.flushIncrementalState();
-      this.persistenceDirty = false;
+      if (force || this.persistenceDirty) this.flushIncrementalState();
+      this.persistenceDirty = this.hasDirtyPersistence();
       return;
     }
     if (!force && (this.persistencePaused > 0 || this.persistenceDeferred > 0)) {
@@ -1821,22 +2186,131 @@ export class WooWorld {
     return this.incrementalPersistenceEnabled ? this.objectRepository : null;
   }
 
+  private markObjectDirty(objRef: ObjRef): void {
+    this.dirtyObjects.add(objRef);
+    this.dirtyProperties.delete(objRef);
+    this.persistenceDirty = true;
+  }
+
+  private markPropertyDirty(objRef: ObjRef, name: string): void {
+    if (this.dirtyObjects.has(objRef)) {
+      this.persistenceDirty = true;
+      return;
+    }
+    let properties = this.dirtyProperties.get(objRef);
+    if (!properties) {
+      properties = new Set<string>();
+      this.dirtyProperties.set(objRef, properties);
+    }
+    properties.add(name);
+    this.persistenceDirty = true;
+  }
+
+  private markSessionDirty(sessionId: string): void {
+    this.deletedSessions.delete(sessionId);
+    this.dirtySessions.add(sessionId);
+    this.persistenceDirty = true;
+  }
+
+  private markSessionDeleted(sessionId: string): void {
+    this.dirtySessions.delete(sessionId);
+    this.deletedSessions.add(sessionId);
+    this.persistenceDirty = true;
+  }
+
+  private markTaskDirty(taskId: string): void {
+    this.deletedTasks.delete(taskId);
+    this.dirtyTasks.add(taskId);
+    this.persistenceDirty = true;
+  }
+
+  private markTaskDeleted(taskId: string): void {
+    this.dirtyTasks.delete(taskId);
+    this.deletedTasks.add(taskId);
+    this.persistenceDirty = true;
+  }
+
+  private markCountersDirty(): void {
+    this.dirtyCounters = true;
+    this.persistenceDirty = true;
+  }
+
+  private snapshotPersistenceDirtyState(): PersistenceDirtyState {
+    return {
+      dirtyObjects: new Set(this.dirtyObjects),
+      dirtyProperties: new Map(Array.from(this.dirtyProperties.entries()).map(([objRef, properties]) => [objRef, new Set(properties)])),
+      dirtySessions: new Set(this.dirtySessions),
+      deletedSessions: new Set(this.deletedSessions),
+      dirtyTasks: new Set(this.dirtyTasks),
+      deletedTasks: new Set(this.deletedTasks),
+      dirtyCounters: this.dirtyCounters,
+      dirty: this.persistenceDirty
+    };
+  }
+
+  private restorePersistenceDirtyState(state: PersistenceDirtyState): void {
+    this.dirtyObjects = new Set(state.dirtyObjects);
+    this.dirtyProperties = new Map(Array.from(state.dirtyProperties.entries()).map(([objRef, properties]) => [objRef, new Set(properties)]));
+    this.dirtySessions = new Set(state.dirtySessions);
+    this.deletedSessions = new Set(state.deletedSessions);
+    this.dirtyTasks = new Set(state.dirtyTasks);
+    this.deletedTasks = new Set(state.deletedTasks);
+    this.dirtyCounters = state.dirtyCounters;
+    this.persistenceDirty = state.dirty;
+  }
+
+  private hasDirtyPersistence(): boolean {
+    return (
+      this.dirtyObjects.size > 0 ||
+      this.dirtyProperties.size > 0 ||
+      this.dirtySessions.size > 0 ||
+      this.deletedSessions.size > 0 ||
+      this.dirtyTasks.size > 0 ||
+      this.deletedTasks.size > 0 ||
+      this.dirtyCounters
+    );
+  }
+
   private persistObject(objRef: ObjRef): void {
     const repo = this.activeObjectRepository();
     if (!repo) return;
-    if (this.persistencePaused > 0) {
-      this.persistenceDirty = true;
+    if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
+      this.markObjectDirty(objRef);
       return;
     }
     const obj = this.objects.get(objRef);
     if (obj) repo.saveObject(this.serializeObject(obj));
   }
 
+  private persistProperty(objRef: ObjRef, name: string): void {
+    const repo = this.activeObjectRepository();
+    if (!repo) return;
+    if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
+      this.markPropertyDirty(objRef, name);
+      return;
+    }
+    repo.saveProperty(objRef, this.serializeProperty(objRef, name));
+  }
+
+  private serializeProperty(objRef: ObjRef, name: string): SerializedProperty {
+    const obj = this.object(objRef);
+    const def = obj.propertyDefs.get(name);
+    const hasValue = obj.properties.has(name);
+    const hasVersion = obj.propertyVersions.has(name);
+    if (!def && !hasValue && !hasVersion) throw wooError("E_PROPNF", `property not found: ${objRef}.${name}`, { obj: objRef, property: name });
+    return {
+      name,
+      def: def ? { ...def, defaultValue: cloneValue(def.defaultValue) } : null,
+      value: hasValue ? cloneValue(obj.properties.get(name)!) : undefined,
+      version: obj.propertyVersions.get(name) ?? def?.version ?? 0
+    };
+  }
+
   private persistSession(session: Session): void {
     const repo = this.activeObjectRepository();
     if (!repo) return;
-    if (this.persistencePaused > 0) {
-      this.persistenceDirty = true;
+    if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
+      this.markSessionDirty(session.id);
       return;
     }
     repo.saveSession(this.serializeSession(session));
@@ -1845,8 +2319,8 @@ export class WooWorld {
   private deletePersistedSession(sessionId: string): void {
     const repo = this.activeObjectRepository();
     if (!repo) return;
-    if (this.persistencePaused > 0) {
-      this.persistenceDirty = true;
+    if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
+      this.markSessionDeleted(sessionId);
       return;
     }
     repo.deleteSession(sessionId);
@@ -1855,8 +2329,8 @@ export class WooWorld {
   private persistTask(task: ParkedTaskRecord): void {
     const repo = this.activeObjectRepository();
     if (!repo) return;
-    if (this.persistencePaused > 0) {
-      this.persistenceDirty = true;
+    if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
+      this.markTaskDirty(task.id);
       return;
     }
     repo.saveTask(task);
@@ -1865,8 +2339,8 @@ export class WooWorld {
   private persistCounters(): void {
     const repo = this.activeObjectRepository();
     if (!repo) return;
-    if (this.persistencePaused > 0) {
-      this.persistenceDirty = true;
+    if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
+      this.markCountersDirty();
       return;
     }
     repo.saveMeta("objectCounter", String(this.objectCounter));
@@ -1877,8 +2351,8 @@ export class WooWorld {
   private deletePersistedTask(taskId: string): void {
     const repo = this.activeObjectRepository();
     if (!repo) return;
-    if (this.persistencePaused > 0) {
-      this.persistenceDirty = true;
+    if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
+      this.markTaskDeleted(taskId);
       return;
     }
     repo.deleteTask(taskId);
@@ -1887,15 +2361,72 @@ export class WooWorld {
   private flushIncrementalState(): void {
     const repo = this.activeObjectRepository();
     if (!repo) return;
+    if (!this.persistenceDirty) return;
+    if (!this.hasDirtyPersistence()) {
+      this.persistenceDirty = false;
+      return;
+    }
+    const dirtyObjects = Array.from(this.dirtyObjects);
+    const dirtyObjectSet = new Set(dirtyObjects);
+    const dirtyProperties = Array.from(this.dirtyProperties.entries()).flatMap(([objRef, properties]) =>
+      Array.from(properties).map((name) => ({ objRef, name }))
+    );
+    const dirtySessions = Array.from(this.dirtySessions);
+    const deletedSessions = Array.from(this.deletedSessions);
+    const dirtyTasks = Array.from(this.dirtyTasks);
+    const deletedTasks = Array.from(this.deletedTasks);
+    const dirtyCounters = this.dirtyCounters;
+    const startedAt = Date.now();
     repo.transaction(() => {
-      for (const obj of this.objects.values()) repo.saveObject(this.serializeObject(obj));
-      for (const session of this.sessions.values()) repo.saveSession(this.serializeSession(session));
-      for (const task of this.parkedTasks.values()) repo.saveTask(task);
-      for (const snapshot of this.snapshots) repo.saveSpaceSnapshot(snapshot);
-      repo.saveMeta("version", "1");
-      repo.saveMeta("objectCounter", String(this.objectCounter));
-      repo.saveMeta("parkedTaskCounter", String(this.parkedTaskCounter));
-      repo.saveMeta("sessionCounter", String(this.sessionCounter));
+      for (const sessionId of deletedSessions) repo.deleteSession(sessionId);
+      for (const sessionId of dirtySessions) {
+        if (this.deletedSessions.has(sessionId)) continue;
+        const session = this.sessions.get(sessionId);
+        if (session) repo.saveSession(this.serializeSession(session));
+      }
+      for (const taskId of deletedTasks) repo.deleteTask(taskId);
+      for (const taskId of dirtyTasks) {
+        if (this.deletedTasks.has(taskId)) continue;
+        const task = this.parkedTasks.get(taskId);
+        if (task) repo.saveTask(task);
+      }
+      for (const objRef of dirtyObjects) {
+        const obj = this.objects.get(objRef);
+        if (obj) repo.saveObject(this.serializeObject(obj));
+      }
+      for (const { objRef, name } of dirtyProperties) {
+        if (dirtyObjectSet.has(objRef) || !this.objects.has(objRef)) continue;
+        repo.saveProperty(objRef, this.serializeProperty(objRef, name));
+      }
+      if (dirtyCounters) {
+        repo.saveMeta("version", "1");
+        repo.saveMeta("objectCounter", String(this.objectCounter));
+        repo.saveMeta("parkedTaskCounter", String(this.parkedTaskCounter));
+        repo.saveMeta("sessionCounter", String(this.sessionCounter));
+      }
+    });
+    for (const objRef of dirtyObjects) this.dirtyObjects.delete(objRef);
+    for (const { objRef, name } of dirtyProperties) {
+      const properties = this.dirtyProperties.get(objRef);
+      properties?.delete(name);
+      if (properties?.size === 0) this.dirtyProperties.delete(objRef);
+    }
+    for (const sessionId of dirtySessions) this.dirtySessions.delete(sessionId);
+    for (const sessionId of deletedSessions) this.deletedSessions.delete(sessionId);
+    for (const taskId of dirtyTasks) this.dirtyTasks.delete(taskId);
+    for (const taskId of deletedTasks) this.deletedTasks.delete(taskId);
+    if (dirtyCounters) this.dirtyCounters = false;
+    this.persistenceDirty = this.hasDirtyPersistence();
+    this.recordMetric({
+      kind: "storage_flush",
+      objects: dirtyObjects.length,
+      properties: dirtyProperties.filter(({ objRef }) => !dirtyObjectSet.has(objRef)).length,
+      sessions: dirtySessions.length,
+      deleted_sessions: deletedSessions.length,
+      tasks: dirtyTasks.length,
+      deleted_tasks: deletedTasks.length,
+      counters: dirtyCounters,
+      ms: Date.now() - startedAt
     });
   }
 
@@ -2120,7 +2651,7 @@ export class WooWorld {
     let current: ObjRef | null = startRef;
     while (current) {
       const obj = this.object(current);
-      for (const name of obj.verbs.keys()) names.add(name);
+      for (const verb of obj.verbs) names.add(verb.name);
       current = obj.parent;
     }
   }
@@ -2826,7 +3357,8 @@ export class WooWorld {
       objectCounter: this.objectCounter,
       parkedTaskCounter: this.parkedTaskCounter,
       sessionCounter: this.sessionCounter,
-      guestFreePool: new Set(this.guestFreePool)
+      guestFreePool: new Set(this.guestFreePool),
+      persistence: this.snapshotPersistenceDirtyState()
     };
   }
 
@@ -2839,6 +3371,7 @@ export class WooWorld {
     this.parkedTaskCounter = savepoint.parkedTaskCounter;
     this.sessionCounter = savepoint.sessionCounter;
     this.guestFreePool = new Set(savepoint.guestFreePool);
+    this.restorePersistenceDirtyState(savepoint.persistence);
   }
 
   private cloneObject(obj: WooObject): WooObject {
@@ -2848,7 +3381,7 @@ export class WooWorld {
       propertyDefs: new Map(Array.from(obj.propertyDefs.entries()).map(([name, def]) => [name, { ...def, defaultValue: cloneValue(def.defaultValue) }])),
       properties: new Map(Array.from(obj.properties.entries()).map(([name, value]) => [name, cloneValue(value)])),
       propertyVersions: new Map(obj.propertyVersions),
-      verbs: new Map(Array.from(obj.verbs.entries()).map(([name, verb]) => [name, cloneValue(verb as unknown as WooValue) as unknown as VerbDef])),
+      verbs: obj.verbs.map((verb) => cloneValue(verb as unknown as WooValue) as unknown as VerbDef),
       children: new Set(obj.children),
       contents: new Set(obj.contents),
       eventSchemas: new Map(Array.from(obj.eventSchemas.entries()).map(([type, schema]) => [type, cloneValue(schema as unknown as WooValue) as Record<string, WooValue>]))
@@ -3478,6 +4011,77 @@ export class WooWorld {
   }
 }
 
+function compileResultSummary(result: CompileResult): Record<string, WooValue> {
+  const summary: Record<string, WooValue> = {
+    ok: result.ok,
+    diagnostics: result.diagnostics as unknown as WooValue
+  };
+  if (result.source_hash) summary.source_hash = result.source_hash;
+  if (result.metadata) summary.metadata = result.metadata as WooValue;
+  if (result.line_map) summary.line_map = result.line_map as WooValue;
+  if (result.bytecode) {
+    summary.bytecode = {
+      op_count: result.bytecode.ops.length,
+      literal_count: result.bytecode.literals.length,
+      num_locals: result.bytecode.num_locals,
+      max_stack: result.bytecode.max_stack,
+      max_ticks: result.bytecode.max_ticks ?? null,
+      max_memory: result.bytecode.max_memory ?? null,
+      max_wall_ms: result.bytecode.max_wall_ms ?? null
+    };
+  }
+  return summary;
+}
+
+function progOptions(value: WooValue): Record<string, WooValue> {
+  if (value === null || value === undefined) return {};
+  return assertMap(value);
+}
+
+function optionBool(options: Record<string, WooValue>, name: string, fallback: boolean): boolean {
+  const value = options[name];
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function optionString(options: Record<string, WooValue>, name: string, fallback: string): string {
+  const value = options[name];
+  return typeof value === "string" ? value : fallback;
+}
+
+function optionStringList(options: Record<string, WooValue>, name: string, fallback: string[]): string[] {
+  const value = options[name];
+  if (!Array.isArray(value)) return fallback;
+  const strings = value.filter((item): item is string => typeof item === "string");
+  return strings.length > 0 ? strings : fallback;
+}
+
+function optionInt(options: Record<string, WooValue>, name: string, fallback: number, min: number, max: number): number {
+  const value = options[name];
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+function textMatches(query: string, ...values: WooValue[]): boolean {
+  if (!query) return true;
+  return values.some((value) => {
+    if (value === null || value === undefined) return false;
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    return text.toLowerCase().includes(query);
+  });
+}
+
+function valueSummary(value: WooValue, maxBytes: number): string {
+  let summary: string;
+  if (value === null) summary = "null";
+  else if (typeof value === "string") summary = `string(${value.length} chars): ${value}`;
+  else if (typeof value === "number") summary = Number.isInteger(value) ? `int(${value})` : `num(${value})`;
+  else if (typeof value === "boolean") summary = `bool(${value})`;
+  else if (Array.isArray(value)) summary = `list(${value.length}) ${JSON.stringify(value)}`;
+  else summary = `map(${Object.keys(value).length}) ${JSON.stringify(value)}`;
+  if (summary.length <= maxBytes) return summary;
+  return `${summary.slice(0, Math.max(0, maxBytes - 3))}...`;
+}
+
 export function normalizeError(err: unknown): ErrorValue {
   if (isErrorValue(err)) return err;
   if (err instanceof SyntaxError) return wooError("E_INVARG", err.message);
@@ -3595,6 +4199,15 @@ function verbAliasMatches(pattern: string, name: string): boolean {
 
 function addUnique<T>(items: T[], item: T): T[] {
   return items.includes(item) ? items : [...items, item];
+}
+
+function uniqueVerbNames(verbs: VerbDef[]): string[] {
+  return Array.from(new Set(verbs.map((verb) => verb.name)));
+}
+
+function assertVerbNameDescriptor(value: WooValue): string {
+  if (typeof value !== "string") throw wooError("E_TYPE", "verb descriptor must be a string name or integer slot", value);
+  return value;
 }
 
 function titleFromSummary(fallback: ObjRef, summary: HostObjectSummary): string {

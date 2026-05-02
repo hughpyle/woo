@@ -1,0 +1,154 @@
+{
+  "name": "prog",
+  "version": "0.1.0",
+  "spec_version": "v1",
+  "description": "Programmer tooling — the developer-experience surface for actors with the programmer flag. The same world is the IDE: prog tools introspect and mutate the running object graph, with no design-time/runtime split. The surface is intentionally small (~10 verbs) so an agent can hold the whole authoring loop in head: inspect → resolve_verb → search to read; create → set_property → install_verb to write; compile and trace to validate. This is LambdaCore's builder/programmer/editor surface, MCP-shaped: actor-scoped target resolution, explicit define-vs-program modes, and inspection that makes inheritance and impact visible. All verbs are MCP-exposed (tool_exposed: true) and progbit-gated (E_PERM when actor lacks flags.programmer or flags.wizard). Each verb is a thin wrapper around a prog_* engine builtin where permission, version-conflict, and CRUD semantics actually live; the verbs handle progbit gating and observation emission.",
+  "license": "MIT",
+  "depends": [],
+  "classes": [
+    {
+      "local_name": "$prog",
+      "parent": "$thing",
+      "description": "Singleton holder for programmer tooling. `the_prog` intentionally merges LambdaCore's builder and programmer command surfaces into one MCP-reachable object; this is only a UI convenience, not a new authority model. The seed hook creates `the_prog` at install time. Programmers reach the tools by adding `the_prog` to their MCP focus set (woo_focus the_prog) — the catalog does not automatically grant reachability so non-programmer actors don't see the tools by accident. A future bootstrap could focus `the_prog` automatically on grant of the programmer flag; until then the focus step is explicit.",
+      "properties": [
+        { "name": "api_version", "type": "str", "default": "0.1.0", "perms": "r" }
+      ],
+      "verbs": [
+        {
+          "name": "look",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :look() rxd {\n  // Brief surface map so an agent landing on the_prog can orient.\n  return {\n    id: this,\n    title: this.name,\n    description: this.description,\n    api_version: this.api_version,\n    tools: [\n      \"inspect(id, opts?)\",\n      \"resolve_verb(id, descriptor)\",\n      \"search(query, opts?)\",\n      \"create(parent, opts?)\",\n      \"chparent(id, parent)\",\n      \"recycle(id)\",\n      \"set_property(id, name, value, opts?)\",\n      \"install_verb(id, descriptor, source, opts?)\",\n      \"compile(source)\",\n      \"trace(id, descriptor, opts?)\"\n    ]\n  };\n}"
+        },
+
+        {
+          "name": "inspect",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "opts?"] },
+          "source": "verb :inspect(id, opts) rxd {\n  // Returns the live call-tree shape for `id` honoring the actor's read perms.\n  // This is the structured form of LambdaCore @show/@display/@prospectus.\n  // opts: {\n  //   include_source: bool (default false) — verb sources in own_verbs\n  //   max_children, max_instances: int (default 50) — bound the lists\n  //   max_value_bytes: int (default 512) — truncate value summaries past this\n  // }\n  // Shape: { id, owner, flags, name, description, parent, parent_chain[],\n  //   features[{id, verbs_contributed[]}], children[], fertile_children[],\n  //   instances[], attached_to[], impact:{child_count, instance_count},\n  //   location, contents[], own_verbs[], inherited_verbs[],\n  //   own_properties[], inherited_properties[] }.\n  // The engine builtin applies the actor's property read filter and walks\n  // the parent + features chain so the agent sees what the dispatcher would.\n  this:_assert_progbit();\n  return prog_inspect(id, opts);\n}"
+        },
+
+        {
+          "name": "resolve_verb",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "descriptor"] },
+          "source": "verb :resolve_verb(id, descriptor) rxd {\n  // \"Go to Definition\" for a verb name or 1-based local slot on `id`.\n  // Returns: { definer, slot, verb_name, perms, version, aliases, arg_spec,\n  //   source?, walk[{id, kind: \"parent\"|\"feature\", matched: bool}] }.\n  // walk[] enumerates the lookup path the engine actually performed —\n  // critical for understanding why the verb resolved where it did.\n  // Source is omitted when the actor lacks read perm on the verb.\n  // Name descriptors choose the first matching slot, LambdaCore-style; use an\n  // integer descriptor to target duplicates precisely.\n  this:_assert_progbit();\n  return prog_resolve_verb(id, descriptor);\n}"
+        },
+
+        {
+          "name": "search",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["query", "opts?"] },
+          "source": "verb :search(query, opts) rxd {\n  // Bounded grep across the live world. opts:\n  //   channels: list<str> from {object_name, verb_name, verb_source,\n  //             property_name, property_value} (default all)\n  //   scope:    \"actor_context\" | \"owned\" | \"here\" | \"all\"\n  //             (default \"actor_context\")\n  //   limit:    int (default 50, max 500)\n  // actor_context mirrors LambdaCore programming search: actor, actor.location,\n  // location.contents, actor.contents, and actor.features. Room matching must\n  // not redirect programming targets.\n  // \"all\" scope fans out cross-host; expensive — explicit opt-in.\n  // Index-backed; never full-grep over hibernated DOs.\n  // Returns: { query, scope, total, results: [{kind, channel, id, ...}] }\n  this:_assert_progbit();\n  return prog_search(query, opts);\n}"
+        },
+
+        {
+          "name": "create",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["parent", "opts?"] },
+          "source": "verb :create(parent, opts) rxd {\n  // Create a new object as a child of `parent`, like LambdaCore @create.\n  // opts: {\n  //   name: str            — display name (defaults to the new id)\n  //   description: str     — set the description property at create time\n  //   location: obj|null   — where to place the object (default actor inventory;\n  //                          pass null for nowhere / abstract prototype)\n  //   fertile: bool        — set the fertile flag (default false)\n  // }\n  // Permissions: actor must own `parent` (or be wizard) OR parent.fertile\n  // must be true. The engine enforces both; this verb just gates progbit.\n  // Returns the new object id.\n  this:_assert_progbit();\n  let id = prog_create_object(parent, opts);\n  // Audit observation. The actor's session may surface this as a notice.\n  observe({ type: \"prog_created\", actor: actor, id: id, parent: parent, ts: now() });\n  return id;\n}"
+        },
+
+        {
+          "name": "chparent",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "parent"] },
+          "source": "verb :chparent(id, parent) rxd {\n  // Re-parent an object. Mind the cascade: all instances inheriting from\n  // `id` will pick up the new parent's verbs/properties on next dispatch.\n  // Use prog_inspect(id) first to see the children/instances list.\n  this:_assert_progbit();\n  prog_chparent(id, parent);\n  observe({ type: \"prog_chparented\", actor: actor, id: id, parent: parent, ts: now() });\n  return true;\n}"
+        },
+
+        {
+          "name": "recycle",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id"] },
+          "source": "verb :recycle(id) rxd {\n  // Destroy an object. Engine refuses if the object has children\n  // (chparent them first) or active sessions referencing it.\n  // Programmer perm: own objects only. Wizards can recycle anything.\n  this:_assert_progbit();\n  prog_recycle(id);\n  observe({ type: \"prog_recycled\", actor: actor, id: id, ts: now() });\n  return true;\n}"
+        },
+
+        {
+          "name": "set_property",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "name", "value", "opts?"] },
+          "source": "verb :set_property(id, name, value, opts) rxd {\n  // Define-or-update a property in one tool. opts:\n  //   mode: one of\n  //     \"set_value\"           — write a value on this object (must already be defined)\n  //     \"set_default\"         — change the inherited default (define-time)\n  //     \"define\"              — first-time definition with default + perms + type_hint\n  //     \"update_info\"         — change perms/type_hint without touching the value\n  //     \"delete_value\"        — clear this object's stored value (revert to default)\n  //     \"delete_definition\"   — remove the property from this object entirely\n  //     \"auto\" (default)      — define if absent, set_value otherwise\n  //   perms: str               — used by define/update_info/set_default\n  //   type_hint: str           — used by define/update_info\n  //   expected_def_version: int — concurrency check on the property definition\n  //   expected_value_version: int — concurrency check on the stored value\n  //                                 (definition and value are independent\n  //                                  concurrency domains)\n  // Note: null is a valid woocode value, so use mode=\"delete_value\" to\n  // clear, never null-as-sentinel.\n  this:_assert_progbit();\n  return prog_property_op(id, name, value, opts);\n}"
+        },
+
+        {
+          "name": "install_verb",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "descriptor", "source", "opts?"] },
+          "source": "verb :install_verb(id, descriptor, source, opts) rxd {\n  // Compile and install a verb. LambdaCore splits this into @verb (metadata)\n  // and @program (source body); this MCP tool is a convenience wrapper.\n  // descriptor is a name or a 1-based local slot. Source is canonical: the\n  // perms come from the source header (\"verb :name(args) rxd { ... }\").\n  // opts may carry\n  //   mode: \"upsert\" | \"define\" | \"set_code\" (default \"upsert\")\n  //   append: bool                — define a new slot even if name exists\n  //   aliases: list<str>\n  //   tool_exposed: bool\n  //   arg_spec: map               — overrides the parsed arg_spec\n  //   expected_version: int       — concurrency check on the selected slot\n  // opts.perms is NOT accepted; passing it is E_INVARG. If the source\n  // header is missing perms, install fails with a compile diagnostic.\n  // Returns: { ok, slot, version, diagnostics } — diagnostics is empty on ok=true.\n  this:_assert_progbit();\n  let result = prog_install_verb(id, descriptor, source, opts);\n  if (result[\"ok\"]) {\n    observe({ type: \"prog_installed\", actor: actor, id: id, verb: descriptor, slot: result[\"slot\"], version: result[\"version\"], ts: now() });\n  } else {\n    observe({ type: \"prog_compile_failed\", actor: actor, id: id, verb: descriptor, diagnostics: result[\"diagnostics\"], ts: now() });\n  }\n  return result;\n}"
+        },
+
+        {
+          "name": "compile",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["source"] },
+          "source": "verb :compile(source) rxd {\n  // Validate woocode without installing anything. Returns the same\n  // diagnostic shape as install_verb's failure path so an agent can\n  // round-trip {compile → fix → install}.\n  // Returns: { ok, diagnostics, source_hash?, line_map?, metadata? }.\n  this:_assert_progbit();\n  return prog_compile(source);\n}"
+        },
+
+        {
+          "name": "trace",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["id", "verb_name", "opts?"] },
+          "source": "verb :trace(id, verb_name, opts) rxd {\n  // Capture VM tick traces for the next N invocations. Read-only;\n  // does NOT freeze the verb (a multi-user world means concurrent\n  // calls keep flowing through). opts:\n  //   n: int (default 1, max 32)            — number of invocations to capture\n  //   timeout_ms: int (default 30000)       — give up if no calls in window\n  //   max_frames: int (default 256)         — per-trace cap on frame depth\n  // Permissions: emits traces only for invocations the actor would have\n  // been allowed to observe (presence + audience), and includes source/line\n  // data only when the actor has read perm on the verb. v1.1 — manifest\n  // declares the contract; implementation lands after inspect/install are\n  // solid in production.\n  this:_assert_progbit();\n  return prog_trace(id, verb_name, opts);\n}"
+        },
+
+        {
+          "name": "_assert_progbit",
+          "perms": "rx",
+          "direct_callable": false,
+          "arg_spec": { "args": [] },
+          "source": "verb :_assert_progbit() rx {\n  // Internal: gate every public prog verb on the programmer or wizard flag.\n  // Engine builtins also check actor programmer perms (defense in depth) but\n  // the explicit raise here gives the agent a uniform error code at the verb\n  // boundary instead of a builtin-specific one. Check actor, not progr: this\n  // catalog is usually installed by $wiz, so progr would otherwise make every\n  // caller look privileged.\n  if (!has_flag(actor, \"programmer\") && !has_flag(actor, \"wizard\")) {\n    raise { code: \"E_PERM\", message: \"programmer flag required to use $prog tools\", value: actor };\n  }\n  return true;\n}"
+        }
+      ]
+    }
+  ],
+  "features": [],
+  "schemas": [
+    { "on": "$prog", "type": "prog_created",        "shape": { "actor": "obj", "id": "obj", "parent": "obj", "ts": "int" } },
+    { "on": "$prog", "type": "prog_chparented",     "shape": { "actor": "obj", "id": "obj", "parent": "obj", "ts": "int" } },
+    { "on": "$prog", "type": "prog_recycled",       "shape": { "actor": "obj", "id": "obj", "ts": "int" } },
+    { "on": "$prog", "type": "prog_installed",      "shape": { "actor": "obj", "id": "obj", "verb": "str", "version": "int", "ts": "int" } },
+    { "on": "$prog", "type": "prog_compile_failed", "shape": { "actor": "obj", "id": "obj", "verb": "str", "diagnostics": "list<map>", "ts": "int" } }
+  ],
+  "seed_hooks": [
+    {
+      "kind": "create_instance",
+      "class": "$prog",
+      "as": "the_prog",
+      "name": "Programmer Tools",
+      "description": "Programmer-tooling singleton. Add to your MCP focus set with woo_focus(the_prog) when authoring; remove with woo_unfocus(the_prog) when not. Verbs are gated on the programmer flag — wizards have full access, programmers can act on their own objects, others get E_PERM."
+    }
+  ]
+}

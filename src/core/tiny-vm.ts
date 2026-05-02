@@ -106,7 +106,7 @@ const DEFAULT_WALL_MS = 10_000;
 const MAX_VM_FRAMES = 128;
 const MAX_RUNTIME_LOCALS = 1_024;
 const MAX_RUNTIME_STACK = 4_096;
-const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "move", "chparent", "has_flag", "random", "contents", "location", "task_perms", "caller_perms", "set_task_perms", "set_presence", "observe_to_space"];
+const BUILTIN_NAMES = ["length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs", "now", "create", "move", "chparent", "has_flag", "random", "contents", "location", "task_perms", "caller_perms", "set_task_perms", "set_presence", "observe_to_space", "prog_compile", "prog_inspect", "prog_resolve_verb", "prog_search"];
 
 export async function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): Promise<WooValue> {
   return (await runVmFrames([makeFrame(ctx, bytecode, args)])).result;
@@ -842,6 +842,18 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         await frame.ctx.world.observeToSpace(frame.ctx, assertObj(builtinArgs[0]), { ...event, type: assertString(event.type) });
         return null;
       }
+      case "prog_compile":
+        if (builtinArgs.length !== 1) throw wooError("E_INVARG", "prog_compile expects source");
+        return frame.ctx.world.progCompile(frame.ctx.actor, assertString(builtinArgs[0]));
+      case "prog_inspect":
+        if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "prog_inspect expects object and optional opts");
+        return frame.ctx.world.progInspect(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1] ?? null);
+      case "prog_resolve_verb":
+        if (builtinArgs.length !== 2) throw wooError("E_INVARG", "prog_resolve_verb expects object and verb descriptor");
+        return frame.ctx.world.progResolveVerb(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1]);
+      case "prog_search":
+        if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "prog_search expects query and optional opts");
+        return frame.ctx.world.progSearch(frame.ctx.actor, assertString(builtinArgs[0]), builtinArgs[1] ?? null);
       default:
         throw wooError("E_INVARG", `unknown builtin: ${name}`);
     }
@@ -1015,7 +1027,7 @@ function vmTraceFrame(frame: VmFrame, pc: number): WooValue {
     pc
   };
   try {
-    const verb = frame.ctx.world.object(frame.ctx.definer).verbs.get(frame.ctx.verbName);
+    const verb = frame.ctx.world.ownVerb(frame.ctx.definer, frame.ctx.verbName);
     if (verb) {
       item.version = verb.version;
       const mapped = verb.line_map[String(pc)];

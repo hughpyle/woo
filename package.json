@@ -10,6 +10,7 @@
     "dev": "tsx src/server/dev-server.ts",
     "dump:json": "tsx src/server/dump-json.ts",
     "mcp:stdio": "tsx src/mcp/stdio.ts",
+    "storage:profile": "tsx scripts/profile-storage-writes.ts",
     "pretest": "npm run catalog:index && npm run guard:object-names",
     "test": "vitest run tests",
     "test:e2e": "playwright test",

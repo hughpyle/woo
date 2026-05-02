@@ -43,6 +43,7 @@ import {
   SQL_LEGACY_RESET_TABLES,
   SQL_SCHEMA_STATEMENTS,
   SQL_SPACE_MESSAGE_OUTCOME_REBUILD_STATEMENTS,
+  SQL_VERB_ORDER_REBUILD_STATEMENTS,
   sqlGroupBy as groupBy,
   stringifySqlValue as stringifyValue,
   taskFromSqlRow as taskFromRow,
@@ -83,7 +84,7 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
     const propertyDefs = groupBy(this.all("SELECT * FROM property_def ORDER BY object_id, name"), "object_id");
     const propertyValues = groupBy(this.all("SELECT * FROM property_value ORDER BY object_id, name"), "object_id");
     const propertyVersions = groupBy(this.all("SELECT * FROM property_version ORDER BY object_id, name"), "object_id");
-    const verbs = groupBy(this.all("SELECT * FROM verb ORDER BY object_id, name"), "object_id");
+    const verbs = groupBy(this.all("SELECT * FROM verb ORDER BY object_id, slot"), "object_id");
     const children = groupBy(this.all("SELECT * FROM child ORDER BY object_id, child_ref"), "object_id");
     const contents = groupBy(this.all("SELECT * FROM content ORDER BY object_id, content_ref"), "object_id");
     const eventSchemas = groupBy(this.all("SELECT * FROM event_schema ORDER BY object_id, type"), "object_id");
@@ -250,7 +251,7 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
       propertyVersions: this.all("SELECT * FROM property_version WHERE object_id = ? ORDER BY name", id).map(
         (version) => [String(version.name), Number(version.version)] as [string, number]
       ),
-      verbs: this.all("SELECT * FROM verb WHERE object_id = ? ORDER BY name", id).map(verbFromRow),
+      verbs: this.all("SELECT * FROM verb WHERE object_id = ? ORDER BY slot", id).map(verbFromRow),
       children: this.all("SELECT child_ref FROM child WHERE object_id = ? ORDER BY child_ref", id).map((row) => String(row.child_ref)),
       contents: this.all("SELECT content_ref FROM content WHERE object_id = ? ORDER BY content_ref", id).map((row) => String(row.content_ref)),
       eventSchemas: this.all("SELECT * FROM event_schema WHERE object_id = ? ORDER BY type", id).map(
@@ -351,15 +352,19 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
   // ---- verbs ----
 
   loadVerb(id: ObjRef, name: string): SerializedVerb | null {
-    const row = this.one("SELECT * FROM verb WHERE object_id = ? AND name = ?", id, name);
+    const row = this.one("SELECT * FROM verb WHERE object_id = ? AND name = ? ORDER BY slot LIMIT 1", id, name);
     return row ? verbFromRow(row) : null;
   }
 
   saveVerb(id: ObjRef, verb: SerializedVerb): void {
     this.ensureHostedObject(id);
+    const slot =
+      typeof verb.slot === "number"
+        ? verb.slot
+        : Number(this.one("SELECT COALESCE(MAX(slot), 0) + 1 AS slot FROM verb WHERE object_id = ?", id)?.slot ?? 1);
     this.sql.exec(
-      "INSERT OR REPLACE INTO verb(object_id, name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode, flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      id, verb.name, verb.kind, stringifyValue(verb.aliases), verb.owner, verb.perms,
+      "INSERT OR REPLACE INTO verb(object_id, slot, name, kind, aliases, owner, perms, arg_spec, source, source_hash, version, line_map, native, bytecode, flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      id, slot, verb.name, verb.kind, stringifyValue(verb.aliases), verb.owner, verb.perms,
       stringifyValue(verb.arg_spec), verb.source, verb.source_hash, verb.version, stringifyValue(verb.line_map),
       verb.kind === "native" ? verb.native : null,
       verb.kind === "bytecode" ? stringifyValue(verb.bytecode as unknown as WooValue) : null,
@@ -372,7 +377,7 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
   }
 
   listVerbNames(id: ObjRef): string[] {
-    return this.all("SELECT name FROM verb WHERE object_id = ? ORDER BY name", id).map((row) => String(row.name));
+    return this.all("SELECT name FROM verb WHERE object_id = ? ORDER BY slot", id).map((row) => String(row.name));
   }
 
   // ---- inheritance / containment ----
@@ -635,6 +640,7 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
     this.ensureColumn("space_message", "observations", "TEXT NOT NULL DEFAULT '[]'");
     this.ensureNullableSpaceMessageOutcome();
     this.ensureColumn("verb", "flags", "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureOrderedVerbTable();
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -654,5 +660,10 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
     // outcome is known, then records applied_ok in the same outer transaction.
     // Older demo DBs used NOT NULL here, which rejects that pending state.
     for (const stmt of SQL_SPACE_MESSAGE_OUTCOME_REBUILD_STATEMENTS) this.sql.exec(stmt);
+  }
+
+  private ensureOrderedVerbTable(): void {
+    if (this.tableColumns("verb").has("slot")) return;
+    for (const stmt of SQL_VERB_ORDER_REBUILD_STATEMENTS) this.sql.exec(stmt);
   }
 }

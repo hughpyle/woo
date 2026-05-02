@@ -133,6 +133,14 @@ The canonical `<object>:<verb>` form (with sigils) is in the tool's `description
 
 A verb's `aliases` list ([../semantics/space.md](../semantics/space.md)) is **not** rendered as separate tools — that would explode the tool list with duplicates. Aliases are documented in the tool description so agents that want to use them via the room's parser know what's available.
 
+Ordered duplicate verb slots are also collapsed for the v1 dynamic tool list:
+only the first tool-exposed slot for a given `(object, verb_name)` becomes a
+dedicated MCP tool. Slot-precise authoring and inspection go through the
+programmer surface (`prog_inspect`, `prog_resolve_verb`, and future
+descriptor-aware authoring tools). A future MCP revision may add
+descriptor-aware invocation if a catalog has a real need to expose duplicate
+same-name verbs as separate tools.
+
 ---
 
 ## M3. Reachability — what shows up where
