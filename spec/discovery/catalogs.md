@@ -46,18 +46,18 @@ In-world, installed catalogs are objects descended from `$catalog`; the world's 
 
 Catalogs are referenced by a four-part name: `<owner>/<repo>:<catalog>[@<ref>]`.
 
-- `<owner>/<repo>` — GitHub coordinates of the tapped repo (e.g. `hugh/woo-libs`).
+- `<owner>/<repo>` — GitHub coordinates of the tapped repo (e.g. `hughpyle/woo-libs`).
 - `<catalog>` — the directory name under `catalogs/` in the repo (e.g. `dubspace`).
 - `<ref>` — optional git ref: a tag, branch, or commit SHA. **Default**: the highest semver tag matching `<catalog>-v*` (e.g. `dubspace-v1.0.0`); if no such tag exists, `main`. Operators are encouraged to pin explicitly.
 
 Examples:
 
-- `hugh/woo-libs:dubspace@dubspace-v1.0.3` — pinned tag.
-- `hugh/woo-libs:dubspace` — latest semver tag for `dubspace`.
-- `hugh/woo-libs:dubspace@main` — branch tip; mutable.
-- `hugh/woo-libs:dubspace@<sha>` — pinned commit.
+- `hughpyle/woo-libs:dubspace@dubspace-v1.0.3` — pinned tag.
+- `hughpyle/woo-libs:dubspace` — latest semver tag for `dubspace`.
+- `hughpyle/woo-libs:dubspace@main` — branch tip; mutable.
+- `hughpyle/woo-libs:dubspace@<sha>` — pinned commit.
 
-Within a single world, an installed catalog is referenced by its alias (defaulting to `<catalog>`). Cross-catalog parents in manifests use the full form: `parent: "hugh/woo-libs:root-pack:$control"`.
+Within a single world, an installed catalog is referenced by its alias (defaulting to `<catalog>`). Cross-catalog parents in manifests use the full form: `parent: "hughpyle/woo-libs:root-pack:$control"`.
 
 **Local catalogs** use the special prefix `@local`: `@local:dubspace` resolves to `<deployment>/catalogs/dubspace/`. Local catalogs are how the worlds bundle their own first-party content (e.g., the example demos that ship in this repository).
 
@@ -83,7 +83,7 @@ This rule keeps manifests deterministic across worlds: the same manifest install
 A repository hosting catalogs has the layout:
 
 ```
-github.com/hugh/woo-libs/
+github.com/hughpyle/woo-libs/
 ├── README.md                    (repo-level overview)
 └── catalogs/
     ├── dubspace/
@@ -108,7 +108,7 @@ spec_version: v1
 license: MIT
 description: Sound-mixer building blocks for a shared dub-mix space.
 depends:
-  - hugh/woo-libs:root-pack
+  - hughpyle/woo-libs:root-pack
 ---
 
 # Dubspace
@@ -170,6 +170,8 @@ If `ref` is omitted, the first implementation chooses the highest semver tag mat
 
 Returns the applied frame from `$catalog_registry`.
 
+The fetch side enforces bounded inputs before parsing: manifest and migration bodies are capped at 256 KiB, README bodies at 512 KiB, and a single install/update may make at most eight tap fetches. Hosts emit structured diagnostic logs for `tap_fetch`, `tap_migration_fetch`, `tap_install`, and `tap_update`, including the resolved SHA, content hashes, byte counts, and subrequest count. Reissuing an exact same-version install for the same alias/source/provenance refuses with `E_CATALOG_ALREADY_INSTALLED` without appending another registry log row.
+
 ```
 POST /api/tap/uninstall
 body: { tap, catalog }
@@ -182,7 +184,7 @@ POST /api/tap/update
 body: { tap, catalog, ref?, as?, accept_major? }
 ```
 
-Explicit re-install at a new ref. Operator opts in; there is no auto-update. The host resolves the new ref to a commit SHA before dispatching. The runtime compares the manifest's `version` against the recorded version, refuses downgrades, refuses major bumps unless `accept_major: true`, and requires a migration manifest for major-version updates (§CT14). The local Node server implements this for GitHub taps; the Cloudflare Worker tap-fetch path may return `E_NOT_IMPLEMENTED` until Phase 7 ports the GitHub helper into the Worker runtime.
+Explicit re-install at a new ref. Operator opts in; there is no auto-update. The host resolves the new ref to a commit SHA before dispatching. The runtime compares the manifest's `version` against the recorded version, refuses downgrades, refuses major bumps unless `accept_major: true`, and requires a migration manifest for major-version updates (§CT14). The local Node server and the Cloudflare Worker both implement the public GitHub tap path; private repositories and authenticated GitHub fetches remain deferred (§CT10).
 
 ```
 GET /api/taps
@@ -229,6 +231,8 @@ Boot-time auto-install is controlled by `WOO_AUTO_INSTALL_CATALOGS` (a comma-sep
 - `WOO_AUTO_INSTALL_CATALOGS=` (empty) — clean world; operators install what they want.
 - Each entry is a catalog name resolved against `@local:<name>`.
 
+The repository's local Node server intentionally uses the **unset** case for first-light development: clone, run, and see the bundled demos. The repository's Cloudflare `wrangler.toml` intentionally ships with the **empty** case so fork-and-deploy operators start from a clean core world unless they opt into bundled local catalogs before deploy.
+
 Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the boot-time pass skips it without appending a no-op registry log row. Boot-time local auto-install is part of deterministic world construction, so it installs directly from the bundled manifest and records the catalog in `$catalog_registry` state without routing through `$catalog_registry:call`. Runtime catalog install/update operations are sequenced through `$catalog_registry` and audited. Runtime uninstall uses the same pattern once implemented.
 
 Implementation rule: source code must not contain catalog-specific install policy. Adding, removing, or renaming a bundled catalog is a filesystem/catalog operation: place or remove a manifest directory under `catalogs/`, regenerate the bundled catalog index for non-filesystem deployment targets, and let install ordering follow declared dependencies. Runtime code that branches on demo object names or catalog names is a bug unless it is explicitly part of a temporary demo UI adapter.
@@ -265,11 +269,11 @@ branch on the seeded object names that happen to receive them.
   "name": "dubspace",
   "version": "1.0.0",
   "spec_version": "v1",
-  "depends": ["hugh/woo-libs:root-pack"],
+  "depends": ["hughpyle/woo-libs:root-pack"],
   "classes": [
     {
       "local_name": "$loop_slot",
-      "parent": "hugh/woo-libs:root-pack:$control",
+      "parent": "hughpyle/woo-libs:root-pack:$control",
       "properties": [{"name": "loop_id", "default": null, "perms": "rw"}, ...],
       "verbs": [{"name": "play", "source": "verb $loop_slot:play() {...}", "perms": "rxd", ...}, ...]
     },
@@ -334,7 +338,7 @@ Trust is rooted in **the operator's choice of which repo to install from**. v1 h
 - Optional commit-signature verification — deferred to v1.1; GitHub's UI shows verified commits today.
 - Every runtime install/update is sequenced through `$catalog_registry` (§CT5.1) **and** logged as a wizard action ([cloudflare.md §R10.4](../reference/cloudflare.md#r104-wizard-audit)). Runtime uninstall uses the same rule once implemented. Boot-time local auto-install is direct deterministic bootstrap (§CT5.4). Both records carry the full provenance: tap, catalog, requested ref, **resolved commit SHA**, and SHA-256 hashes of the fetched manifest and README. A later operator can reconstruct exactly what bytes were installed even if the upstream tag has been moved or the branch has advanced.
 
-When the operator says `tap install hugh/woo-libs:dubspace`, they are vouching for `hugh/woo-libs` as a source. Exactly the same trust model as `cargo install` from a git URL or `homebrew tap`.
+When the operator says `tap install hughpyle/woo-libs:dubspace`, they are vouching for `hughpyle/woo-libs` as a source. Exactly the same trust model as `cargo install` from a git URL or `homebrew tap`.
 
 ---
 
@@ -418,7 +422,7 @@ A catalog with neither `agent_manifest.json` nor any `tool_exposed: true` verbs 
 
 ```
 GET /.well-known/mcp.json                    → all installed catalogs' tools
-GET /.well-known/mcp.json?tap=hugh/woo-libs:dubspace  → just that catalog
+GET /.well-known/mcp.json?tap=hughpyle/woo-libs:dubspace  → just that catalog
 GET /.well-known/mcp.json?tap=@local         → bundled local catalogs
 ```
 

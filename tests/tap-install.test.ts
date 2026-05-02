@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createWorld } from "../src/core/bootstrap";
-import { installGitHubTap, loadGitHubCatalog, parseFrontmatter, updateGitHubTap } from "../src/server/github-taps";
+import { installGitHubTap, loadGitHubCatalog, parseFrontmatter, updateGitHubTap, type CatalogTapLogEvent } from "../src/core/catalog-taps";
 
 const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -72,7 +72,7 @@ const updatedReadme = readme.replace("version: 1.2.0", "version: 1.3.0");
 describe("GitHub catalog taps", () => {
   it("loads a catalog by resolving the highest catalog semver tag", async () => {
     const loaded = await loadGitHubCatalog(
-      { tap: "hugh/woo-libs", catalog: "remote-demo", as: "remote" },
+      { tap: "hughpyle/woo-libs", catalog: "remote-demo", as: "remote" },
       { fetch: mockFetch(), now: () => 1234 }
     );
 
@@ -80,7 +80,7 @@ describe("GitHub catalog taps", () => {
     expect(loaded.manifest.name).toBe("remote-demo");
     expect(loaded.frontmatter.depends).toEqual(["chat"]);
     expect(loaded.provenance).toMatchObject({
-      tap: "hugh/woo-libs",
+      tap: "hughpyle/woo-libs",
       catalog: "remote-demo",
       alias: "remote",
       ref_requested: "remote-demo-v1.2.0",
@@ -96,7 +96,7 @@ describe("GitHub catalog taps", () => {
     const frame = await installGitHubTap(
       world,
       "$wiz",
-      { tap: "hugh/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0", as: "remote" },
+      { tap: "hughpyle/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0", as: "remote" },
       { fetch: mockFetch(), now: () => 5678 }
     );
 
@@ -111,7 +111,7 @@ describe("GitHub catalog taps", () => {
     expect(ping?.direct_callable).toBe(true);
     expect(world.getProp("$catalog_registry", "installed_catalogs")).toMatchObject([
       {
-        tap: "hugh/woo-libs",
+        tap: "hughpyle/woo-libs",
         catalog: "remote-demo",
         alias: "remote",
         version: "1.2.0",
@@ -121,19 +121,37 @@ describe("GitHub catalog taps", () => {
     expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(["install"]);
   });
 
+  it("refuses exact retry installs without appending a registry log row", async () => {
+    const world = createWorld({ catalogs: false });
+    await installGitHubTap(
+      world,
+      "$wiz",
+      { tap: "hughpyle/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0", as: "remote" },
+      { fetch: mockFetch(), now: () => 1000 }
+    );
+
+    await expect(installGitHubTap(
+      world,
+      "$wiz",
+      { tap: "hughpyle/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0", as: "remote" },
+      { fetch: mockFetch(), now: () => 2000 }
+    )).rejects.toMatchObject({ code: "E_CATALOG_ALREADY_INSTALLED" });
+    expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(["install"]);
+  });
+
   it("updates fetched manifests through the catalog registry log", async () => {
     const world = createWorld({ catalogs: false });
     await installGitHubTap(
       world,
       "$wiz",
-      { tap: "hugh/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0", as: "remote" },
+      { tap: "hughpyle/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0", as: "remote" },
       { fetch: mockFetch(), now: () => 1000 }
     );
 
     const frame = await updateGitHubTap(
       world,
       "$wiz",
-      { tap: "hugh/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.3.0", as: "remote" },
+      { tap: "hughpyle/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.3.0", as: "remote" },
       { fetch: mockFetch({ manifest: updatedManifest, readme: updatedReadme, refs: ["remote-demo-v1.2.0", "remote-demo-v1.3.0"] }), now: () => 2000 }
     );
 
@@ -152,6 +170,31 @@ describe("GitHub catalog taps", () => {
     expect(world.replay("$catalog_registry", 1, 10).map((entry) => entry.message.verb)).toEqual(["install", "update"]);
   });
 
+  it("enforces tap body size limits and emits structured fetch/install logs", async () => {
+    const logs: CatalogTapLogEvent[] = [];
+    const loaded = await loadGitHubCatalog(
+      { tap: "hughpyle/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0", as: "remote" },
+      { fetch: mockFetch(), now: () => 1000, log: (event) => logs.push(event) }
+    );
+
+    expect(loaded.provenance.manifest_hash).toBe(`sha256:${hash(JSON.stringify(manifest))}`);
+    expect(logs).toMatchObject([{ kind: "tap_fetch", ref_resolved_sha: sha, manifest_hash: `sha256:${hash(JSON.stringify(manifest))}`, subrequests: 3 }]);
+
+    const world = createWorld({ catalogs: false });
+    await installGitHubTap(
+      world,
+      "$wiz",
+      { tap: "hughpyle/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0", as: "remote" },
+      { fetch: mockFetch(), now: () => 1000, log: (event) => logs.push(event) }
+    );
+    expect(logs.some((event) => event.kind === "tap_install" && event.ref_resolved_sha === sha)).toBe(true);
+
+    await expect(loadGitHubCatalog(
+      { tap: "hughpyle/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0" },
+      { fetch: mockFetch({ manifestText: "x".repeat(300 * 1024), readme }), now: () => 1000 }
+    )).rejects.toMatchObject({ code: "E_RATE" });
+  });
+
   it("requires wizard authority before fetching", async () => {
     const world = createWorld({ catalogs: false });
     const session = world.auth("guest:tap");
@@ -160,7 +203,7 @@ describe("GitHub catalog taps", () => {
       await installGitHubTap(
         world,
         session.actor,
-        { tap: "hugh/woo-libs", catalog: "remote-demo" },
+        { tap: "hughpyle/woo-libs", catalog: "remote-demo" },
         {
           fetch: async () => {
             fetchCalled = true;
@@ -187,7 +230,7 @@ describe("GitHub catalog taps", () => {
 
   it("rejects non-semver catalog versions", async () => {
     await expect(loadGitHubCatalog(
-      { tap: "hugh/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0" },
+      { tap: "hughpyle/woo-libs", catalog: "remote-demo", ref: "remote-demo-v1.2.0" },
       {
         fetch: mockFetch({
           manifest: { ...manifest, version: "not-a-version" },
@@ -198,19 +241,20 @@ describe("GitHub catalog taps", () => {
   });
 });
 
-function mockFetch(options: { manifest?: unknown; readme?: string; refs?: string[] } = {}) {
+function mockFetch(options: { manifest?: unknown; manifestText?: string; readme?: string; refs?: string[] } = {}) {
   const manifestBody = options.manifest ?? manifest;
+  const manifestText = options.manifestText ?? JSON.stringify(manifestBody);
   const readmeBody = options.readme ?? readme;
   const refs = options.refs ?? ["remote-demo-v1.0.0", "remote-demo-v1.2.0"];
   return async (url: string) => {
-    if (url === "https://api.github.com/repos/hugh/woo-libs/tags?per_page=100") {
+    if (url === "https://api.github.com/repos/hughpyle/woo-libs/tags?per_page=100") {
       return response([...refs.map((name) => ({ name })), { name: "other-v9.0.0" }]);
     }
     for (const ref of refs) {
-      if (url === `https://api.github.com/repos/hugh/woo-libs/commits/${ref}`) return response({ sha });
+      if (url === `https://api.github.com/repos/hughpyle/woo-libs/commits/${ref}`) return response({ sha });
     }
-    if (url === `https://raw.githubusercontent.com/hugh/woo-libs/${sha}/catalogs/remote-demo/manifest.json`) return textResponse(JSON.stringify(manifestBody));
-    if (url === `https://raw.githubusercontent.com/hugh/woo-libs/${sha}/catalogs/remote-demo/README.md`) return textResponse(readmeBody);
+    if (url === `https://raw.githubusercontent.com/hughpyle/woo-libs/${sha}/catalogs/remote-demo/manifest.json`) return textResponse(manifestText);
+    if (url === `https://raw.githubusercontent.com/hughpyle/woo-libs/${sha}/catalogs/remote-demo/README.md`) return textResponse(readmeBody);
     return { ok: false, status: 404, statusText: "Not Found", text: async () => "", json: async () => ({}) };
   };
 }

@@ -32,7 +32,7 @@ npm run deploy
 #    The token is single-use; store it somewhere safe in case you need to recover.
 ```
 
-After step 5, you have a running world with you bound to `$wiz`. From there you can inspect the bundled chat, dubspace, taskspace, and IDE surfaces. Runtime authoring endpoints and GitHub tap install are still local-server-only on the Cloudflare target.
+After step 5, you have a running core world with you bound to `$wiz`. The Cloudflare config starts clean by default; install catalogs explicitly or opt into bundled local catalogs before first deploy. Runtime authoring endpoints are still local-server-only on the Cloudflare target.
 
 ---
 
@@ -83,6 +83,25 @@ Unsigned or tampered internal requests are rejected before forwarded actor, sess
 ### Future deterministic ID seed
 
 The v1 Worker does **not** read a seed phrase or salt object-id allocation. Seeded deterministic ULID allocation is deferred until the runtime has a real allocator for newly-created persistent objects. For now, deployed worlds rely on persisted object IDs plus catalog/core manifest IDs; `WOO_SEED_PHRASE` is not a deploy requirement.
+
+### `WOO_AUTO_INSTALL_CATALOGS`
+
+The local Node server leaves this unset by default, which means clone/run first-light installs every bundled catalog discovered under `catalogs/`.
+
+The Cloudflare `wrangler.toml` ships with:
+
+```toml
+[vars]
+WOO_AUTO_INSTALL_CATALOGS = ""
+```
+
+That empty value means a fresh Cloudflare world starts with only the universal core objects. To bootstrap with bundled local catalogs, edit the value before first deploy:
+
+```toml
+WOO_AUTO_INSTALL_CATALOGS = "chat,dubspace,pinboard,taskspace"
+```
+
+This is just an operator filter over catalog directories bundled with the deployment. The runtime does not privilege those catalogs over public GitHub taps.
 
 ---
 
@@ -159,18 +178,27 @@ Response: `{ "actor": "$wiz", "session": "<session-id>" }`. Use `Authorization: 
 
 Either path consumes the token. The world records `bootstrap_token_used = true` in `$system` metadata on the gateway host; presenting the token again fails.
 
-The deployed Worker currently auto-installs the bundled local catalogs. Public GitHub tap install is available on the local Node dev server but not yet on the Cloudflare Worker; the Worker route returns `501 E_NOT_IMPLEMENTED` until the GitHub helper is ported.
-
-When Worker-side tap install lands, it will use the same shape as local dev:
+The deployed Worker starts with the clean-core/catalog policy chosen by `WOO_AUTO_INSTALL_CATALOGS`. Public GitHub tap install/update is available through the Worker; private repositories and GitHub API tokens are deferred.
 
 ```sh
 curl -X POST https://your-world.example.com/api/tap/install \
   -H 'content-type: application/json' \
   -H 'Authorization: Session YOUR_SESSION_ID' \
-  -d '{"tap":"hugh/woo-libs","catalog":"dubspace","ref":"dubspace-v1.0.0","as":"dubspace"}'
+  -d '{"tap":"hughpyle/woo-libs","catalog":"dubspace","ref":"dubspace-v1.0.0","as":"dubspace"}'
 ```
 
 The response is the applied frame from `$catalog_registry`. `GET /api/taps` with the same session returns the installed catalog registry.
+
+To update an installed tap:
+
+```sh
+curl -X POST https://your-world.example.com/api/tap/update \
+  -H 'content-type: application/json' \
+  -H 'Authorization: Session YOUR_SESSION_ID' \
+  -d '{"tap":"hughpyle/woo-libs","catalog":"dubspace","ref":"dubspace-v1.1.0","as":"dubspace"}'
+```
+
+Major-version updates require `"accept_major": true` and a matching `migration-v<from>-to-v<to>.json` in the catalog directory. Reissuing an exact same-version install returns `E_CATALOG_ALREADY_INSTALLED` rather than appending a duplicate registry log row.
 
 ---
 

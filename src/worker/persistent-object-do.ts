@@ -27,8 +27,8 @@
 // - Authoring REST endpoints (/api/compile, /api/install, /api/property,
 //   /api/property/value, /api/authoring/objects/{create,move,chparent}) — the
 //   IDE tab can read on CF but not author.
-// - Worker-side GitHub tap install (/api/tap/install) — local catalogs
-//   cover the demos; remote-tap install is local-Node only for now.
+// - Private GitHub tap auth/cache policy — public GitHub taps are wired;
+//   private repos and content-hash caching are deferred.
 
 import { createWorld, createWorldFromSerialized, mergeHostScopedSeed, nonEmptyHostScopedWorld } from "../core/bootstrap";
 import { parseAutoInstallCatalogs } from "../core/local-catalogs";
@@ -44,6 +44,7 @@ import { directedRecipients, wooError } from "../core/types";
 import type { AppliedFrame, DirectResultFrame, ErrorFrame, LiveEventFrame, Message } from "../core/types";
 import type { SerializedWorld } from "../core/repository";
 import { createHostOperationMemo, normalizeError, type ParkedTaskRun } from "../core/world";
+import { installGitHubTap, updateGitHubTap, type CatalogTapLogEvent } from "../core/catalog-taps";
 import { CFObjectRepository } from "./cf-repository";
 import { McpGateway } from "../mcp/gateway";
 import { signInternalRequest, verifyInternalRequest } from "./internal-auth";
@@ -74,6 +75,7 @@ export class PersistentObjectDO {
   private repo: CFObjectRepository;
   private world: WooWorld | null = null;
   private routeCache = new Map<ObjRef, string>();
+  private publishedRoutes = new Map<ObjRef, string>();
   private routesRegistered = false;
   private mcpGateway: McpGateway | null = null;
 
@@ -148,15 +150,34 @@ export class PersistentObjectDO {
         authenticateToken: (token) => this.authenticateToken(world, token),
         requireSession: () => this.requireRestSession(world, request),
         state: (actor) => this.aggregateState(world, actor),
-        installTap: async () => {
-          throw wooError("E_NOT_IMPLEMENTED", "GitHub tap install on CF Worker is pending Phase 7; use @local catalogs for now");
+        installTap: async (actor, body) => {
+          if (!gatewayHost) throw wooError("E_NOTAPPLICABLE", "GitHub tap install is only available on the world gateway host");
+          return await installGitHubTap(world, actor, {
+            tap: String(body.tap ?? ""),
+            catalog: String(body.catalog ?? ""),
+            ref: typeof body.ref === "string" ? body.ref : undefined,
+            as: typeof body.as === "string" ? body.as : undefined
+          }, {
+            hashText: workerHashText,
+            log: (event) => logCatalogTapEvent(event)
+          });
         },
-        updateTap: async () => {
-          throw wooError("E_NOT_IMPLEMENTED", "GitHub tap update on CF Worker is pending Phase 7; use @local catalogs for now");
+        updateTap: async (actor, body) => {
+          if (!gatewayHost) throw wooError("E_NOTAPPLICABLE", "GitHub tap update is only available on the world gateway host");
+          return await updateGitHubTap(world, actor, {
+            tap: String(body.tap ?? ""),
+            catalog: String(body.catalog ?? ""),
+            ref: typeof body.ref === "string" ? body.ref : undefined,
+            as: typeof body.as === "string" ? body.as : undefined,
+            accept_major: body.accept_major === true
+          }, {
+            hashText: workerHashText,
+            log: (event) => logCatalogTapEvent(event)
+          });
         },
         resolveObject: (id, session) => this.resolveRestObject(world, id, session),
         resolveActor: (_protocolRequest, actorValue, session) => this.resolveRestActor(world, request, actorValue, session),
-        broadcastApplied: (frame) => this.broadcastApplied(world, frame),
+        broadcastApplied: (frame) => this.handleAppliedFrame(world, frame),
         broadcastLiveEvents: (result) => this.broadcastLiveEvents(world, result)
       });
       if (protocol.handled) {
@@ -212,7 +233,7 @@ export class PersistentObjectDO {
           }
         },
         broadcasts: {
-          broadcastApplied: (frame) => this.broadcastApplied(world, frame),
+          broadcastApplied: (frame) => this.handleAppliedFrame(world, frame),
           broadcastLiveEvents: (result) => this.broadcastLiveEvents(world, result)
         }
       });
@@ -326,12 +347,17 @@ export class PersistentObjectDO {
 
   private async registerObjectRoutes(world: WooWorld): Promise<void> {
     if (this.routesRegistered) return;
-    await this.registerRoutes(world.objectRoutes());
-    this.routesRegistered = true;
+    const ok = await this.registerRoutes(world.objectRoutes());
+    if (ok) this.routesRegistered = true;
   }
 
-  private async registerRoutes(routes: Array<{ id: ObjRef; host: string; anchor: ObjRef | null }>): Promise<void> {
-    if (routes.length === 0) return;
+  private async registerIncrementalObjectRoutes(world: WooWorld): Promise<void> {
+    const routes = world.objectRoutes().filter((route) => this.publishedRoutes.get(route.id) !== route.host);
+    await this.registerRoutes(routes);
+  }
+
+  private async registerRoutes(routes: Array<{ id: ObjRef; host: string; anchor: ObjRef | null }>): Promise<boolean> {
+    if (routes.length === 0) return true;
     try {
       const id = this.env.DIRECTORY.idFromName(DIRECTORY_HOST);
       const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}/register-objects`, {
@@ -339,11 +365,17 @@ export class PersistentObjectDO {
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify({ routes })
       }));
-      await this.env.DIRECTORY.get(id).fetch(request);
-      for (const route of routes) this.routeCache.set(route.id, route.host);
+      const response = await this.env.DIRECTORY.get(id).fetch(request);
+      if (!response.ok) throw new Error(`Directory register-objects failed: ${response.status}`);
+      for (const route of routes) {
+        this.routeCache.set(route.id, route.host);
+        this.publishedRoutes.set(route.id, route.host);
+      }
+      return true;
     } catch {
       // Directory acceleration is best-effort. Fallback routing still sends
       // unknown objects to the world host or the caller-provided space host.
+      return false;
     }
   }
 
@@ -1103,7 +1135,7 @@ export class PersistentObjectDO {
         return { op: "replay", id: frameId, space, from, entries: world.replay(space, from, limit) };
       },
       deliverInput: (session, input) => world.deliverInput(session.actor, input),
-      broadcastApplied: (frameValue, originator) => this.broadcastApplied(world, frameValue, originator),
+      broadcastApplied: (frameValue, originator) => this.handleAppliedFrame(world, frameValue, originator),
       broadcastTaskResult: (result) => this.broadcastTaskResult(world, result),
       broadcastLiveEvents: (result) => this.broadcastLiveEvents(world, result)
     });
@@ -1264,6 +1296,11 @@ export class PersistentObjectDO {
     world.recordMetric({ kind: "broadcast", audience_size: audienceSize, obs_count: frame.observations.length, ms: Date.now() - startedAt });
   }
 
+  private async handleAppliedFrame(world: WooWorld, frame: AppliedFrame, originator?: WebSocket): Promise<void> {
+    if (this.durableHostKey() === WORLD_HOST) await this.registerIncrementalObjectRoutes(world);
+    this.broadcastApplied(world, frame, originator);
+  }
+
   private broadcastTaskResult(world: WooWorld, result: ParkedTaskRun): void {
     if (result.frame?.op === "applied") {
       this.broadcastApplied(world, result.frame);
@@ -1377,4 +1414,13 @@ function uniqueRoutes(routes: Array<{ id: string; host: string; anchor: string |
     byId.set(route.id, route);
   }
   return Array.from(byId.values()).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+async function workerHashText(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function logCatalogTapEvent(event: CatalogTapLogEvent): void {
+  console.log("woo.catalog", JSON.stringify({ ...event, ts: Date.now() }));
 }

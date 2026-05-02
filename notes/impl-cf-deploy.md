@@ -26,7 +26,7 @@ Deferred to v1.1+:
 - `QuotaAccountant` DO real-time accounting (table scaffolded; daily alarm pass skipped at first).
 - §R10.5 distributed tracing.
 - Multi-region tuning beyond CF defaults.
-- Catalog tap install/update over GitHub fetch (local catalogs cover the demos).
+- Private GitHub tap auth/cache policy (public GitHub tap install/update is wired).
 - Snapshot policy automation (manual snapshot only).
 
 ## Phases
@@ -49,7 +49,7 @@ Tests: extend `tests/conformance.test.ts` with a CF-storage backend variant if a
 
 ### Phase 3: First-request bootstrap
 
-`src/worker/bootstrap.ts`: §R9.1 first-request path. Worker checks `$system` DO's `bootstrapped` flag (via `loadMeta`); if false, runs the universal-class bootstrap and any `WOO_AUTO_INSTALL_CATALOGS` entries; sets `bootstrapped=true`. Idempotent.
+`src/worker/bootstrap.ts`: §R9.1 first-request path. Worker checks `$system` DO's `bootstrapped` flag (via `loadMeta`); if false, runs the universal-class bootstrap and any `WOO_AUTO_INSTALL_CATALOGS` entries; sets `bootstrapped=true`. Idempotent. The shipped `wrangler.toml` sets `WOO_AUTO_INSTALL_CATALOGS = ""`, so fork-and-deploy starts as a clean core world unless the operator opts into bundled catalogs before deploy.
 
 Operator claim flow (§R14.4): `POST /api/auth` accepting `wizard:<token>` matches against `WOO_INITIAL_WIZARD_TOKEN` env var; first match consumes the token (sets `world_meta.bootstrap_token_used = true`); subsequent presentations return 401.
 
@@ -73,11 +73,11 @@ Wizard-action audit on `X-Woo-Force-Direct`, `X-Woo-Impersonate-Actor`, `wiz:for
 
 `wrangler.toml` per §R12 skeleton. `[[migrations]]` tag `v1` creates `PersistentObjectDO`; `tag = "v2"` creates `DirectoryDO` (append-only migration history). AE dataset binding optional. `[observability]` enabled.
 
-`DEPLOY.md` already exists; verify the operator path against the live deploy. End-to-end smoke: deploy → set secrets → first auth as wizard → install local catalogs → exercise dubspace/taskspace/chat from the bundled client.
+`DEPLOY.md` already exists; verify the operator path against the live deploy. End-to-end smoke: deploy → set secrets → first auth as wizard → install desired catalogs → exercise any installed catalog UI from the bundled client.
 
-### Phase 7 (partly landed locally): catalog tap install/update over GitHub
+### Phase 7 (landed locally): catalog tap install/update over GitHub
 
-The local Node server now has `/api/tap/install`, `/api/tap/update`, and `GET /api/taps`. The helper in `src/server/github-taps.ts` resolves GitHub refs, fetches `manifest.json` and `README.md`, computes SHA-256 hashes, and dispatches `$catalog_registry:install` or `$catalog_registry:update`. Major updates fetch `migration-v<from>-to-v<to>.json` and pass it to the registry call. The Cloudflare Worker still needs to reuse or port this helper into its fetch handler, then layer in production observability and any private-repo token policy.
+The local Node server and Cloudflare Worker now have `/api/tap/install`, `/api/tap/update`, and `GET /api/taps`. The shared helper in `src/core/catalog-taps.ts` resolves GitHub refs, fetches `manifest.json` and `README.md`, computes SHA-256 hashes, and dispatches `$catalog_registry:install` or `$catalog_registry:update`. Major updates fetch `migration-v<from>-to-v<to>.json` and pass it to the registry call. Worker-side fetches are bounded (manifest/migration 256 KiB, README 512 KiB, eight subrequests per operation) and emit structured `woo.catalog` logs. Private repo tokens and content-hash caching remain deferred.
 
 ## Current Implementation Status
 
@@ -90,8 +90,8 @@ Substrate landed (works in-process):
 - REST API with six endpoints (`src/server/dev-server.ts` for the local Node target).
 - Wire ops `direct`/`result`/`event` over WebSocket.
 - Identity three-layer model (actor/session/connection); session table is credential-only, connection state in-memory.
-- Local + GitHub catalog install path; manifests for chat/dubspace/taskspace ship in `catalogs/`. GitHub tap helper lives in `src/server/github-taps.ts` and is wired through `POST /api/tap/install` and `GET /api/taps`. Wizard auth via `wizard:<WOO_INITIAL_WIZARD_TOKEN>`.
-- 127/127 tests pass; typecheck clean (split: main + `tsconfig.worker.json`).
+- Local + GitHub catalog install/update path; manifests for chat/dubspace/taskspace ship in `catalogs/`. GitHub tap helper lives in `src/core/catalog-taps.ts` and is wired through `POST /api/tap/install`, `POST /api/tap/update`, and `GET /api/taps`. Wizard auth via `wizard:<WOO_INITIAL_WIZARD_TOKEN>`.
+- 181/181 tests pass; typecheck clean (split: main + `tsconfig.worker.json`).
 
 Phase 0 (toolchain smoke test) — landed:
 
@@ -108,16 +108,16 @@ Phase 1 (CF backend `ObjectRepository`) — landed:
   - **`savepoint(fn)` also uses `state.storage.transactionSync(fn)`** — when called inside an outer transaction it nests as an implicit savepoint. Raw SQL `SAVEPOINT`/`ROLLBACK TO`/`RELEASE` are forbidden through `sql.exec` per CF docs and have been removed.
 - `CFObjectRepository implements ObjectRepository, WorldRepository`. `load()` walks per-object tables to reconstruct a `SerializedWorld` for cross-hibernation hydration. `save()` clears the tables and re-inserts via per-object methods inside one transaction, matching `LocalSQLiteRepository.save()` so `createWorld()`'s post-bootstrap whole-world flush works on CF.
 - Pending-log-outcome assertion at outer-only commit boundary (matches local backend).
-- `tests/worker/cf-repository.test.ts` exercises `CFObjectRepository` through a DurableObjectState-shaped `sql.exec`/`transactionSync` adapter: bootstrap/reload, nested savepoint rollback, and remote-room command resolution on CF-backed hosts. Full Worker gateway + Directory + cluster-host integration still needs Miniflare or live-deploy coverage.
+- `tests/worker/cf-repository.test.ts` exercises `CFObjectRepository` through a DurableObjectState-shaped `sql.exec`/`transactionSync` adapter: bootstrap/reload, nested savepoint rollback, remote-room command resolution on CF-backed hosts, and a gateway + Directory regression for Worker-side GitHub tap install publishing a self-hosted object before host-seed fetch. Full cluster-host integration still needs Miniflare or live-deploy coverage.
 
 Phase 2 (Worker entry + DO class) — landed:
 
-- `src/worker/persistent-object-do.ts` (~750 lines). `PersistentObjectDO` wraps `WooWorld`+`CFObjectRepository` for both the `world` gateway and Directory-routed anchor-cluster hosts. The gateway runs bootstrap + catalog auto-install; cluster hosts load/prune host-scoped serialized slices exported by the gateway. REST routes include `/healthz`, `/api/auth` on the gateway (with `wizard:<WOO_INITIAL_WIZARD_TOKEN>` claim flow), authenticated `/api/state` aggregate, `/api/objects/{id}` describe, `/api/objects/{id}/properties/{name}`, `/api/objects/{id}/calls/{verb}` (sequenced + direct), `/api/objects/{id}/log`, `/api/taps`. Fail-loud 503 for missing `WOO_INITIAL_WIZARD_TOKEN` or `WOO_INTERNAL_SECRET` per §R14.7. SSE streams (`/stream`) and tap-install/update GitHub fetch still return 501 `E_NOT_IMPLEMENTED`.
+- `src/worker/persistent-object-do.ts` (~750 lines). `PersistentObjectDO` wraps `WooWorld`+`CFObjectRepository` for both the `world` gateway and Directory-routed anchor-cluster hosts. The gateway runs bootstrap + operator-selected catalog auto-install (`WOO_AUTO_INSTALL_CATALOGS`; empty by default on CF); cluster hosts load/prune host-scoped serialized slices exported by the gateway. REST routes include `/healthz`, `/api/auth` on the gateway (with `wizard:<WOO_INITIAL_WIZARD_TOKEN>` claim flow), authenticated `/api/state` aggregate, `/api/objects/{id}` describe, `/api/objects/{id}/properties/{name}`, `/api/objects/{id}/calls/{verb}` (sequenced + direct), `/api/objects/{id}/log`, `/api/taps`, `/api/tap/install`, and `/api/tap/update`. Fail-loud 503 for missing `WOO_INITIAL_WIZARD_TOKEN` or `WOO_INTERNAL_SECRET` per §R14.7. SSE streams (`/stream`) still return 501 `E_NOT_IMPLEMENTED`.
 - `src/worker/directory-do.ts`. `DirectoryDO` singleton with SQLite tables for `objref -> host` routes and `session_id -> actor` session routing. It starts empty and learns object placement from generic route tables exported by the world/hosts; chat stays on the gateway until player-DO fan-out/presence indexing exists.
 - `src/worker/index.ts`. Worker entry now routes global API/WS traffic to `env.WOO.idFromName("world")`, object REST routes through Directory, and best-effort broadcasts routed applied frames back through the gateway so WebSocket clients see REST-agent mutations live.
 - `wrangler.toml`. `[[durable_objects.bindings]] name = "WOO" class_name = "PersistentObjectDO"` and `name = "DIRECTORY" class_name = "DirectoryDO"`. `[[migrations]] tag = "v1" new_sqlite_classes = ["PersistentObjectDO"]`; `tag = "v2" new_sqlite_classes = ["DirectoryDO"]`. `compatibility_flags = ["nodejs_compat"]` (needed by `node:crypto` in `src/core/source-hash.ts`).
 - `tsconfig.worker.json` adds `node` to `types` so the worker tsconfig sees `node:crypto` types.
-- **Live deploy**: `https://woo.hughpyle.workers.dev/`. `WOO_INITIAL_WIZARD_TOKEN` set via `wrangler secret put`; set `WOO_INTERNAL_SECRET` before deploying this HMAC batch. `WOO_SEED_PHRASE` is no longer a runtime requirement until deterministic object-id allocation lands. Smoke-tested end to end: 50 objects bootstrapped (universal classes + chat/dubspace/taskspace local catalogs auto-installed), wizard claim returns `$wiz` session, second claim returns `E_TOKEN_CONSUMED`, describe + REST routing work, `the_chatroom` (parent `$chatroom`) has 17 verbs and 10 properties matching the local manifest. Permission gates (`E_DIRECT_DENIED` for non-`direct_callable` verbs) enforced.
+- **Live deploy**: `https://woo.hughpyle.workers.dev/`. `WOO_INITIAL_WIZARD_TOKEN` set via `wrangler secret put`; set `WOO_INTERNAL_SECRET` before deploying this HMAC batch. `WOO_SEED_PHRASE` is no longer a runtime requirement until deterministic object-id allocation lands. Earlier smoke tests used bundled catalog auto-install; new CF defaults start clean unless `WOO_AUTO_INSTALL_CATALOGS` is edited before deploy. Permission gates (`E_DIRECT_DENIED` for non-`direct_callable` verbs) enforced.
 
 Phase 2.1 (bundled SPA via Workers Assets) — landed:
 
@@ -162,7 +162,7 @@ Phase 2.5 (single async runtime path + cross-host dispatch bridge) — landed lo
 - The host bridge is async: `hostForObject`, `getPropChecked`, and `dispatch` may await routed host work. VM `GET_PROP`, `CALL_VERB`, and `PASS` await through that bridge; property writes/definition edits to remote objects still raise `E_CROSS_HOST_WRITE`.
 - Behavior executions serialize through a per-world host queue (sequenced calls, direct calls, and parked-task resumes). Sequenced calls reserve `seq` in memory, run the awaited behavior under an in-memory behavior savepoint, then commit dirty local state plus `appendLog`/`recordLogOutcome` in one repository transaction. This is the clear async shape; it replaces the earlier "run behavior inside a sync storage transaction" sketch.
 - Worker hosts expose internal `/__internal/remote-get-prop` and `/__internal/remote-dispatch` routes. Routed dispatch returns both the verb result and emitted observations so the origin frame preserves live/replay observations.
-- Verification in the current worktree: `npm test` (127/127), `npx tsc --noEmit`, `npx tsc --noEmit -p tsconfig.worker.json`, `npm run build`, and `git diff --check` pass.
+- Verification in the current worktree: `npm test` (181/181), `npm run typecheck`, `npm run build`, and `git diff --check` pass.
 
 Verb-flag persistence fix (storage-layer bug, both backends) — landed:
 
@@ -183,18 +183,17 @@ In dependency order:
 - **`wiz:rotate_bootstrap_token` verb** on `$system`. Spec'd in §R14.4; impl pending.
 - **Deployed cross-DO smoke for mid-verb RPC**: the async `HostBridge` and Worker internal routes are wired locally, but need a live CF/Miniflare exercise that proves a verb on one host can read/call another host and surface observations correctly.
 - **Authenticated internal forwarding headers landed locally**: the public Worker strips inbound `x-woo-internal-*` headers before forwarding, and gateway/cluster/Directory internal calls now carry an HMAC over method/path/body hash plus forwarded authority headers. Set `WOO_INTERNAL_SECRET` before the next deploy.
-- **General object-route registration**: Directory has `/register-objects`, and task creation is wired via `task_created` observations. General `createObject` paths still need a placement callback so new rooms/objects register their intended host at creation time.
+- **General object-route registration**: Directory has `/register-objects`, initial gateway bootstrap publishes `world.objectRoutes()`, and applied frames trigger a generic incremental publish for new `host_placement: "self"` objects. Remaining gap: non-gateway hosts still need broader create-object placement callbacks for future object-creation APIs that bypass the gateway.
 - **Aggregate health**: `/healthz` is gateway-local. Add a Directory/host fan-out health endpoint when routed-host liveness needs to be operator-visible.
 - **Verb-lookup cache** (`ancestor_verb_cache`, `ancestor_prop_cache`). Schema exists in `persistence.md §14.1`; population on cross-DO miss is unimplemented.
 - **`src/instrument.ts`** with AE writes, structured logs, per-DO `:metrics()`.
-- **Full Worker/DO conformance harness** via Miniflare. `tests/worker/cf-repository.test.ts` now covers `CFObjectRepository` through a DurableObjectState-shaped SQL adapter; the remaining gap is gateway + Directory + cluster-host integration.
-- **Worker-side catalog tap install/update**: port `src/server/github-taps.ts` helpers into the Worker fetch handler. Currently the Worker route returns 501 `E_NOT_IMPLEMENTED`; local catalogs cover the demos.
+- **Full Worker/DO conformance harness** via Miniflare. `tests/worker/cf-repository.test.ts` now covers `CFObjectRepository` plus a gateway + Directory tap-route regression through DurableObjectState-shaped fakes; the remaining gap is real cluster-host integration under Miniflare or live CF.
 
 ## Known acceptable shortcuts
 
 - **Mid-call SUSPEND across DOs raises `E_CROSSDO_PARKING_UNSUPPORTED`** per §R6.2. v1.1 may relax.
 - **No tap caching.** Every install/update fetches fresh from GitHub. §CT4.
-- **Bundled local-catalog auto-install only on the Worker**; GitHub-tap install/update lands in Phase 7.
+- **Public GitHub taps only.** Private repository auth and manifest/content caching are deferred.
 - **Quota accounting is hard-cap-on-write only.** Daily-alarm pass deferred. §R5.4.
 - **No multi-region tuning.** CF picks the closest region per DO automatically.
 - **No distributed tracing.** Structured logs + `request_id` propagation across cross-DO RPCs cover the audit trail.
@@ -207,7 +206,6 @@ In dependency order:
 1. **Sessions placement.** Current slice uses Directory's `session_id -> actor` table. Lean from §R11.4 still points toward embedded player ids for long-term removal of a session lookup hop; decide before player-DO routing.
 2. **`world.ts` decomposition.** The Worker can route top-level calls now, but `WooWorld` still assumes local class/verb availability and local dispatch within a host. Light refactor (cluster-aware dispatch + remote definition cache) vs. full decomposition along TECH_DEBT_AUDIT F001 lines remains open.
 3. **Storage transaction boundaries** at CF: repository-local savepoint behavior is now covered by a DurableObjectState-shaped adapter, but still needs a Miniflare/DO probe against real `state.storage.sql` semantics.
-4. **Demo catalogs at boot**: should `WOO_AUTO_INSTALL_CATALOGS=chat,dubspace,taskspace` be the default for fresh dev deploys (current intent) or empty for CF deploys (clean world)? Probably default in dev, empty in production.
 
 ## Reference
 

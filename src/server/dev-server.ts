@@ -1,4 +1,5 @@
 import http from "node:http";
+import { createHash } from "node:crypto";
 import { parse } from "node:url";
 import { createServer as createViteServer } from "vite";
 import { WebSocket, WebSocketServer } from "ws";
@@ -70,14 +71,14 @@ const server = http.createServer(async (req, res) => {
         catalog: String(body.catalog ?? ""),
         ref: typeof body.ref === "string" ? body.ref : undefined,
         as: typeof body.as === "string" ? body.as : undefined
-      }),
+      }, { hashText: nodeHashText }),
       updateTap: (actor, body) => updateGitHubTap(world, actor, {
         tap: String(body.tap ?? ""),
         catalog: String(body.catalog ?? ""),
         ref: typeof body.ref === "string" ? body.ref : undefined,
         as: typeof body.as === "string" ? body.as : undefined,
         accept_major: body.accept_major === true
-      }),
+      }, { hashText: nodeHashText }),
       openStream: (_request, rawTarget, target, session) => openRestStream(req, res, rawTarget, target, session) ? { handled: true, raw: true } : { handled: false },
       broadcastApplied,
       broadcastLiveEvents
@@ -238,6 +239,10 @@ function expireAttachedSessions(sessionIds: string[]): void {
     sockets.delete(ws);
     sendNoSession(ws, undefined, "session token is expired or unknown");
   }
+}
+
+function nodeHashText(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 function sendNoSession(ws: WebSocket, id: string | undefined, message: string): void {

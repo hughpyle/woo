@@ -1,15 +1,22 @@
 import { DatabaseSync } from "node:sqlite";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createWorld } from "../../src/core/bootstrap";
 import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../../src/core/types";
 import type { CallContext, HostBridge, MoveObjectResult, WooWorld } from "../../src/core/world";
 import { CFObjectRepository } from "../../src/worker/cf-repository";
+import { DirectoryDO } from "../../src/worker/directory-do";
+import { signInternalRequest } from "../../src/worker/internal-auth";
+import { PersistentObjectDO, type Env } from "../../src/worker/persistent-object-do";
 
 class FakeSqlCursor {
   constructor(private readonly rows: Record<string, unknown>[]) {}
 
   toArray(): Record<string, unknown>[] {
     return this.rows;
+  }
+
+  [Symbol.iterator](): Iterator<Record<string, unknown>> {
+    return this.rows[Symbol.iterator]();
   }
 }
 
@@ -28,14 +35,31 @@ class FakeSqlStorage {
 }
 
 class FakeDurableObjectState {
+  readonly id: { name: string };
   private readonly db = new DatabaseSync(":memory:");
   private transactionDepth = 0;
   private savepointCounter = 0;
+
+  constructor(name = "world") {
+    this.id = { name };
+  }
 
   readonly storage = {
     sql: new FakeSqlStorage(this.db),
     transactionSync: <T>(fn: () => T): T => this.transactionSync(fn)
   };
+
+  async blockConcurrencyWhile<T>(fn: () => T | Promise<T>): Promise<T> {
+    return await fn();
+  }
+
+  acceptWebSocket(_ws: WebSocket): void {
+    // Not needed for repository / REST-path tests.
+  }
+
+  getWebSockets(): WebSocket[] {
+    return [];
+  }
 
   close(): void {
     this.db.close();
@@ -68,6 +92,18 @@ class FakeDurableObjectState {
     } finally {
       this.transactionDepth = 0;
     }
+  }
+}
+
+class FakeDurableObjectNamespace {
+  constructor(private readonly factory: (name: string) => { fetch(request: Request): Promise<Response> | Response }) {}
+
+  idFromName(name: string): { name: string } {
+    return { name };
+  }
+
+  get(id: { name: string }): { fetch(request: Request): Promise<Response> | Response } {
+    return this.factory(id.name);
   }
 }
 
@@ -302,6 +338,129 @@ describe("CFObjectRepository production-shape coverage", () => {
     } finally {
       roomHarness.cleanup();
       homeHarness.cleanup();
+    }
+  });
+
+  it("publishes Worker-installed self-hosted tap objects before serving host seeds", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const gatewayState = new FakeDurableObjectState("world");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    let gateway: PersistentObjectDO;
+    const env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-tap-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: new FakeDurableObjectNamespace((name) => {
+        if (name !== "world") throw new Error(`unexpected Woo DO ${name}`);
+        return gateway;
+      })
+    } as unknown as Env;
+    gateway = new PersistentObjectDO(gatewayState as unknown as DurableObjectState, env);
+    const logs: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+      logs.push(args.map(String).join(" "));
+    });
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+      const manifest = {
+        name: "cf-route-demo",
+        version: "1.0.0",
+        spec_version: "v1",
+        license: "MIT",
+        classes: [
+          {
+            local_name: "$cf_route_room",
+            parent: "$space",
+            description: "Self-hosted space class installed through the Worker tap path.",
+            properties: []
+          }
+        ],
+        seed_hooks: [
+          {
+            kind: "create_instance",
+            class: "$cf_route_room",
+            as: "cf_route_room_1",
+            name: "CF Route Room",
+            description: "A self-hosted room installed from a mocked GitHub tap.",
+            properties: {
+              next_seq: 1,
+              subscribers: [],
+              last_snapshot_seq: 0,
+              host_placement: "self"
+            }
+          }
+        ]
+      };
+      const readme = `---\nname: cf-route-demo\nversion: 1.0.0\nspec_version: v1\nlicense: MIT\n---\n\n# CF Route Demo\n`;
+      if (url === "https://api.github.com/repos/hughpyle/woo-libs/commits/cf-route-demo-v1.0.0") {
+        return new Response(JSON.stringify({ sha }), { headers: { "content-type": "application/json" } });
+      }
+      if (url === `https://raw.githubusercontent.com/hughpyle/woo-libs/${sha}/catalogs/cf-route-demo/manifest.json`) {
+        return new Response(JSON.stringify(manifest), { headers: { "content-type": "application/json" } });
+      }
+      if (url === `https://raw.githubusercontent.com/hughpyle/woo-libs/${sha}/catalogs/cf-route-demo/README.md`) {
+        return new Response(readme, { headers: { "content-type": "text/markdown" } });
+      }
+      return new Response("", { status: 404, statusText: "Not Found" });
+    });
+
+    try {
+      const auth = await gateway.fetch(new Request("https://woo.test/api/auth", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: "wizard:cf-tap-token" })
+      }));
+      expect(auth.ok).toBe(true);
+      const authBody = await auth.json() as { session: string };
+
+      const install = await gateway.fetch(new Request("https://woo.test/api/tap/install", {
+        method: "POST",
+        headers: {
+          "authorization": `Session ${authBody.session}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          tap: "hughpyle/woo-libs",
+          catalog: "cf-route-demo",
+          ref: "cf-route-demo-v1.0.0"
+        })
+      }));
+      expect(install.ok).toBe(true);
+      const installBody = await install.json() as { op?: string; seq?: number };
+      expect(installBody).toMatchObject({ op: "applied", seq: 1 });
+      expect(logs.some((line) => line.includes("woo.catalog") && line.includes("\"kind\":\"tap_install\""))).toBe(true);
+
+      const routeRequest = await signInternalRequest(env, new Request("https://woo.internal/resolve-object", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: "cf_route_room_1", fallback_host: "world" })
+      }));
+      const routeResponse = await directory.fetch(routeRequest);
+      expect(routeResponse.ok).toBe(true);
+      await expect(routeResponse.json()).resolves.toMatchObject({ id: "cf_route_room_1", host: "cf_route_room_1" });
+
+      const seedRequest = await signInternalRequest(env, new Request("https://woo.internal/__internal/host-seed", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-woo-host-key": "world"
+        },
+        body: JSON.stringify({ host: "cf_route_room_1" })
+      }));
+      const seedResponse = await gateway.fetch(seedRequest);
+      expect(seedResponse.ok).toBe(true);
+      const seed = await seedResponse.json() as { objects?: Array<{ id: string }> };
+      expect(seed.objects?.map((obj) => obj.id)).toContain("cf_route_room_1");
+    } finally {
+      logSpy.mockRestore();
+      vi.unstubAllGlobals();
+      directoryState.close();
+      gatewayState.close();
     }
   });
 });

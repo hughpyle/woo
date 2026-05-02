@@ -150,7 +150,7 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
     ref_resolved_sha: "unversioned"
   };
   const existing = installedCatalogs(world);
-  assertCatalogInstallNameAvailable(world, manifest, tap, alias, existing);
+  assertCatalogInstallNameAvailable(world, manifest, tap, alias, provenance, existing);
   assertDependenciesInstalled(manifest, existing);
 
   const localObjects = new Map<string, ObjRef>();
@@ -771,9 +771,17 @@ function assertDependenciesInstalled(manifest: CatalogManifest, installed: Insta
   }
 }
 
-function assertCatalogInstallNameAvailable(world: WooWorld, manifest: CatalogManifest, tap: string, alias: string, installed: InstalledCatalogRecord[]): void {
+function assertCatalogInstallNameAvailable(world: WooWorld, manifest: CatalogManifest, tap: string, alias: string, provenance: Record<string, WooValue>, installed: InstalledCatalogRecord[]): void {
   const aliasMatch = installed.find((record) => record.alias === alias);
   if (aliasMatch) {
+    if (sameCatalogInstall(aliasMatch, manifest, tap, alias, provenance)) {
+      throw wooError("E_CATALOG_ALREADY_INSTALLED", `catalog is already installed at this version: ${alias}`, {
+        alias,
+        tap,
+        catalog: manifest.name,
+        version: manifest.version
+      });
+    }
     throw wooError("E_NAME_COLLISION", `catalog alias is already installed: ${alias}`, {
       alias,
       installed_catalog: aliasMatch.catalog,
@@ -782,6 +790,14 @@ function assertCatalogInstallNameAvailable(world: WooWorld, manifest: CatalogMan
   }
   const sourceMatch = installed.find((record) => record.tap === tap && record.catalog === manifest.name);
   if (sourceMatch) {
+    if (sameCatalogInstall(sourceMatch, manifest, tap, sourceMatch.alias, provenance)) {
+      throw wooError("E_CATALOG_ALREADY_INSTALLED", `catalog is already installed at this version: ${sourceMatch.alias}`, {
+        alias: sourceMatch.alias,
+        tap,
+        catalog: manifest.name,
+        version: manifest.version
+      });
+    }
     throw wooError("E_NAME_COLLISION", `catalog source is already installed as ${sourceMatch.alias}: ${tap}:${manifest.name}`, {
       alias,
       installed_alias: sourceMatch.alias,
@@ -807,6 +823,32 @@ function assertCatalogInstallNameAvailable(world: WooWorld, manifest: CatalogMan
       });
     }
   }
+}
+
+function sameCatalogInstall(record: InstalledCatalogRecord, manifest: CatalogManifest, tap: string, alias: string, provenance: Record<string, WooValue>): boolean {
+  return (
+    record.tap === tap &&
+    record.catalog === manifest.name &&
+    record.alias === alias &&
+    record.version === manifest.version &&
+    stableStringify(comparableProvenance(record.provenance)) === stableStringify(comparableProvenance(provenance))
+  );
+}
+
+function comparableProvenance(provenance: Record<string, WooValue>): Record<string, WooValue> {
+  const { fetched_at: _fetchedAt, ...rest } = provenance;
+  return rest;
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function installedCatalogs(world: WooWorld): InstalledCatalogRecord[] {
