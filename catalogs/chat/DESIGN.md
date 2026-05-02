@@ -138,9 +138,21 @@ $chatroom < $room
 The standalone demo uses `$chatroom` as a small room class, close to LambdaCore's room model:
 
 - exits are first-class objects addressed by the room's `exits` map;
+- exit names and aliases live on the `$exit` object; local seed/repair expands the room's `exits` map from those aliases so catalog authors do not repeat them in two places;
 - blocked exits are `$exit` objects with `nogo_msg` / `onogo_msg`;
 - rooms may be contained in other rooms, so `enter tub` is ordinary object-command dispatch;
 - room contents are real objects, including fixed furnishings and portable things.
+
+The `exits` map is a v1 implementation shortcut. LambdaMOO stores a room's
+exits as a list of exit objects and scans each exit's `.name` / `.aliases`,
+returning `$ambiguous_match` if multiple exits claim the same text. Woo keeps
+the map for now, but the exit object remains the single source of truth for
+aliases; duplicate alias claims are catalog errors during seed/repair.
+
+Unlike LambdaCore's `$room:enterfunc`, movement does not automatically render
+the destination room inside the same server turn. `$exit:move()` returns
+`look_deferred: true` with the destination room. Clients and agents should
+follow a successful movement result by calling `:look()` on that room.
 
 The room's chat behavior still comes from `$conversational`; exits and carrying are room mechanics, not feature mechanics.
 

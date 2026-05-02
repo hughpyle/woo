@@ -369,6 +369,11 @@ test("chat controls follow room membership", async ({ page }) => {
   await expect(page.locator("[data-chat-input]")).toBeFocused();
   await expect(page.locator("[data-chat-input]")).toHaveValue("draft text");
 
+  await page.locator("[data-chat-input]").fill("take foo");
+  await page.locator("[data-chat-input]").press("Enter");
+  await expect(page.locator(".chat-feed")).toContainText("I don't see \"foo\" here.");
+  await expect(page.locator("[data-chat-input]")).toBeFocused();
+
   await page.locator("[data-chat-input]").fill("se");
   await page.locator("[data-chat-input]").press("Enter");
   await expect(page.locator(".toolbar h1")).toHaveText("Deck", { timeout: 5_000 });

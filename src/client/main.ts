@@ -2993,7 +2993,7 @@ class DubAudio {
   private triggerVoice(voice: string, step: number) {
     if (voice === "kick") this.kick();
     if (voice === "snare") this.noiseHit(0.18, 900, 0.08);
-    if (voice === "hat") this.noiseHit(0.05, 7000, 0.10);
+    if (voice === "hat") this.noiseHit(0.05, 7000, 0.22);
     if (voice === "tone") this.tone(toneTrackFreq(step));
   }
 

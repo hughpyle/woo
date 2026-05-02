@@ -135,6 +135,7 @@ export type RepairCatalogOptions = {
   allowImplementationHints?: boolean;
   reconcileSeedHooks?: boolean;
   rehomeNowhereSeedObjects?: boolean;
+  reconcileClassVerbs?: boolean;
 };
 
 export type UpdateCatalogOptions = InstallCatalogOptions & {
@@ -200,6 +201,7 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
     const feature = resolveObjectRef(world, hook.feature, localObjects, localSeeds, existing);
     attachFeature(world, consumer, feature);
   }
+  populateSeedExitAliasMaps(world, manifest, localSeeds);
 
   const record: InstalledCatalogRecord = {
     tap,
@@ -221,6 +223,7 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
   const allowImplementationHints = options.allowImplementationHints ?? false;
   const reconcileSeedHooks = options.reconcileSeedHooks ?? false;
   const rehomeNowhereSeedObjects = options.rehomeNowhereSeedObjects ?? false;
+  const reconcileClassVerbs = options.reconcileClassVerbs ?? false;
   const existing = installedCatalogs(world);
   const localObjects = new Map<string, ObjRef>();
   const localSeeds = new Map<string, ObjRef>();
@@ -235,6 +238,7 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
     setDescriptionIfEmpty(world, def.local_name, catalogDescription(def.description, def.local_name, manifest.name));
     for (const property of def.properties ?? []) installProperty(world, def.local_name, property, actor);
     for (const verb of def.verbs ?? []) installVerbDef(world, def.local_name, verb, actor, allowImplementationHints, true);
+    if (reconcileClassVerbs) dropStaleOwnVerbs(world, def.local_name, new Set((def.verbs ?? []).map((verb) => verb.name)));
   }
   for (const schema of manifest.schemas ?? []) {
     if (world.objects.has(schema.on)) world.defineEventSchema(schema.on, schema.type, schema.shape);
@@ -266,6 +270,7 @@ export function repairCatalogManifest(world: WooWorld, manifest: CatalogManifest
     }
     if (world.objects.has(hook.consumer) && world.objects.has(hook.feature)) attachFeature(world, hook.consumer, hook.feature);
   }
+  populateSeedExitAliasMaps(world, manifest, localSeeds);
 }
 
 export function updateCatalogManifest(world: WooWorld, manifest: CatalogManifest, options: UpdateCatalogOptions = {}): InstalledCatalogRecord {
@@ -371,6 +376,57 @@ function reconcileSeedObject(
   world.persist(true);
 }
 
+function populateSeedExitAliasMaps(world: WooWorld, manifest: CatalogManifest, localSeeds: Map<string, ObjRef>): void {
+  for (const hook of manifest.seed_hooks ?? []) {
+    if (hook.kind !== "create_instance") continue;
+    const id = localSeeds.get(hook.as) ?? hook.as;
+    if (world.objects.has(id)) populateExitAliasMap(world, id);
+  }
+}
+
+function populateExitAliasMap(world: WooWorld, exitRef: ObjRef): void {
+  const source = world.propOrNull(exitRef, "source");
+  const exits = typeof source === "string" && world.objects.has(source) ? world.propOrNull(source, "exits") : null;
+  const aliases = world.propOrNull(exitRef, "aliases");
+  if (typeof source !== "string" || !isStringMap(exits)) return;
+
+  const keys = new Set<string>();
+  addAliasKey(keys, world.object(exitRef).name);
+  addAliasKey(keys, world.propOrNull(exitRef, "name"));
+  if (Array.isArray(aliases)) {
+    for (const alias of aliases) addAliasKey(keys, alias);
+  }
+  if (keys.size === 0) return;
+
+  const next: Record<string, WooValue> = { ...exits };
+  let changed = false;
+  for (const key of keys) {
+    const existing = next[key];
+    if (existing === undefined) {
+      next[key] = exitRef;
+      changed = true;
+    } else if (existing !== exitRef) {
+      throw wooError("E_CATALOG", `exit alias maps to multiple exits: ${key}`, {
+        source,
+        alias: key,
+        existing,
+        exit: exitRef
+      });
+    }
+  }
+  if (changed) world.setProp(source, "exits", next);
+}
+
+function addAliasKey(keys: Set<string>, value: WooValue): void {
+  if (typeof value !== "string") return;
+  const trimmed = value.trim();
+  if (trimmed) keys.add(trimmed);
+}
+
+function isStringMap(value: WooValue): value is Record<string, WooValue> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function installProperty(world: WooWorld, obj: ObjRef, property: CatalogPropertyDef, owner: ObjRef): void {
   const target = world.object(obj);
   if (target.propertyDefs.has(property.name)) return;
@@ -422,6 +478,14 @@ function installVerbDef(world: WooWorld, obj: ObjRef, def: CatalogVerbDef, owner
   }
 
   world.addVerb(obj, compileCatalogVerbDef(obj, def, owner, 1, allowImplementationHints));
+}
+
+function dropStaleOwnVerbs(world: WooWorld, objRef: ObjRef, manifestVerbNames: Set<string>): void {
+  const obj = world.object(objRef);
+  const next = obj.verbs.filter((verb) => manifestVerbNames.has(verb.name)).map((verb, index) => ({ ...verb, slot: index + 1 }));
+  if (next.length === obj.verbs.length) return;
+  obj.verbs = next;
+  touchObject(world, objRef);
 }
 
 function compileCatalogVerbDef(obj: ObjRef, def: CatalogVerbDef, owner: ObjRef, version: number, allowImplementationHints: boolean): VerbDef {

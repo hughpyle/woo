@@ -644,7 +644,13 @@ describe("local catalogs", () => {
     expect(world.objects.has("the_hot_tub")).toBe(true);
     expect(world.object("$chatroom").parent).toBe("$room");
     expect(world.object("exit_living_room_southeast").parent).toBe("$exit");
-    expect(world.getProp("the_chatroom", "exits")).toMatchObject({ southeast: "exit_living_room_southeast" });
+    expect(world.getProp("the_chatroom", "exits")).toMatchObject({
+      southeast: "exit_living_room_southeast",
+      se: "exit_living_room_southeast",
+      door: "exit_living_room_southeast",
+      south: "exit_living_room_south",
+      s: "exit_living_room_south"
+    });
     expect(world.getProp("the_chatroom", "host_placement")).toBe("self");
     expect(world.getProp("the_deck", "host_placement")).toBe("self");
     expect(world.getProp("the_hot_tub", "host_placement")).toBe("self");
@@ -773,6 +779,14 @@ describe("local catalogs", () => {
     world.setProp("the_chatroom", "description", "The first runnable chat room.");
     world.setProp("the_chatroom", "next_seq", 37);
     world.setProp("the_chatroom", "subscribers", ["guest_1"]);
+    expect(installVerb(world, "$chatroom", "southeast", `verb :southeast() rxd {
+      return this.subscribers;
+    }`, null).ok).toBe(true);
+    expect(installVerb(world, "$chatroom", "go", `verb :go(exit) rxd {
+      return this.subscribers;
+    }`, null).ok).toBe(true);
+    expect(world.ownVerb("$chatroom", "southeast")).not.toBeNull();
+    expect(world.ownVerb("$chatroom", "go")).not.toBeNull();
     for (const id of ["the_lamp", "the_towel", "the_mug"]) {
       const obj = world.objects.get(id);
       if (obj?.location && world.objects.has(obj.location)) world.object(obj.location).contents.delete(id);
@@ -793,13 +807,25 @@ describe("local catalogs", () => {
     expect(world.object("the_chatroom").contents.has("the_mug")).toBe(true);
     expect(world.object("the_deck").contents.has("the_towel")).toBe(true);
     expect(world.object("$chatroom").parent).toBe("$room");
+    expect(world.ownVerb("$chatroom", "southeast")).toBeNull();
+    expect(world.ownVerb("$chatroom", "go")).toBeNull();
+    expect(world.resolveVerb("the_chatroom", "southeast").definer).toBe("$room");
+    expect(world.resolveVerb("the_chatroom", "go").definer).toBe("$room");
     expect(world.object("exit_living_room_southeast").parent).toBe("$exit");
-    expect(world.getProp("the_chatroom", "exits")).toMatchObject({ southeast: "exit_living_room_southeast" });
+    expect(world.getProp("the_chatroom", "exits")).toMatchObject({
+      southeast: "exit_living_room_southeast",
+      se: "exit_living_room_southeast",
+      door: "exit_living_room_southeast",
+      south: "exit_living_room_south",
+      s: "exit_living_room_south"
+    });
     expect(world.getProp("the_chatroom", "next_seq")).toBe(37);
     expect(world.getProp("the_chatroom", "subscribers")).toEqual(["guest_1"]);
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-01-chat-room-contents-repair");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-chat-room-exit-model");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-chat-exit-privilege-repair");
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-chat-exit-alias-repair");
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-chat-stale-class-verbs-repair");
   });
 
   it("rehomes chat seed portables stranded in $nowhere", () => {

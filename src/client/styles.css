@@ -755,9 +755,15 @@ input[type="range"] {
 }
 
 .chat-line.emote,
-.chat-line.system {
+.chat-line.system,
+.chat-line.error {
   grid-template-columns: 4.2rem minmax(0, 1fr);
   color: #4b5449;
+}
+
+.chat-line.error {
+  background: #fff2ef;
+  color: #7b2e21;
 }
 
 .chat-line.told {

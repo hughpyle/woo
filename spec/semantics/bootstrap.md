@@ -400,6 +400,16 @@ All direct-callable (rxd). Observations are live-only by route per [chat DESIGN.
 `$exit:invoke()` calls `$exit:move(actor)`. `$exit:move(who)` sends private
 leave/arrival text to `who`, calls `moveto(who, dest)`, updates room presence,
 and emits `left` / `entered` observations to the source and destination rooms.
+It returns `{room: dest, from: source, exit, look_deferred: true}`. Unlike
+LambdaCore's `$room:enterfunc`, the server turn does not also render
+`dest:look_self()`; clients and agents that want the destination description
+must follow movement with `dest:look()`.
+
+For v1, `this.exits` is still a map for fast lookup, but exit aliases are
+declared on the `$exit` object. Local seed/repair expands the room map from
+each exit's `.name` and `.aliases`; catalog authors should not duplicate alias
+keys in both places. A future closer LambdaMOO model may replace the map with a
+list of exits plus alias-scan and `$ambiguous_match` handling.
 
 ### B5.4 `$conversational` schemas
 

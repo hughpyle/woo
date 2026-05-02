@@ -310,6 +310,14 @@ existing object. Catalogs use `change_parent` only for explicit opt-in surface
 changes such as making `$wiz` inherit a newly installed programmer class; it is
 not a hidden privilege grant.
 
+Seed/repair may also derive cache-shaped properties from the manifest's own
+object data when the derivation is generic and name-free. The v1 room/exit
+case: if a seeded object has a `source` property, that source object has an
+`exits` map, and the seeded object has `.name` / `.aliases`, install/repair
+adds those names to `source.exits`. This keeps exit aliases single-sourced on
+the exit object while preserving the current map lookup. Duplicate alias claims
+are refused with `E_CATALOG`.
+
 The DSL source per verb is what enables the recompile-in-importing-world
 discipline. Trusted local experiments may additionally include:
 
