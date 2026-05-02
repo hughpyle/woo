@@ -15,7 +15,7 @@
       ],
       "verbs": [
         { "name": "create_task", "perms": "rx", "tool_exposed": true, "arg_spec": { "args": ["title", "description"] }, "source": "verb :create_task(title, description) rx { let task = create($task, actor); task.title = title; task.description = description; task.parent_task = null; task.space = this; this.root_tasks = this.root_tasks + [task]; move(task, this); observe({ type: \"task_created\", task: task, parent: null, title: title }); return task; }" },
-        { "name": "list_tasks", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :list_tasks() rxd { let out = []; for t in contents(this) { if (t.space == this) { out = out + [{ id: t, title: t.title, status: t.status, assignee: t.assignee, parent_task: t.parent_task }]; } } return out; }" }
+        { "name": "list_tasks", "perms": "rxd", "direct_callable": true, "tool_exposed": true, "arg_spec": { "args": [] }, "source": "verb :list_tasks() rxd { let out = []; for t in contents(this) { if (isa(t, $task) && t.space == this) { out = out + [{ id: t, title: t.title, status: t.status, assignee: t.assignee, parent_task: t.parent_task }]; } } return out; }" }
       ]
     },
     {

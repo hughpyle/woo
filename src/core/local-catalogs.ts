@@ -30,11 +30,15 @@ const LOCAL_CATALOG_DUBSPACE_SOURCE_PRESENCE_MIGRATION = "2026-05-01-dubspace-so
 const LOCAL_CATALOG_PINBOARD_SOURCE_PRESENCE_MIGRATION = "2026-05-01-pinboard-source-presence";
 const LOCAL_CATALOG_PINBOARD_PINS_MODEL_MIGRATION = "2026-05-02-pinboard-pins-model";
 const LOCAL_CATALOG_PINBOARD_NOTES_TO_PINS_MIGRATION = "2026-05-02-pinboard-notes-to-pins";
+const LOCAL_CATALOG_PINBOARD_V02_REPAIR_MIGRATION = "2026-05-02-pinboard-v02-repair";
+const LOCAL_CATALOG_PINBOARD_V02_DATA_REPAIR_MIGRATION = "2026-05-02-pinboard-v02-data-repair";
 const LOCAL_CATALOG_CHAT_SOURCE_MOVEMENT_MIGRATION = "2026-05-01-chat-source-movement";
 const LOCAL_CATALOG_CHAT_ROOM_EXIT_MODEL_MIGRATION = "2026-05-02-chat-room-exit-model";
 const LOCAL_CATALOG_CHAT_EXIT_PRIVILEGE_REPAIR_MIGRATION = "2026-05-02-chat-exit-privilege-repair";
 const LOCAL_CATALOG_CHAT_EXIT_ALIAS_REPAIR_MIGRATION = "2026-05-02-chat-exit-alias-repair";
 const LOCAL_CATALOG_CHAT_STALE_CLASS_VERBS_REPAIR_MIGRATION = "2026-05-02-chat-stale-class-verbs-repair";
+const LOCAL_CATALOG_CHAT_LOOK_SKIP_PRESENCE_MIGRATION = "2026-05-02-chat-look-skip-presence";
+const LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION = "2026-05-02-taskspace-list-tasks-guard";
 const LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION = "2026-05-02-prog-editor-room";
 const LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION = "2026-05-02-prog-editor-nowhere";
 
@@ -99,18 +103,23 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): v
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_DUBSPACE_SOURCE_PRESENCE_MIGRATION, { allowImplementationHints: true, only: "dubspace" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_PINBOARD_SOURCE_PRESENCE_MIGRATION, { allowImplementationHints: true, only: "pinboard" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_PINBOARD_PINS_MODEL_MIGRATION, { allowImplementationHints: true, reconcileSeedHooks: true, only: "pinboard" });
-  runPinboardNotesToPinsMigration(world, names);
+  runPinboardNotesToPinsMigration(world, names, LOCAL_CATALOG_PINBOARD_NOTES_TO_PINS_MIGRATION);
+  runPinboardV02RepairMigration(world, names);
+  runPinboardNotesToPinsMigration(world, names, LOCAL_CATALOG_PINBOARD_V02_DATA_REPAIR_MIGRATION);
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_SOURCE_MOVEMENT_MIGRATION, { allowImplementationHints: true, only: "chat" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_ROOM_EXIT_MODEL_MIGRATION, { allowImplementationHints: true, reconcileSeedHooks: true, only: "chat" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_EXIT_PRIVILEGE_REPAIR_MIGRATION, { allowImplementationHints: true, only: "chat" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_EXIT_ALIAS_REPAIR_MIGRATION, { allowImplementationHints: true, reconcileSeedHooks: true, only: "chat" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_STALE_CLASS_VERBS_REPAIR_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "chat" });
+  runChatLookSkipPresenceMigration(world, names);
+  runTaskspaceListTasksGuardMigration(world, names);
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION, { reconcileSeedHooks: true, only: "prog" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION, { reconcileSeedHooks: true, only: "prog" });
 }
 
 function runLocalCatalogMigration(world: WooWorld, names: readonly string[], id: string, options: { allowImplementationHints?: boolean; reconcileSeedHooks?: boolean; rehomeNowhereSeedObjects?: boolean; reconcileClassVerbs?: boolean; only?: string } = {}): void {
   if (migrationApplied(world, id)) return;
+  let repaired = false;
   for (const name of names) {
     if (options.only && name !== options.only) continue;
     if (!localCatalogInstalled(world, name)) continue;
@@ -121,8 +130,56 @@ function runLocalCatalogMigration(world: WooWorld, names: readonly string[], id:
       rehomeNowhereSeedObjects: options.rehomeNowhereSeedObjects,
       reconcileClassVerbs: options.reconcileClassVerbs
     });
+    repaired = true;
   }
-  markMigrationApplied(world, id);
+  if (repaired || !options.only) markMigrationApplied(world, id);
+}
+
+function runPinboardV02RepairMigration(world: WooWorld, names: readonly string[]): void {
+  if (!names.includes("pinboard")) return;
+  if (!localCatalogInstalled(world, "pinboard")) return;
+  if (migrationApplied(world, LOCAL_CATALOG_PINBOARD_V02_REPAIR_MIGRATION)) return;
+  const listNotes = world.objects.has("$pinboard") ? world.ownVerbExact("$pinboard", "list_notes") : null;
+  const needsRepair =
+    !world.objects.has("$pin") ||
+    !listNotes ||
+    !listNotes.source.includes("contents(this)") ||
+    !world.ownVerbExact("$pinboard", "add_note")?.source.includes("create($pin");
+
+  if (needsRepair) {
+    repairCatalogManifest(world, LOCAL_CATALOGS.get("pinboard")!, {
+      actor: "$wiz",
+      allowImplementationHints: true,
+      reconcileSeedHooks: true,
+      reconcileClassVerbs: true
+    });
+  }
+  markMigrationApplied(world, LOCAL_CATALOG_PINBOARD_V02_REPAIR_MIGRATION);
+}
+
+function runChatLookSkipPresenceMigration(world: WooWorld, names: readonly string[]): void {
+  if (!names.includes("chat")) return;
+  if (!localCatalogInstalled(world, "chat")) return;
+  if (migrationApplied(world, LOCAL_CATALOG_CHAT_LOOK_SKIP_PRESENCE_MIGRATION)) return;
+  const look = world.objects.has("$conversational") ? world.ownVerbExact("$conversational", "look") : null;
+  if (look && look.skip_presence_check !== true) {
+    world.addVerb("$conversational", { ...look, skip_presence_check: true, version: look.version + 1 });
+  }
+  markMigrationApplied(world, LOCAL_CATALOG_CHAT_LOOK_SKIP_PRESENCE_MIGRATION);
+}
+
+function runTaskspaceListTasksGuardMigration(world: WooWorld, names: readonly string[]): void {
+  if (!names.includes("taskspace")) return;
+  if (!localCatalogInstalled(world, "taskspace")) return;
+  if (migrationApplied(world, LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION)) return;
+  const listTasks = world.objects.has("$taskspace") ? world.ownVerbExact("$taskspace", "list_tasks") : null;
+  if (!listTasks || !listTasks.source.includes("isa(t, $task)")) {
+    repairCatalogManifest(world, LOCAL_CATALOGS.get("taskspace")!, {
+      actor: "$wiz",
+      allowImplementationHints: true
+    });
+  }
+  markMigrationApplied(world, LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION);
 }
 
 function isLocalCatalogName(name: string): name is LocalCatalogName {
@@ -181,14 +238,14 @@ function markMigrationApplied(world: WooWorld, id: string): void {
   if (!migrations.includes(id)) world.setProp("$system", "applied_migrations", [...migrations, id]);
 }
 
-function runPinboardNotesToPinsMigration(world: WooWorld, names: readonly string[]): void {
+function runPinboardNotesToPinsMigration(world: WooWorld, names: readonly string[], id: string): void {
   if (!names.includes("pinboard")) return;
   if (!localCatalogInstalled(world, "pinboard")) return;
-  if (migrationApplied(world, LOCAL_CATALOG_PINBOARD_NOTES_TO_PINS_MIGRATION)) return;
+  if (migrationApplied(world, id)) return;
   if (!world.objects.has("$pin") || !world.objects.has("$pinboard")) return;
   world.withMutationSavepoint(() => {
     migratePinboardNoteRecords(world);
-    markMigrationApplied(world, LOCAL_CATALOG_PINBOARD_NOTES_TO_PINS_MIGRATION);
+    markMigrationApplied(world, id);
   });
 }
 
@@ -202,6 +259,7 @@ function migratePinboardNoteRecords(world: WooWorld): void {
     for (const raw of staleRecords) {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
       const record = raw as Record<string, WooValue>;
+      if (hasEquivalentMigratedPin(world, board, record)) continue;
       const owner = pinOwner(world, board, record.author);
       const pin = world.createRuntimeObject("$pin", owner, board, {
         progr: "$wiz",
@@ -231,6 +289,28 @@ function migratePinboardNoteRecords(world: WooWorld): void {
     world.deleteProp(board, "next_note_id");
     world.setProp(board, "next_z", nextZ);
   }
+}
+
+function hasEquivalentMigratedPin(world: WooWorld, board: ObjRef, record: Record<string, WooValue>): boolean {
+  const layout = mapValue(world.propOrNull(board, "layout"));
+  const expectedText = noteTextLines(record.text);
+  const expectedColor = typeof record.color === "string" ? record.color : null;
+  for (const id of world.object(board).contents) {
+    if (!world.objects.has(id) || !world.isDescendantOf(id, "$pin")) continue;
+    const text = world.propOrNull(id, "text");
+    if (!Array.isArray(text) || JSON.stringify(text) !== JSON.stringify(expectedText)) continue;
+    if (world.propOrNull(id, "color") !== expectedColor) continue;
+    const entry = layout[id];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const layoutRecord = entry as Record<string, WooValue>;
+    if (
+      numberValue(layoutRecord.x, NaN) === numberValue(record.x, NaN) &&
+      numberValue(layoutRecord.y, NaN) === numberValue(record.y, NaN) &&
+      numberValue(layoutRecord.w, NaN) === numberValue(record.w, NaN) &&
+      numberValue(layoutRecord.h, NaN) === numberValue(record.h, NaN)
+    ) return true;
+  }
+  return false;
 }
 
 function pinboardInstances(world: WooWorld): ObjRef[] {

@@ -534,6 +534,33 @@ describe("local catalogs", () => {
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-pinboard-notes-to-pins");
   });
 
+  it("repairs stale pinboard v0.1 source and leftover note records", () => {
+    const world = createWorld();
+    const session = world.auth("guest:pinboard-v02-repair");
+    const listNotes = world.ownVerbExact("$pinboard", "list_notes")!;
+    const installed = installVerb(world, "$pinboard", "list_notes", `verb :list_notes() rxd {
+  return this.notes;
+}`, listNotes.version);
+    expect(installed.ok).toBe(true);
+    const migrations = (world.getProp("$system", "applied_migrations") as string[])
+      .filter((id) => id !== "2026-05-02-pinboard-v02-repair" && id !== "2026-05-02-pinboard-v02-data-repair");
+    world.setProp("$system", "applied_migrations", migrations);
+    world.setProp("the_pinboard", "layout", {});
+    world.setProp("the_pinboard", "notes", [
+      { id: "n11", text: "hello", color: "yellow", x: 4, y: 8, w: 160, h: 90, z: 7, author: session.actor, updated_by: session.actor, created_at: 1, updated_at: 2 }
+    ]);
+
+    installLocalCatalogs(world, ["pinboard"]);
+
+    expect(world.ownVerbExact("$pinboard", "list_notes")?.source).toContain("contents(this)");
+    const pins = Array.from(world.object("the_pinboard").contents).filter((id) => world.isDescendantOf(id, "$pin"));
+    expect(pins).toHaveLength(1);
+    expect(world.getProp(pins[0], "text")).toEqual(["hello"]);
+    expect(world.propOrNull("the_pinboard", "notes")).toBeNull();
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-pinboard-v02-repair");
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-02-pinboard-v02-data-repair");
+  });
+
   it("seeds the_cockatoo in the chatroom with random-pick squawk", async () => {
     const world = createWorld();
     expect(world.objects.has("$cockatoo")).toBe(true);
@@ -1044,6 +1071,38 @@ describe("local catalogs", () => {
       args: ["Migrated subtask", ""]
     });
     expect(subtask.op).toBe("applied");
+  });
+
+  it("repairs chat room look presence and taskspace list guards on existing installs", async () => {
+    const world = createWorld();
+    const migrations = (world.getProp("$system", "applied_migrations") as string[])
+      .filter((id) => id !== "2026-05-02-chat-look-skip-presence" && id !== "2026-05-02-taskspace-list-tasks-guard");
+    world.setProp("$system", "applied_migrations", migrations);
+
+    const chatLook = world.ownVerbExact("$conversational", "look")!;
+    world.addVerb("$conversational", { ...chatLook, skip_presence_check: false, version: chatLook.version + 1 });
+    const listTasks = world.ownVerbExact("$taskspace", "list_tasks")!;
+    const installed = installVerb(world, "$taskspace", "list_tasks", `verb :list_tasks() rxd {
+  let out = [];
+  for t in contents(this) {
+    if (t.space == this) {
+      out = out + [{ id: t, title: t.title, status: t.status, assignee: t.assignee, parent_task: t.parent_task }];
+    }
+  }
+  return out;
+}`, listTasks.version);
+    expect(installed.ok).toBe(true);
+    world.createObject({ id: "taskspace_fixture", parent: "$thing", owner: "$wiz", location: "the_taskspace" });
+
+    installLocalCatalogs(world, ["chat", "taskspace"]);
+
+    expect(world.ownVerbExact("$conversational", "look")?.skip_presence_check).toBe(true);
+    expect(world.ownVerbExact("$taskspace", "list_tasks")?.source).toContain("isa(t, $task)");
+    const session = world.auth("guest:catalog-repair-look");
+    const deckLook = await world.directCall("deck-look-without-presence", session.actor, "the_deck", "look", []);
+    expect(deckLook.op).toBe("result");
+    const list = await world.directCall("taskspace-list-guarded", session.actor, "the_taskspace", "list_tasks", []);
+    expect(list.op).toBe("result");
   });
 
   it("surfaces :title failures during room look composition", async () => {
